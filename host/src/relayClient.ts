@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import type { MachineIdentity } from "./machineIdentity.js";
+import type { PublicMachineIdentity } from "./machineIdentity.js";
 import { PiRegistry, PiRegistryError } from "./piRegistry.js";
 import type { SessionAccess } from "./types.js";
 
@@ -29,7 +29,7 @@ interface ControlResponse {
 export interface RelayHostClientOptions {
   url: string;
   token: string;
-  machine: MachineIdentity;
+  machine: PublicMachineIdentity;
   registry?: PiRegistry;
   minReconnectMs?: number;
   maxReconnectMs?: number;
@@ -130,7 +130,9 @@ export class RelayHostClient {
         protocolVersion: PROTOCOL_VERSION,
         type: "host.hello",
         machine: {
-          ...this.options.machine,
+          id: this.options.machine.id,
+          name: this.options.machine.name,
+          platform: this.options.machine.platform,
           capabilities: ["sessions.list", "sessions.link"],
         },
       }));
