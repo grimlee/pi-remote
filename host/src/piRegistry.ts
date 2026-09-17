@@ -43,21 +43,54 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function stringOrNull(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new PiRegistryError("invalid_response", `Pi returned an invalid ${field}`);
+  }
+  return value;
 }
 
-function booleanOrFalse(value: unknown): boolean {
-  return value === true;
+function nullableString(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  return requiredString(value, field);
 }
 
-function integerOr(value: unknown, fallback: number): number {
-  return Number.isInteger(value) && typeof value === "number" ? value : fallback;
+function requiredInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new PiRegistryError("invalid_response", `Pi returned an invalid ${field}`);
+  }
+  return value;
+}
+
+function requiredBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new PiRegistryError("invalid_response", `Pi returned an invalid ${field}`);
+  }
+  return value;
 }
 
 function parseAccess(value: unknown): SessionAccess {
   if (value === "view" || value === "control") return value;
   throw new PiRegistryError("invalid_response", "Pi returned an unknown Collab access level");
+}
+
+function parseModel(value: unknown): string | null {
+  if (value === null) return null;
+  const model = asRecord(value);
+  const provider = requiredString(model.provider, "model.provider");
+  const id = requiredString(model.id, "model.id");
+  return `${provider}/${id}`;
+}
+
+function toIsoTime(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new PiRegistryError("invalid_response", "Pi returned an invalid startedAt");
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    throw new PiRegistryError("invalid_response", "Pi returned an invalid startedAt");
+  }
+  return date.toISOString();
 }
 
 export function parseSessionList(json: string): RemoteSession[] {
@@ -76,23 +109,27 @@ export function parseSessionList(json: string): RemoteSession[] {
 
   return hosts.map((hostValue) => {
     const host = asRecord(hostValue);
-    const instanceId = stringOrNull(host.instanceId);
-    const generation = integerOr(host.generation, -1);
-    if (!instanceId || generation < 0) {
-      throw new PiRegistryError("invalid_response", "Pi returned a host without a valid instanceId/generation");
+    const generation = requiredInteger(host.generation, "generation");
+    if (generation < 1) {
+      throw new PiRegistryError("invalid_response", "Pi returned an invalid generation");
+    }
+
+    const participants = requiredInteger(host.participants, "participants");
+    if (participants < 0) {
+      throw new PiRegistryError("invalid_response", "Pi returned an invalid participant count");
     }
 
     return {
-      instanceId,
+      instanceId: requiredString(host.instanceId, "instanceId"),
       generation,
-      sessionId: stringOrNull(host.sessionId),
-      name: stringOrNull(host.sessionName ?? host.name),
-      cwd: stringOrNull(host.cwd),
-      model: stringOrNull(host.model),
-      startedAt: stringOrNull(host.startedAt ?? host.createdAt),
-      participantCount: Math.max(0, integerOr(host.participantCount, 0)),
-      relayConnected: booleanOrFalse(host.connected ?? host.relayConnected),
-      inputRequired: booleanOrFalse(host.inputRequired),
+      sessionId: requiredString(host.sessionId, "sessionId"),
+      name: nullableString(host.sessionName, "sessionName"),
+      cwd: requiredString(host.cwd, "cwd"),
+      model: parseModel(host.model),
+      startedAt: toIsoTime(host.startedAt),
+      participantCount: participants,
+      relayConnected: requiredBoolean(host.relayConnected, "relayConnected"),
+      inputRequired: requiredBoolean(host.inputRequired, "inputRequired"),
       access: parseAccess(host.access),
     };
   });
@@ -107,16 +144,23 @@ export function parseSessionLink(json: string): SessionLink {
   }
 
   const root = asRecord(decoded);
-  const instanceId = stringOrNull(root.instanceId);
-  const generation = integerOr(root.generation, -1);
-  const collabUrl = stringOrNull(root.url ?? root.collabUrl);
+  const generation = requiredInteger(root.generation, "generation");
+  if (generation < 1) {
+    throw new PiRegistryError("invalid_response", "Pi returned an invalid generation");
+  }
 
-  if (!instanceId || generation < 0 || !collabUrl) {
+  const collabUrl = typeof root.url === "string"
+    ? root.url
+    : typeof root.collabUrl === "string"
+      ? root.collabUrl
+      : null;
+
+  if (!collabUrl) {
     throw new PiRegistryError("invalid_response", "Pi returned an incomplete Collab link response");
   }
 
   return {
-    instanceId,
+    instanceId: requiredString(root.instanceId, "instanceId"),
     generation,
     access: parseAccess(root.access),
     collabUrl,
@@ -133,7 +177,9 @@ export class PiRegistry {
 
   async createLink(instanceId: string, generation: number, access: SessionAccess): Promise<SessionLink> {
     if (!instanceId) throw new TypeError("instanceId is required");
-    if (!Number.isInteger(generation) || generation < 0) throw new TypeError("generation must be a non-negative integer");
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new TypeError("generation must be a positive integer");
+    }
 
     const args = ["collab", "link", instanceId, "--json"];
     if (access === "view") args.push("--view");
