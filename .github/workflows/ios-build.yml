@@ -17,9 +17,9 @@ permissions:
 
 jobs:
   build:
-    name: Build Pi Remote (Simulator)
+    name: Build Pi Remote
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -42,7 +42,7 @@ jobs:
         working-directory: ios
         run: |
           set -o pipefail
-          rm -rf build
+          rm -rf build-simulator
           xcodebuild \
             -project PiRemote.xcodeproj \
             -scheme PiRemote \
@@ -50,18 +50,44 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            CONFIGURATION_BUILD_DIR="$PWD/build" \
-            build | tee xcodebuild.log
+            CONFIGURATION_BUILD_DIR="$PWD/build-simulator" \
+            build | tee xcodebuild-simulator.log
 
       - name: Package simulator app
-        if: success()
         working-directory: ios
         run: |
-          test -d build/PiRemote.app
-          ditto -c -k --sequesterRsrc --keepParent build/PiRemote.app PiRemote-Simulator.zip
+          test -d build-simulator/PiRemote.app
+          ditto -c -k --sequesterRsrc --keepParent build-simulator/PiRemote.app PiRemote-Simulator.zip
+
+      - name: Build unsigned device app for sideloading
+        working-directory: ios
+        run: |
+          set -o pipefail
+          rm -rf build-device
+          xcodebuild \
+            -project PiRemote.xcodeproj \
+            -scheme PiRemote \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            CONFIGURATION_BUILD_DIR="$PWD/build-device" \
+            build | tee xcodebuild-device.log
+
+      - name: Package sideload IPA
+        working-directory: ios
+        run: |
+          test -d build-device/PiRemote.app
+          rm -rf Payload PiRemote-Sideload.ipa
+          mkdir Payload
+          ditto build-device/PiRemote.app Payload/PiRemote.app
+          zip -qry PiRemote-Sideload.ipa Payload
+          rm -rf Payload
+          test -s PiRemote-Sideload.ipa
 
       - name: Upload simulator app
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: PiRemote-Simulator
@@ -69,11 +95,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build log on failure
+      - name: Upload sideload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiRemote-Sideload
+          path: ios/PiRemote-Sideload.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-build-log
-          path: ios/xcodebuild.log
+          name: ios-build-logs
+          path: |
+            ios/xcodebuild-simulator.log
+            ios/xcodebuild-device.log
           if-no-files-found: ignore
           retention-days: 7
