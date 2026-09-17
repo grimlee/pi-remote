@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import {
   isClientHello,
   isControlRequest,
@@ -24,7 +24,7 @@ const router = new RelayRouter();
 function peer(ws: WebSocket): RelayPeer {
   return {
     send(text) {
-      if (ws.readyState === ws.OPEN) ws.send(text);
+      if (ws.readyState === WebSocket.OPEN) ws.send(text);
     },
     close(code, reason) {
       ws.close(code, reason);
@@ -111,7 +111,7 @@ server.on("upgrade", (req, socket, head) => {
 
 const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
-    if (ws.readyState === ws.OPEN) ws.ping();
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
   }
 }, 25_000);
 heartbeat.unref();
