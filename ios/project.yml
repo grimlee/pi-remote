@@ -1,0 +1,25 @@
+name: PiRemote
+options:
+  bundleIdPrefix: top.grimlee
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+targets:
+  PiRemote:
+    type: application
+    platform: iOS
+    sources:
+      - PiRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.grimlee.piremote
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Pi Remote
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1"
+    scheme:
+      testTargets: []
