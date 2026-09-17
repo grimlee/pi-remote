@@ -73,7 +73,7 @@ export function isProtocolVersion(value: unknown): value is 0 {
   return value === PROTOCOL_VERSION;
 }
 
-export function isControlRequest(value: Record<string, unknown>): value is unknown as ControlRequest {
+export function isControlRequest(value: Record<string, unknown>): value is Record<string, unknown> & ControlRequest {
   return value.type === "control.request"
     && isProtocolVersion(value.protocolVersion)
     && typeof value.requestId === "string"
@@ -85,7 +85,7 @@ export function isControlRequest(value: Record<string, unknown>): value is unkno
     && !Array.isArray(value.payload);
 }
 
-export function isControlResponse(value: Record<string, unknown>): value is unknown as ControlResponse {
+export function isControlResponse(value: Record<string, unknown>): value is Record<string, unknown> & ControlResponse {
   return value.type === "control.response"
     && isProtocolVersion(value.protocolVersion)
     && typeof value.requestId === "string"
@@ -95,7 +95,7 @@ export function isControlResponse(value: Record<string, unknown>): value is unkn
     && typeof value.ok === "boolean";
 }
 
-export function isHostHello(value: Record<string, unknown>): value is unknown as HostHello {
+export function isHostHello(value: Record<string, unknown>): value is Record<string, unknown> & HostHello {
   if (value.type !== "host.hello" || !isProtocolVersion(value.protocolVersion)) return false;
   const machine = value.machine;
   if (typeof machine !== "object" || machine === null || Array.isArray(machine)) return false;
@@ -109,7 +109,7 @@ export function isHostHello(value: Record<string, unknown>): value is unknown as
     && record.capabilities.every(item => typeof item === "string");
 }
 
-export function isClientHello(value: Record<string, unknown>): value is unknown as ClientHello {
+export function isClientHello(value: Record<string, unknown>): value is Record<string, unknown> & ClientHello {
   if (value.type !== "client.hello" || !isProtocolVersion(value.protocolVersion)) return false;
   const device = value.device;
   if (typeof device !== "object" || device === null || Array.isArray(device)) return false;
