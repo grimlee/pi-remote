@@ -80,8 +80,9 @@ function isMachineIdentity(value: unknown): value is MachineIdentity {
 }
 
 function generatePrivateKey(curve: OkpCurve): StoredOkpPrivateKey {
-  const algorithm = curve === "Ed25519" ? "ed25519" : "x25519";
-  const { privateKey } = generateKeyPairSync(algorithm);
+  const privateKey = curve === "Ed25519"
+    ? generateKeyPairSync("ed25519").privateKey
+    : generateKeyPairSync("x25519").privateKey;
   const jwk = privateKey.export({ format: "jwk" });
 
   if (jwk.kty !== "OKP" || jwk.crv !== curve || !jwk.x || !jwk.d) {
