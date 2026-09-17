@@ -3,11 +3,11 @@ export type SessionAccess = "view" | "control";
 export interface RemoteSession {
   instanceId: string;
   generation: number;
-  sessionId: string | null;
+  sessionId: string;
   name: string | null;
-  cwd: string | null;
+  cwd: string;
   model: string | null;
-  startedAt: string | null;
+  startedAt: string;
   participantCount: number;
   relayConnected: boolean;
   inputRequired: boolean;
