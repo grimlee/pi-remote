@@ -1,14 +1,22 @@
-# Pi Remote Control Plane v0
+# Pi Remote Relay / Control Plane v0
 
-This protocol is intentionally narrow. It discovers and authorizes access to Pi sessions; it does not carry transcript content.
+This protocol controls machines and session discovery. It intentionally does **not** carry Pi transcript/tool streaming.
 
 ## Transport
 
-MVP: HTTPS JSON over an authenticated private ingress. A future long-lived outbound relay may replace this without changing the resource model.
+Primary transport: authenticated WebSocket connections to Pi Remote Relay.
+
+Both sides initiate outbound connections:
+
+```text
+pi-remote-host -> relay <- iOS
+```
+
+Development/fallback transports may map the same resource operations onto direct HTTPS, LAN, Tailscale, or Cloudflare, but those are not the canonical product topology.
 
 ## Versioning
 
-Every response includes:
+Every frame carries:
 
 ```json
 { "protocolVersion": 0 }
@@ -16,32 +24,97 @@ Every response includes:
 
 Breaking changes increment the version.
 
-## Resources
-
-### GET /v0/host
-
-Returns host identity and capability flags.
+## Common envelope
 
 ```json
 {
   "protocolVersion": 0,
-  "host": {
-    "id": "stable-device-id",
-    "name": "omarchy-desktop",
+  "type": "control.request",
+  "requestId": "0199...",
+  "machineId": "machine_...",
+  "payload": {}
+}
+```
+
+`requestId` correlates exactly one response. Clients must treat duplicate responses idempotently.
+
+## Connection roles
+
+### Host hello
+
+After authentication, a host announces its stable machine identity and capabilities:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "host.hello",
+  "machine": {
+    "id": "machine_...",
+    "name": "omarchy",
     "platform": "linux",
-    "online": true,
-    "capabilities": ["sessions.list", "sessions.link"]
+    "capabilities": [
+      "sessions.list",
+      "sessions.link"
+    ]
   }
 }
 ```
 
-### GET /v0/sessions
+### Client hello
 
-Returns the active local Collab hosts visible through Pi's local registry.
+A mobile client announces its authenticated device identity:
 
 ```json
 {
   "protocolVersion": 0,
+  "type": "client.hello",
+  "device": {
+    "id": "device_...",
+    "name": "iPhone"
+  }
+}
+```
+
+Production authentication/pairing is specified separately. A development bootstrap token may be used before pairing is implemented.
+
+## Presence
+
+The relay emits machine presence changes to authorized clients:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "machine.presence",
+  "machineId": "machine_...",
+  "online": true
+}
+```
+
+Online means the relay currently has an authenticated host connection. It does not imply a Pi session is running.
+
+## Operations
+
+### sessions.list
+
+Client request:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "control.request",
+  "requestId": "req_1",
+  "machineId": "machine_...",
+  "payload": {
+    "op": "sessions.list"
+  }
+}
+```
+
+Host response payload:
+
+```json
+{
+  "op": "sessions.list",
   "sessions": [
     {
       "instanceId": "...",
@@ -51,7 +124,7 @@ Returns the active local Collab hosts visible through Pi's local registry.
       "cwd": "/home/user/project",
       "model": "provider/model",
       "startedAt": "2026-09-17T12:00:00Z",
-      "participantCount": 0,
+      "participantCount": 1,
       "relayConnected": true,
       "inputRequired": false,
       "access": "control"
@@ -60,26 +133,32 @@ Returns the active local Collab hosts visible through Pi's local registry.
 }
 ```
 
-Unknown upstream fields are ignored. Missing optional fields are represented as null or omitted according to the concrete implementation, but clients must not infer defaults for security-sensitive fields.
+### sessions.link
 
-### POST /v0/sessions/{instanceId}/link
-
-Request body:
-
-```json
-{
-  "generation": 3,
-  "access": "control"
-}
-```
-
-The generation is mandatory. The host must refuse the request if the process has already replaced that Collab room.
-
-Successful response:
+Client request:
 
 ```json
 {
   "protocolVersion": 0,
+  "type": "control.request",
+  "requestId": "req_2",
+  "machineId": "machine_...",
+  "payload": {
+    "op": "sessions.link",
+    "instanceId": "...",
+    "generation": 3,
+    "access": "control"
+  }
+}
+```
+
+The generation is mandatory.
+
+Successful host payload:
+
+```json
+{
+  "op": "sessions.link",
   "instanceId": "...",
   "generation": 3,
   "access": "control",
@@ -87,15 +166,34 @@ Successful response:
 }
 ```
 
-`collabUrl` is secret material. Clients must not log it or send it to telemetry.
+`collabUrl` is capability-bearing secret material.
 
-## Errors
+Development v0 may route it through a trusted relay process. The production pairing design must evolve this toward device-bound encrypted delivery so relay storage/logging never sees reusable plaintext capability material.
 
-Errors use a stable machine code plus human-safe message:
+## Response envelope
+
+Success:
 
 ```json
 {
   "protocolVersion": 0,
+  "type": "control.response",
+  "requestId": "req_2",
+  "machineId": "machine_...",
+  "ok": true,
+  "payload": {}
+}
+```
+
+Failure:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "control.response",
+  "requestId": "req_2",
+  "machineId": "machine_...",
+  "ok": false,
   "error": {
     "code": "stale_generation",
     "message": "The selected session changed. Refresh and try again."
@@ -103,29 +201,45 @@ Errors use a stable machine code plus human-safe message:
 }
 ```
 
-Initial codes:
+Initial error codes:
 
 - `unauthorized`
 - `forbidden`
+- `machine_offline`
 - `not_found`
 - `stale_generation`
 - `host_registry_unavailable`
 - `pi_command_failed`
 - `unsupported_access`
+- `invalid_request`
+- `timeout`
 - `internal_error`
 
-## Authentication
+## Heartbeat
 
-Authentication is deliberately specified separately from resource semantics. MVP implementation must satisfy `docs/security.md` and bind authorization to a paired device identity. Resource handlers must never accept unauthenticated requests merely because the service is behind a private tunnel.
+WebSocket ping/pong or an equivalent heartbeat keeps presence fresh. Presence must expire promptly when the authenticated host connection closes or misses its lease.
+
+Pi work must continue regardless of relay connectivity.
+
+## Security requirements
+
+- Do not accept unauthenticated host or client connections.
+- Do not log Collab URLs, room keys, write tokens, prompts, tool output, provider credentials, or environment variables.
+- Authorize clients per machine identity.
+- Bind link requests to the exact observed generation.
+- Pairing/revocation must not require rotating Pi provider credentials.
+- A compromised relay must not imply access to provider credentials or host filesystem contents.
+- Production capability delivery should become end-to-end protected between host and paired device.
 
 ## Non-goals
 
 This protocol does not define:
 
-- chat/transcript frames
-- tool-call frames
+- transcript frames
+- assistant token streaming
+- tool-call/result frames
 - subagent frames
-- raw shell execution
-- filesystem operations
+- arbitrary shell execution
+- generic filesystem operations
 
-Those belong to Pi Collab or future narrowly scoped host resources.
+Those belong to Pi Collab or future narrowly scoped host operations.
