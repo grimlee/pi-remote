@@ -59,7 +59,7 @@ actor RelayClient {
         let online: Bool
     }
 
-    private struct ControlRequest<Payload: Encodable>: Encodable {
+    private struct ControlRequest<Payload: Encodable & Sendable>: Encodable, Sendable {
         let protocolVersion = 0
         let type = "control.request"
         let requestId: String
@@ -67,11 +67,11 @@ actor RelayClient {
         let payload: Payload
     }
 
-    private struct SessionsListPayload: Encodable {
+    private struct SessionsListPayload: Encodable, Sendable {
         let op = "sessions.list"
     }
 
-    private struct SessionsLinkPayload: Encodable {
+    private struct SessionsLinkPayload: Encodable, Sendable {
         let op = "sessions.link"
         let instanceId: String
         let generation: Int
