@@ -35,12 +35,12 @@ actor RelayClient {
         let type: String
     }
 
-    private struct ClientHello: Encodable {
+    private struct ClientHello: Encodable, Sendable {
         let protocolVersion = 0
         let type = "client.hello"
         let device: Device
 
-        struct Device: Encodable {
+        struct Device: Encodable, Sendable {
             let id: String
             let name: String
         }
@@ -221,7 +221,7 @@ actor RelayClient {
         }
     }
 
-    private func send<T: Encodable>(_ frame: T) async throws {
+    private func send<T: Encodable & Sendable>(_ frame: T) async throws {
         guard let socket else { throw RelayError.notConnected }
         let data = try encoder.encode(frame)
         try await socket.send(.data(data))
