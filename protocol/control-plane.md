@@ -77,6 +77,26 @@ A mobile client announces its authenticated device identity:
 
 Production authentication/pairing is specified separately. A development bootstrap token may be used before pairing is implemented.
 
+After a client hello is accepted, the relay sends the currently online authorized machines:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "machines.snapshot",
+  "machines": [
+    {
+      "id": "machine_...",
+      "name": "omarchy",
+      "platform": "linux",
+      "capabilities": ["sessions.list", "sessions.link"],
+      "online": true
+    }
+  ]
+}
+```
+
+The snapshot is relay state, not a promise that any Pi session exists.
+
 ## Presence
 
 The relay emits machine presence changes to authorized clients:
