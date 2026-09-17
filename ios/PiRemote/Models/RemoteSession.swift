@@ -1,7 +1,7 @@
 import Foundation
 
-struct RemoteSession: Identifiable, Codable, Hashable {
-    enum Access: String, Codable {
+struct RemoteSession: Identifiable, Codable, Hashable, Sendable {
+    enum Access: String, Codable, Sendable {
         case view
         case control
     }
