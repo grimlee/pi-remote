@@ -7,11 +7,16 @@
     "node": ">=22"
   },
   "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test src/*.test.ts"
   },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
   "devDependencies": {
     "@types/node": "^25.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^6.0.0"
   }
 }
