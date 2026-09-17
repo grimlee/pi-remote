@@ -1,0 +1,50 @@
+name: Control Plane CI
+
+on:
+  push:
+    paths:
+      - "host/**"
+      - "relay/**"
+      - "protocol/**"
+      - ".github/workflows/control-plane-ci.yml"
+  pull_request:
+    paths:
+      - "host/**"
+      - "relay/**"
+      - "protocol/**"
+      - ".github/workflows/control-plane-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: Host typecheck and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  relay:
+    name: Relay typecheck and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test

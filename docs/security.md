@@ -2,97 +2,171 @@
 
 ## Trust boundaries
 
-Pi Remote separates device control from session content.
+Pi Remote separates the machine control plane from Pi session content.
 
 ### Session content
 
-Pi Collab remains responsible for session confidentiality and control authorization. The remote client must preserve Collab's existing end-to-end encrypted transport semantics and must never send room keys or write tokens to analytics, logs, crash reports, URLs handled by third-party SDKs, or the device control plane.
+Pi Collab remains responsible for session confidentiality and control authorization. The remote client must preserve Collab's existing end-to-end encrypted transport semantics.
 
-### Device control
+Normal transcript, tool output, prompts, thinking, and subagent traffic must not be proxied through Pi Remote Relay.
 
-`pi-remote-host` exposes only a narrow authenticated control API. Pairing grants a device identity; it does not grant arbitrary command execution.
+### Machine control
 
-## Secrets
+`pi-remote-host` exposes only narrow machine/session operations through an outbound connection to Pi Remote Relay.
 
-Store on iOS Keychain:
+The control plane may:
 
-- paired-host device credential
-- host public identity/fingerprint as needed
-- Collab room material only for the lifetime/persistence policy required to reconnect
+- announce machine presence
+- enumerate Pi Collab sessions
+- issue a generation-bound Collab capability
+- later start/resume/stop explicitly authorized sessions
 
-Never store secrets in `UserDefaults` or application logs.
-
-Store on host with owner-only permissions:
-
-- host device private key / pairing secret
-- paired-device public identities / revocation metadata
-- push credentials if later enabled
-
-Do not copy Pi provider API keys into Pi Remote.
+It must not become a generic remote shell or arbitrary filesystem API.
 
 ## Network exposure
 
-The Pi agent itself must not listen on a public TCP port for this product.
+The Pi agent and `pi-remote-host` do not require a public inbound port.
 
-Acceptable initial exposure:
+Canonical topology:
 
-- `pi-remote-host` bound to loopback and published through authenticated private ingress, or
-- a future outbound host connection to a relay/control service.
+```text
+pi-remote-host -> authenticated outbound WSS -> Pi Remote Relay <- WSS <- iPhone
+```
 
-The Collab relay sees only what the upstream Collab protocol intentionally exposes and must not receive plaintext transcript content.
+LAN, Tailscale, and Cloudflare Tunnel may exist for development or emergency access, but they are not the trust model and must not weaken application-layer authentication.
 
-## Pairing
+The public relay is an Internet-facing service and must treat every connection as untrusted until authenticated.
 
-MVP pairing should require explicit physical/local approval on the host. A recommended flow:
+## Identities and secrets
 
-1. host creates a short-lived pairing challenge;
-2. host displays QR code containing endpoint, host identity fingerprint, nonce, and ephemeral public material;
-3. iPhone scans it and creates its device keypair;
-4. both sides authenticate the handshake and derive/register the device identity;
-5. host records the paired device;
-6. subsequent control-plane calls use mutually authenticated signed challenges or a short-lived token bound to that device key.
+### iOS
 
-Do not use a permanent bearer token embedded directly in a QR code.
+Store in Keychain:
 
-## Authorization
+- device private key / paired-device credential
+- relay/account credential as appropriate
+- trusted machine identity/fingerprint metadata when needed
+- Collab capability material only for the minimum reconnect lifetime
 
-Start with one role: `owner`.
+Do not store these in `UserDefaults`, analytics, or application logs.
 
-The owner may:
+### Host
 
-- list active Pi sessions
-- obtain a Collab control link for an explicitly selected session generation
-- later start/resume/stop sessions
+Store with owner-only permissions:
 
-Every action must be explicit and auditable. Generating a control link should use the generation observed during discovery so a stale mobile selection cannot silently attach to a replacement session.
+- stable machine private identity
+- pairing state / authorized device public identities
+- short-lived relay credentials
+- push credentials if later enabled
 
-## Logging
+The current development implementation stores only a non-secret stable machine ID under the user's config directory and uses a bootstrap bearer token from the environment. That bootstrap token is **development-only**.
 
-Host logs may contain:
+Never copy provider API keys, SSH keys, browser cookies, MCP credentials, or full environment variables into Pi Remote Relay.
 
-- timestamps
-- device identifier/friendly name
-- action names
-- session instance ID and generation
-- success/failure codes
+## Relay knowledge
 
-Host logs must not contain:
+The relay needs only enough information to route the control plane:
 
-- Collab room keys
+- machine ID/name/platform/capabilities
+- online/offline presence
+- device/account routing identity
+- request IDs and operation names
+- session discovery metadata required by the UI
+
+The relay must not log:
+
+- Collab URLs
+- room keys
 - write tokens
 - prompts or assistant content
+- tool output
 - provider credentials
 - full environment variables
 
+### Collab capability delivery
+
+Development protocol v0 currently allows a `collabUrl` to pass through relay memory as part of a response so the vertical slice can be proven.
+
+This is not the desired production boundary.
+
+Before production use, capability delivery should be encrypted to the paired device so the relay routes opaque ciphertext and cannot reuse the Collab capability.
+
+## Pairing
+
+Production pairing should require explicit local/physical approval on the host.
+
+Recommended shape:
+
+1. host creates a short-lived pairing challenge;
+2. host displays a QR code containing relay identity, machine identity/fingerprint, nonce, and ephemeral public material;
+3. iPhone creates its device keypair and scans the challenge;
+4. pairing messages travel through the relay but are cryptographically bound to the host/device keys;
+5. host explicitly approves and records the device public identity;
+6. subsequent control requests use short-lived authenticated sessions bound to that device identity.
+
+Do not put a permanent bearer credential in the QR code.
+
+The development bootstrap bearer token exists only to bring up the first relay/host/iOS vertical slice and must be removed from the production pairing flow.
+
+## Authorization
+
+Initial role: `owner`.
+
+The owner may:
+
+- observe authorized machine presence
+- list active Pi sessions
+- obtain a Collab control/view link for an explicitly selected session generation
+- later start/resume/stop sessions
+
+Authorization is by machine/device identity, not by possession of an IP address, VPN membership, or knowledge of a relay URL.
+
+Every link request must include the generation observed during discovery. If the host has rotated rooms, it returns `stale_generation`.
+
+## Host authoritative state
+
+Disconnecting the phone or relay does not stop Pi.
+
+After reconnection:
+
+1. mobile re-authenticates to the relay;
+2. refreshes machine presence;
+3. refreshes session metadata;
+4. reconnects through Pi Collab;
+5. accepts the authoritative session snapshot.
+
+No security or correctness property may depend on a mobile socket staying alive.
+
 ## Revocation
 
-The host must support revoking a paired iPhone without rotating Pi credentials. Revocation invalidates future control-plane authentication and any host-issued reconnect credentials. Existing Collab links should be treated according to upstream Collab semantics; MVP can require stopping/rotating a room when immediate session revocation is needed.
+A paired device must be revocable without rotating Pi provider credentials.
+
+Revocation should invalidate:
+
+- future relay/control-plane authorization for that device;
+- device-bound session/control credentials;
+- future Collab capability issuance.
+
+An already-issued Collab capability follows upstream Pi Collab semantics. Immediate revocation may require rotating/stopping that Collab room.
+
+## Logging
+
+Allowed operational logs should be limited to data such as:
+
+- timestamps
+- opaque machine/device IDs
+- operation name
+- session instance ID and generation where required
+- success/failure code
+- connection lifecycle events
+
+Never log secret capability values or session content.
 
 ## Threats explicitly out of scope for MVP
 
-- a fully compromised host computer
-- a fully compromised/jailbroken iPhone with Keychain extraction capability
+- fully compromised host computer
+- fully compromised/jailbroken iPhone with key extraction capability
 - malicious Pi tools already authorized by the user
-- anonymity of relay traffic metadata
+- relay traffic metadata anonymity
 
-These do not justify weakening transport or credential handling, but they are not solvable by the remote client itself.
+These boundaries do not justify weakening transport, authentication, or secret handling.
