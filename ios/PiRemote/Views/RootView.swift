@@ -15,24 +15,22 @@ struct RootView: View {
                 }
         }
         .toolbar {
-            if case .unpaired = store.connectionState {
-                EmptyView()
-            } else {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button(
-                            "Forget Host",
-                            systemImage: "trash",
-                            role: .destructive
-                        ) {
-                            Task {
-                                await store.forgetHost()
-                            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button(
+                        "Forget Host",
+                        systemImage: "trash",
+                        role: .destructive
+                    ) {
+                        Task {
+                            await store.forgetHost()
                         }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
                     }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
+                .disabled(store.connectionState == .unpaired)
+                .opacity(store.connectionState == .unpaired ? 0 : 1)
             }
         }
         .task {
