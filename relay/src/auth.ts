@@ -112,3 +112,24 @@ export function verifyRelayAuthResponse(
     return false;
   }
 }
+
+
+export function isRelayAuthResponse(value: Record<string, unknown>): value is Record<string, unknown> & RelayAuthResponse {
+  if (value.protocolVersion !== 0
+    || value.type !== "auth.response"
+    || typeof value.challengeId !== "string"
+    || typeof value.signature !== "string") {
+    return false;
+  }
+
+  const principal = value.principal;
+  if (typeof principal !== "object" || principal === null || Array.isArray(principal)) {
+    return false;
+  }
+  const record = principal as Record<string, unknown>;
+  return (record.kind === "machine" || record.kind === "device")
+    && typeof record.id === "string"
+    && record.id.length > 0
+    && typeof record.signingPublicKey === "string"
+    && record.signingPublicKey.length >= 40;
+}
