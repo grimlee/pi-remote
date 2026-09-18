@@ -34,6 +34,19 @@ actor MachineGrantStore {
         }
     }
 
+    func grant(
+        machineId: String,
+        signingPublicKey: String,
+        keyAgreementPublicKey: String,
+        for device: DevicePublicIdentity
+    ) throws -> MachineGrant? {
+        try all(for: device).first { grant in
+            grant.machine.id == machineId
+                && grant.machine.signingPublicKey == signingPublicKey
+                && grant.machine.keyAgreementPublicKey == keyAgreementPublicKey
+        }
+    }
+
     func save(_ grant: MachineGrant, for device: DevicePublicIdentity) throws {
         guard MachineGrantCrypto.isValid(grant),
               grant.device.id == device.id,
