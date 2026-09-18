@@ -267,7 +267,7 @@ final class AppStore {
         do {
             if let machineId {
                 try await grantStore.remove(machineId: machineId)
-                try await conversationCache.remove(machineId: machineId)
+                try? await conversationCache.remove(machineId: machineId)
             }
             try await profileStore.clear()
 
@@ -406,7 +406,7 @@ final class AppStore {
 
             lastCachedMessageRevision = snapshot.messageRevision
             let messages = snapshot.messages
-            Task { [conversationCache] in
+            Task { [conversationCache = self.conversationCache] in
                 try? await conversationCache.save(
                     machineId: machine.id,
                     sessionId: session.sessionId,
