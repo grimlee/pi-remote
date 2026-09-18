@@ -138,15 +138,24 @@ func nativeCollabGuestCompletesRealWebSocketRoundTrip() async throws {
 
     await client.close()
 
-    try await Task.sleep(nanoseconds: 100_000_000)
+    try await eventually(
+        attempts: 100,
+        sleepNanoseconds: 20_000_000
+    ) {
+        !process.isRunning
+    }
 
-    if !process.isRunning {
-        #expect(process.terminationStatus == 0)
-    } else {
+    if process.terminationStatus != 0 {
         let errorText = String(
-            data: stderr.fileHandleForReading.availableData,
+            data: stderr.fileHandleForReading.readDataToEndOfFile(),
             encoding: .utf8
         ) ?? ""
-        #expect(errorText.isEmpty)
+        Issue.record(
+            "mock Collab relay exited with status "
+                + String(process.terminationStatus)
+                + ": "
+                + errorText
+        )
     }
+    #expect(process.terminationStatus == 0)
 }
