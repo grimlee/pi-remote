@@ -6,12 +6,14 @@ on:
       - "host/**"
       - "relay/**"
       - "protocol/**"
+      - "scripts/**"
       - ".github/workflows/control-plane-ci.yml"
   pull_request:
     paths:
       - "host/**"
       - "relay/**"
       - "protocol/**"
+      - "scripts/**"
       - ".github/workflows/control-plane-ci.yml"
   workflow_dispatch:
 
@@ -33,6 +35,7 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
 
   relay:
     name: Relay typecheck and tests
@@ -48,3 +51,12 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
+
+  deployment:
+    name: Deployment script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n scripts/install-user-services.sh
+      - run: bash -n scripts/preflight-real-device.sh

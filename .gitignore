@@ -13,6 +13,7 @@ xcuserdata/
 # Node / Bun
 node_modules/
 .bun/
+dist/
 
 # Local environment and credentials
 .env

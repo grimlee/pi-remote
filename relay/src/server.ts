@@ -20,6 +20,7 @@ import {
 import { RelayRouter, type RelayPeer } from "./router.js";
 
 const port = Number(process.env.PORT ?? "8780");
+const bindHost = process.env.PI_REMOTE_RELAY_BIND ?? "127.0.0.1";
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
@@ -189,6 +190,6 @@ const heartbeat = setInterval(() => {
 }, 25_000);
 heartbeat.unref();
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`Pi Remote Relay listening on :${port}`);
+server.listen(port, bindHost, () => {
+  console.log(`Pi Remote Relay listening on ${bindHost}:${port}`);
 });

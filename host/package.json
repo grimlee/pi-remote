@@ -7,10 +7,13 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts",
-    "pair": "tsx src/pair-cli.ts"
+    "pair": "node dist/pair-cli.js",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "dev": "tsx src/index.ts",
+    "pair:dev": "tsx src/pair-cli.ts"
   },
   "dependencies": {
     "ws": "^8.18.3",

@@ -63,9 +63,24 @@ struct RootView: View {
                     }
                 }
             } else {
-                List(store.sessions) { session in
-                    NavigationLink(value: session) {
-                        SessionRow(session: session)
+                List {
+                    Section {
+                        ForEach(store.sessions) { session in
+                            NavigationLink(value: session) {
+                                SessionRow(session: session)
+                            }
+                        }
+                    }
+
+                    Section {
+                        Button(
+                            "Forget Host",
+                            role: .destructive
+                        ) {
+                            Task {
+                                await store.forgetHost()
+                            }
+                        }
                     }
                 }
                 .refreshable {
@@ -91,6 +106,15 @@ struct RootView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+
+                Button(
+                    "Forget Host",
+                    role: .destructive
+                ) {
+                    Task {
+                        await store.forgetHost()
+                    }
+                }
             }
         }
     }
