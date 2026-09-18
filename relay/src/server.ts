@@ -13,6 +13,8 @@ import {
   isControlResponse,
   isHostAuthorizationSnapshot,
   isHostHello,
+  isPairingRequest,
+  isPairingResponse,
   parseJsonObject,
 } from "./protocol.js";
 import { RelayRouter, type RelayPeer } from "./router.js";
@@ -146,6 +148,16 @@ server.on("upgrade", (req, socket, head) => {
         if (!router.setClientAuthorizations(relayPeer, value.grants)) {
           ws.close(1008, "invalid client authorizations");
         }
+        return;
+      }
+
+      if (role === "host" && isPairingResponse(value)) {
+        router.routePairingResponse(relayPeer, value);
+        return;
+      }
+
+      if (role === "client" && isPairingRequest(value)) {
+        router.routePairingRequest(relayPeer, value);
         return;
       }
 

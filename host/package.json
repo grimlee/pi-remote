@@ -9,7 +9,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts"
+    "test": "tsx --test src/*.test.ts",
+    "pair": "tsx src/pair-cli.ts"
   },
   "dependencies": {
     "ws": "^8.18.3",

@@ -13,6 +13,7 @@ actor RelayClient {
         case authenticationFailed
         case missingMachineGrant
         case invalidCapability
+        case invalidPairingAcceptance
         case remote(code: String, message: String)
 
         var errorDescription: String? {
@@ -27,6 +28,8 @@ actor RelayClient {
                 return "No trusted MachineGrant matches the selected host identity."
             case .invalidCapability:
                 return "The encrypted Pi Collab capability did not match the requested session."
+            case .invalidPairingAcceptance:
+                return "The host pairing acceptance could not be verified."
             case let .remote(_, message):
                 return message
             }
@@ -72,6 +75,46 @@ actor RelayClient {
         let protocolVersion = 0
         let type = "client.authorizations"
         let grants: [MachineGrant]
+    }
+
+
+    private struct PairingRequestDevice: Encodable, Sendable {
+        let id: String
+        let name: String
+        let signingPublicKey: String
+        let keyAgreementPublicKey: String
+    }
+
+    private struct PairingRequestBody: Encodable, Sendable {
+        let version = 1
+        let pairingId: String
+        let machineId: String
+        let device: PairingRequestDevice
+        let proof: String
+        let deviceSignature: String
+    }
+
+    private struct PairingTarget: Encodable, Sendable {
+        let id: String
+        let signingPublicKey: String
+    }
+
+    private struct PairingRequestFrame: Encodable, Sendable {
+        let protocolVersion = 0
+        let type = "pairing.request"
+        let requestId: String
+        let machine: PairingTarget
+        let pairing: PairingRequestBody
+    }
+
+    private struct PairingResponseFrame: Decodable {
+        let protocolVersion: Int
+        let type: String
+        let requestId: String
+        let machineId: String
+        let ok: Bool
+        let acceptance: PairingAcceptance?
+        let error: RemoteError?
     }
 
     private struct MachinesSnapshotFrame: Decodable {
@@ -151,6 +194,12 @@ actor RelayClient {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private struct PendingPairing {
+        let continuation: CheckedContinuation<PairingAcceptance, Error>
+        let invitation: PairingInvitation
+        let device: DevicePublicIdentity
+    }
+
     private struct PendingSessionLink {
         let continuation: CheckedContinuation<SessionLink, Error>
         let machine: RemoteMachine
@@ -161,6 +210,7 @@ actor RelayClient {
     }
 
     private var authenticatedDevice: DevicePublicIdentity?
+    private var pendingPairings: [String: PendingPairing] = [:]
     private var pendingSessionLists: [String: CheckedContinuation<[RemoteSession], Error>] = [:]
     private var pendingSessionLinks: [String: PendingSessionLink] = [:]
 
@@ -255,6 +305,11 @@ actor RelayClient {
         authenticatedDevice = nil
 
         let error = CancellationError()
+        for pending in pendingPairings.values {
+            pending.continuation.resume(throwing: error)
+        }
+        pendingPairings.removeAll()
+
         for continuation in pendingSessionLists.values {
             continuation.resume(throwing: error)
         }
@@ -264,6 +319,65 @@ actor RelayClient {
             pending.continuation.resume(throwing: error)
         }
         pendingSessionLinks.removeAll()
+    }
+
+
+    func pair(using bootstrap: PairingBootstrap) async throws -> PairingAcceptance {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
+        let invitation = bootstrap.invitation
+        let message = PairingCrypto.requestMessage(
+            pairingId: invitation.pairingId,
+            machineId: invitation.machine.id,
+            device: device
+        )
+        let proof = try PairingCrypto.proof(
+            secretBase64URL: invitation.secret,
+            message: message
+        )
+        let deviceSignature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+        let requestId = UUID().uuidString
+
+        let request = PairingRequestFrame(
+            requestId: requestId,
+            machine: PairingTarget(
+                id: invitation.machine.id,
+                signingPublicKey: invitation.machine.signingPublicKey
+            ),
+            pairing: PairingRequestBody(
+                pairingId: invitation.pairingId,
+                machineId: invitation.machine.id,
+                device: PairingRequestDevice(
+                    id: device.id,
+                    name: device.name,
+                    signingPublicKey: device.signingPublicKey,
+                    keyAgreementPublicKey: device.keyAgreementPublicKey
+                ),
+                proof: proof,
+                deviceSignature: deviceSignature
+            )
+        )
+
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingPairings[requestId] = PendingPairing(
+                continuation: continuation,
+                invitation: invitation,
+                device: device
+            )
+            Task { [weak self] in
+                do {
+                    try await self?.send(request)
+                } catch {
+                    await self?.failPairing(
+                        requestId: requestId,
+                        error: error
+                    )
+                }
+            }
+        }
     }
 
     func listSessions(machineId: String) async throws -> [RemoteSession] {
@@ -414,6 +528,9 @@ actor RelayClient {
         guard header.protocolVersion == 0 else { throw RelayError.invalidFrame }
 
         switch header.type {
+        case "pairing.response":
+            try await handlePairingResponse(data)
+
         case "machines.snapshot":
             let frame = try decoder.decode(MachinesSnapshotFrame.self, from: data)
             await onEvent(.machinesSnapshot(frame.machines))
@@ -427,6 +544,63 @@ actor RelayClient {
 
         default:
             break
+        }
+    }
+
+
+    private func handlePairingResponse(_ data: Data) async throws {
+        struct ResponseHeader: Decodable {
+            let requestId: String
+        }
+
+        let header = try decoder.decode(ResponseHeader.self, from: data)
+        guard let pending = pendingPairings.removeValue(
+            forKey: header.requestId
+        ) else {
+            return
+        }
+
+        let response = try decoder.decode(
+            PairingResponseFrame.self,
+            from: data
+        )
+        guard response.protocolVersion == 0,
+              response.type == "pairing.response",
+              response.ok,
+              response.machineId == pending.invitation.machine.id,
+              let acceptance = response.acceptance
+        else {
+            let remote = response.error
+            pending.continuation.resume(
+                throwing: RelayError.remote(
+                    code: remote?.code ?? "pairing_failed",
+                    message: remote?.message ?? "The host rejected pairing."
+                )
+            )
+            return
+        }
+
+        guard PairingAcceptanceCrypto.verify(
+            acceptance,
+            invitation: pending.invitation,
+            device: pending.device
+        ) else {
+            pending.continuation.resume(
+                throwing: RelayError.invalidPairingAcceptance
+            )
+            return
+        }
+
+        do {
+            try await grantStore.save(
+                acceptance.grant,
+                for: pending.device
+            )
+            let grants = try await grantStore.all(for: pending.device)
+            try await send(ClientAuthorizations(grants: grants))
+            pending.continuation.resume(returning: acceptance)
+        } catch {
+            pending.continuation.resume(throwing: error)
         }
     }
 
@@ -509,6 +683,12 @@ actor RelayClient {
         }
     }
 
+    private func failPairing(requestId: String, error: Error) {
+        pendingPairings.removeValue(forKey: requestId)?
+            .continuation
+            .resume(throwing: error)
+    }
+
     private func failSessionList(requestId: String, error: Error) {
         pendingSessionLists.removeValue(forKey: requestId)?.resume(throwing: error)
     }
@@ -520,6 +700,11 @@ actor RelayClient {
     }
 
     private func failAllPending(_ error: Error) {
+        for pending in pendingPairings.values {
+            pending.continuation.resume(throwing: error)
+        }
+        pendingPairings.removeAll()
+
         for continuation in pendingSessionLists.values {
             continuation.resume(throwing: error)
         }

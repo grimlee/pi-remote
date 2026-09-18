@@ -6,6 +6,7 @@ import {
   publicMachineIdentity,
   type MachineIdentity,
 } from "./machineIdentity.js";
+import { PairingError, type PairingRequest, type PairingService } from "./pairing.js";
 import { PiRegistry, PiRegistryError } from "./piRegistry.js";
 import {
   signHostRelayChallenge,
@@ -14,6 +15,30 @@ import {
 import type { SessionAccess } from "./types.js";
 
 const PROTOCOL_VERSION = 0;
+
+interface PairingRelayRequest {
+  protocolVersion: 0;
+  type: "pairing.request";
+  requestId: string;
+  machine: {
+    id: string;
+    signingPublicKey: string;
+  };
+  pairing: PairingRequest;
+}
+
+interface PairingRelayResponse {
+  protocolVersion: 0;
+  type: "pairing.response";
+  requestId: string;
+  machineId: string;
+  ok: boolean;
+  acceptance?: Record<string, unknown>;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
 
 interface ControlResponse {
   protocolVersion: 0;
@@ -32,6 +57,7 @@ export interface RelayHostClientOptions {
   url: string;
   machine: MachineIdentity;
   devices: AuthorizedDeviceStore;
+  pairing?: PairingService;
   registry?: PiRegistry;
   minReconnectMs?: number;
   maxReconnectMs?: number;
@@ -41,6 +67,58 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+
+function parsePairingRequest(
+  value: Record<string, unknown>,
+): PairingRelayRequest | null {
+  if (value.protocolVersion !== 0
+    || value.type !== "pairing.request"
+    || typeof value.requestId !== "string") {
+    return null;
+  }
+
+  const machine = asRecord(value.machine);
+  const pairing = asRecord(value.pairing);
+  const device = pairing ? asRecord(pairing.device) : null;
+  if (!machine || !pairing || !device
+    || typeof machine.id !== "string"
+    || typeof machine.signingPublicKey !== "string"
+    || pairing.version !== 1
+    || typeof pairing.pairingId !== "string"
+    || typeof pairing.machineId !== "string"
+    || typeof device.id !== "string"
+    || typeof device.name !== "string"
+    || typeof device.signingPublicKey !== "string"
+    || typeof device.keyAgreementPublicKey !== "string"
+    || typeof pairing.proof !== "string"
+    || typeof pairing.deviceSignature !== "string") {
+    return null;
+  }
+
+  return {
+    protocolVersion: 0,
+    type: "pairing.request",
+    requestId: value.requestId,
+    machine: {
+      id: machine.id,
+      signingPublicKey: machine.signingPublicKey,
+    },
+    pairing: {
+      version: 1,
+      pairingId: pairing.pairingId,
+      machineId: pairing.machineId,
+      device: {
+        id: device.id,
+        name: device.name,
+        signingPublicKey: device.signingPublicKey,
+        keyAgreementPublicKey: device.keyAgreementPublicKey,
+      },
+      proof: pairing.proof,
+      deviceSignature: pairing.deviceSignature,
+    },
+  };
 }
 
 function parseRequest(value: Record<string, unknown>): SignedControlRequest | null {
@@ -254,6 +332,13 @@ export class RelayHostClient {
         return;
       }
 
+      const pairingRequest = parsePairingRequest(value);
+      if (pairingRequest) {
+        if (!this.#authenticated) return;
+        void this.#handlePairingRequest(ws, pairingRequest);
+        return;
+      }
+
       const request = parseRequest(value);
       if (!request
         || !this.#authenticated
@@ -305,6 +390,62 @@ export class RelayHostClient {
       machineId: this.options.machine.id,
       devices,
     }));
+  }
+
+
+  async #handlePairingRequest(
+    ws: WebSocket,
+    request: PairingRelayRequest,
+  ): Promise<void> {
+    let response: PairingRelayResponse;
+
+    try {
+      if (!this.options.pairing) {
+        throw new PairingError(
+          "invalid_request",
+          "pairing is not enabled on this host",
+        );
+      }
+
+      if (request.machine.id !== this.options.machine.id
+        || request.machine.signingPublicKey !== this.options.machine.signingPrivateKey.x
+        || request.pairing.machineId !== this.options.machine.id) {
+        throw new PairingError(
+          "invalid_request",
+          "pairing request targets a different machine identity",
+        );
+      }
+
+      const acceptance = await this.options.pairing.accept(request.pairing);
+      response = {
+        protocolVersion: 0,
+        type: "pairing.response",
+        requestId: request.requestId,
+        machineId: this.options.machine.id,
+        ok: true,
+        acceptance: acceptance as unknown as Record<string, unknown>,
+      };
+
+      await this.#sendAuthorizationSnapshot(ws);
+    } catch (error) {
+      response = {
+        protocolVersion: 0,
+        type: "pairing.response",
+        requestId: request.requestId,
+        machineId: this.options.machine.id,
+        ok: false,
+        error: {
+          code: error instanceof PairingError ? error.code : "internal_error",
+          message: error instanceof PairingError
+            ? error.message
+            : "The host could not complete pairing.",
+        },
+      };
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(response));
+    }
   }
 
   async #authorizeAndHandleRequest(
