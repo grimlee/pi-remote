@@ -1,48 +1,81 @@
 # Pi Remote Relay / Control Plane v0
 
-This protocol controls machines and session discovery. It intentionally does **not** carry Pi transcript/tool streaming.
+Pi Remote Relay is a narrow authenticated router for trusted machines and devices. It does **not** carry normal Pi transcript/tool streaming.
 
 ## Transport
 
-Primary transport: authenticated WebSocket connections to Pi Remote Relay.
-
-Both sides initiate outbound connections:
+Canonical topology:
 
 ```text
-pi-remote-host -> relay <- iOS
+pi-remote-host -> WSS -> Pi Remote Relay <- WSS <- iPhone
 ```
 
-Development/fallback transports may map the same resource operations onto direct HTTPS, LAN, Tailscale, or Cloudflare, but those are not the canonical product topology.
+Both sides initiate outbound WebSocket connections. Public deployment requires TLS/WSS.
 
-## Versioning
+LAN, Tailscale, or Cloudflare may exist as development/fallback transports, but network reachability is never authorization.
 
-Every frame carries:
+## Security layers
 
-```json
-{ "protocolVersion": 0 }
-```
+The control plane uses four separate checks:
 
-Breaking changes increment the version.
+1. **connection authentication** — prove possession of the machine/device Ed25519 private key;
+2. **machine authorization grant** — prove the Host paired this device;
+3. **live Host authorization snapshot** — prove the device has not since been revoked;
+4. **per-request device signature** — prove each control operation actually came from the paired device.
 
-## Common envelope
+The Relay cannot manufacture layer 4 because it never has the device private key.
+
+## 1. Connection authentication
+
+Immediately after WebSocket upgrade the Relay sends:
 
 ```json
 {
   "protocolVersion": 0,
-  "type": "control.request",
-  "requestId": "0199...",
-  "machineId": "machine_...",
-  "payload": {}
+  "type": "auth.challenge",
+  "challengeId": "auth_...",
+  "role": "client",
+  "nonce": "...",
+  "expiresAt": "2026-09-18T00:00:30.000Z"
 }
 ```
 
-`requestId` correlates exactly one response. Clients must treat duplicate responses idempotently.
+For a Host, `role` is `host`.
 
-## Connection roles
+The connecting peer signs a domain-separated canonical message containing:
 
-### Host hello
+- role
+- challenge ID
+- nonce
+- principal kind
+- principal ID
+- principal signing public key
 
-After authentication, a host announces its stable machine identity and capabilities:
+Client response:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "auth.response",
+  "challengeId": "auth_...",
+  "principal": {
+    "kind": "device",
+    "id": "device_...",
+    "signingPublicKey": "..."
+  },
+  "signature": "..."
+}
+```
+
+Host uses `kind: "machine"`.
+
+The challenge is random, short-lived, connection-bound, and accepted only once by the server state machine.
+
+On success the Relay sends `auth.accepted`. No shared bootstrap bearer token is part of the canonical connection protocol.
+
+## 2. Hello
+
+After authentication, Host announces only public machine fields:
 
 ```json
 {
@@ -52,17 +85,17 @@ After authentication, a host announces its stable machine identity and capabilit
     "id": "machine_...",
     "name": "omarchy",
     "platform": "linux",
-    "capabilities": [
-      "sessions.list",
-      "sessions.link"
-    ]
+    "capabilities": ["sessions.list", "sessions.link"],
+    "signingPublicKey": "...",
+    "keyAgreementPublicKey": "...",
+    "fingerprint": "..."
   }
 }
 ```
 
-### Client hello
+The machine ID and signing public key must match the authenticated principal.
 
-A mobile client announces its authenticated device identity:
+Client hello:
 
 ```json
 {
@@ -70,14 +103,95 @@ A mobile client announces its authenticated device identity:
   "type": "client.hello",
   "device": {
     "id": "device_...",
-    "name": "iPhone"
+    "name": "iPhone",
+    "signingPublicKey": "...",
+    "keyAgreementPublicKey": "..."
   }
 }
 ```
 
-Production authentication/pairing is specified separately. A development bootstrap token may be used before pairing is implemented.
+The device ID and signing public key must match the authenticated principal.
 
-After a client hello is accepted, the relay sends the currently online authorized machines:
+## 3. MachineGrant authorization
+
+Pairing returns a Host-signed `MachineGrant`:
+
+```json
+{
+  "version": 1,
+  "grantId": "grant_...",
+  "machine": {
+    "id": "machine_...",
+    "signingPublicKey": "...",
+    "keyAgreementPublicKey": "..."
+  },
+  "device": {
+    "id": "device_...",
+    "signingPublicKey": "...",
+    "keyAgreementPublicKey": "..."
+  },
+  "role": "owner",
+  "issuedAt": "2026-09-18T00:00:00.000Z",
+  "signature": "host Ed25519 signature"
+}
+```
+
+The iPhone stores valid grants in Keychain and sends them after hello:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "client.authorizations",
+  "grants": []
+}
+```
+
+The Relay verifies:
+
+- Host signature on each grant;
+- grant device ID equals the authenticated device;
+- grant device signing key equals the authenticated device signing key;
+- grant key-agreement key equals the current device key.
+
+A grant is necessary but not sufficient.
+
+## 4. Live Host authorization
+
+After hello the Host sends its currently active paired-device set:
+
+```json
+{
+  "protocolVersion": 0,
+  "type": "host.authorization_snapshot",
+  "machineId": "machine_...",
+  "devices": [
+    {
+      "id": "device_...",
+      "signingPublicKey": "...",
+      "keyAgreementPublicKey": "...",
+      "role": "owner"
+    }
+  ]
+}
+```
+
+The Relay considers a machine visible/routable only when:
+
+```text
+valid MachineGrant
+AND
+matching authenticated Host key
+AND
+device is present in current Host authorization snapshot
+```
+
+This means an old signed grant cannot override Host revocation.
+
+A Host using the same `machineId` with a different signing key is a different cryptographic identity and cannot receive traffic for the trusted grant.
+
+## Machine snapshot / presence
+
+After authorization state changes, the Relay sends only machines the current device is authorized to access:
 
 ```json
 {
@@ -89,92 +203,89 @@ After a client hello is accepted, the relay sends the currently online authorize
       "name": "omarchy",
       "platform": "linux",
       "capabilities": ["sessions.list", "sessions.link"],
+      "signingPublicKey": "...",
+      "keyAgreementPublicKey": "...",
+      "fingerprint": "...",
       "online": true
     }
   ]
 }
 ```
 
-The snapshot is relay state, not a promise that any Pi session exists.
+Incremental `machine.presence` frames may also be emitted.
 
-## Presence
+## Per-request authorization
 
-The relay emits machine presence changes to authorized clients:
+Every control request is signed by the iPhone device key.
 
 ```json
 {
   "protocolVersion": 0,
-  "type": "machine.presence",
+  "type": "control.request",
+  "requestId": "req_...",
   "machineId": "machine_...",
-  "online": true
+  "payload": {
+    "op": "sessions.list"
+  },
+  "authorization": {
+    "deviceId": "device_...",
+    "issuedAtMs": 1800000000000,
+    "signature": "device Ed25519 signature"
+  }
 }
 ```
 
-Online means the relay currently has an authenticated host connection. It does not imply a Pi session is running.
+The signature covers a domain-separated, operation-specific canonical message containing:
+
+- request ID
+- machine ID
+- device ID
+- issuance time
+- operation
+- operation-specific arguments
+
+For `sessions.link`, the signed arguments include:
+
+- instance ID
+- generation
+- requested access
+
+The Relay binds `authorization.deviceId` to the authenticated connection.
+
+The Host independently verifies:
+
+- device is still active in its local authorization store;
+- signature matches the stored device signing key;
+- machine ID matches this Host;
+- issuance time is within the accepted skew window;
+- request ID has not already been accepted in the replay cache.
+
+Therefore compromise of the Relay alone does not allow it to invent Host control operations.
 
 ## Operations
 
 ### sessions.list
 
-Client request:
-
 ```json
 {
-  "protocolVersion": 0,
-  "type": "control.request",
-  "requestId": "req_1",
-  "machineId": "machine_...",
-  "payload": {
-    "op": "sessions.list"
-  }
-}
-```
-
-Host response payload:
-
-```json
-{
-  "op": "sessions.list",
-  "sessions": [
-    {
-      "instanceId": "...",
-      "generation": 3,
-      "sessionId": "...",
-      "name": "Fix ComfyUI",
-      "cwd": "/home/user/project",
-      "model": "provider/model",
-      "startedAt": "2026-09-17T12:00:00Z",
-      "participantCount": 1,
-      "relayConnected": true,
-      "inputRequired": false,
-      "access": "control"
-    }
-  ]
+  "op": "sessions.list"
 }
 ```
 
 ### sessions.link
 
-Client request:
-
 ```json
 {
-  "protocolVersion": 0,
-  "type": "control.request",
-  "requestId": "req_2",
-  "machineId": "machine_...",
-  "payload": {
-    "op": "sessions.link",
-    "instanceId": "...",
-    "generation": 3,
-    "access": "control"
-  }
+  "op": "sessions.link",
+  "instanceId": "...",
+  "generation": 3,
+  "access": "control"
 }
 ```
 
-The generation is mandatory.
+The generation is mandatory. A changed Pi Collab room must fail with `stale_generation`.
 
-Successful host payload:
+Current successful link payload still contains:
 
 ```json
 {
@@ -186,42 +297,22 @@ Successful host payload:
 }
 ```
 
-`collabUrl` is capability-bearing secret material.
-
-Development v0 may route it through a trusted relay process. The production pairing design must evolve this toward device-bound encrypted delivery so relay storage/logging never sees reusable plaintext capability material.
+This capability is still plaintext to the Relay in v0. The next security layer will encrypt it Host-to-device using the paired X25519 keys.
 
 ## Response envelope
-
-Success:
 
 ```json
 {
   "protocolVersion": 0,
   "type": "control.response",
-  "requestId": "req_2",
+  "requestId": "req_...",
   "machineId": "machine_...",
   "ok": true,
   "payload": {}
 }
 ```
 
-Failure:
-
-```json
-{
-  "protocolVersion": 0,
-  "type": "control.response",
-  "requestId": "req_2",
-  "machineId": "machine_...",
-  "ok": false,
-  "error": {
-    "code": "stale_generation",
-    "message": "The selected session changed. Refresh and try again."
-  }
-}
-```
-
-Initial error codes:
+Errors include:
 
 - `unauthorized`
 - `forbidden`
@@ -235,31 +326,20 @@ Initial error codes:
 - `timeout`
 - `internal_error`
 
-## Heartbeat
+## Heartbeat and reconnect
 
-WebSocket ping/pong or an equivalent heartbeat keeps presence fresh. Presence must expire promptly when the authenticated host connection closes or misses its lease.
+WebSocket ping/pong maintains connection liveness. Pi work continues independently of Relay or mobile connectivity.
 
-Pi work must continue regardless of relay connectivity.
-
-## Security requirements
-
-- Do not accept unauthenticated host or client connections.
-- Do not log Collab URLs, room keys, write tokens, prompts, tool output, provider credentials, or environment variables.
-- Authorize clients per machine identity.
-- Bind link requests to the exact observed generation.
-- Pairing/revocation must not require rotating Pi provider credentials.
-- A compromised relay must not imply access to provider credentials or host filesystem contents.
-- Production capability delivery should become end-to-end protected between host and paired device.
+After reconnect, both Host and iPhone must re-authenticate using fresh challenges and resubmit their current authorization state.
 
 ## Non-goals
 
 This protocol does not define:
 
-- transcript frames
-- assistant token streaming
-- tool-call/result frames
+- transcript/token streaming
+- Pi tool-call/result frames
 - subagent frames
 - arbitrary shell execution
-- generic filesystem operations
+- generic filesystem access
 
-Those belong to Pi Collab or future narrowly scoped host operations.
+Those belong to Pi Collab or future narrowly scoped Host operations.
