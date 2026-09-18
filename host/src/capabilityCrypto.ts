@@ -160,7 +160,6 @@ export function encryptCollabCapability(
     generation: link.generation,
     access: link.access,
   };
-  const aad = capabilityContextMessage(context);
   const sharedSecret = diffieHellman({
     privateKey: machineAgreementPrivateKey(machine),
     publicKey: x25519PublicKey(device.keyAgreementPublicKey),
