@@ -39,13 +39,6 @@ public actor CollabGuestClient {
     private static let backoffBaseSeconds = 1.0
     private static let backoffMaxSeconds = 30.0
 
-    private static let fatalCloseReasons: [Int: String] = [
-        4001: "room closed",
-        4004: "no such room",
-        4009: "a host is already connected for this room",
-        4029: "room is full",
-    ]
-
     public nonisolated let events: AsyncStream<CollabGuestClientEvent>
 
     private let continuation: AsyncStream<CollabGuestClientEvent>.Continuation
@@ -387,34 +380,28 @@ public actor CollabGuestClient {
         cancelTimers()
 
         let code = task.closeCode.rawValue
-        let reason = closeReason(task)
-            ?? Self.fatalCloseReasons[code]
-            ?? error.localizedDescription
-        let retryRoom = code == 4001
-            || (code == 4004 && retryMissingRoom)
+        let decision = CollabRelayClosePolicy.decide(
+            code: code,
+            reason: closeReason(task) ?? error.localizedDescription,
+            retryMissingRoom: retryMissingRoom
+        )
 
-        if retryRoom {
-            retryMissingRoom = true
+        switch decision {
+        case let .retry(nextRetryMissingRoom):
+            retryMissingRoom = nextRetryMissingRoom
             replica.markReconnecting()
             emitSnapshot()
             continuation.yield(
-                .disconnected(reason: reason, willReconnect: true)
+                .disconnected(
+                    reason: closeReason(task) ?? error.localizedDescription,
+                    willReconnect: true
+                )
             )
             scheduleReconnect()
-            return
-        }
 
-        if Self.fatalCloseReasons[code] != nil {
+        case let .fatal(reason):
             endFatal(reason)
-            return
         }
-
-        replica.markReconnecting()
-        emitSnapshot()
-        continuation.yield(
-            .disconnected(reason: reason, willReconnect: true)
-        )
-        scheduleReconnect()
     }
 
     private func scheduleReconnect() {
