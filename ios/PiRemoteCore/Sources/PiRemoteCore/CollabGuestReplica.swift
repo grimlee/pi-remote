@@ -161,8 +161,14 @@ public struct CollabGuestReplica: Sendable {
             if requestId(snapshot.uiRequest) == reqId {
                 showNextUiRequest()
             } else {
-                uiRequestQueue.removeAll {
-                    requestId($0) == reqId
+                uiRequestQueue = uiRequestQueue.filter { value in
+                    guard let object = value.objectValue,
+                          let raw = object["reqId"]?.integerValue,
+                          let valueReqId = Int(exactly: raw)
+                    else {
+                        return true
+                    }
+                    return valueReqId != reqId
                 }
             }
 
