@@ -31,6 +31,10 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Test PiRemoteCore
+        working-directory: ios/PiRemoteCore
+        run: swift test
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

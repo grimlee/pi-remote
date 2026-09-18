@@ -3,6 +3,9 @@ options:
   bundleIdPrefix: top.grimlee
   deploymentTarget:
     iOS: "17.0"
+packages:
+  PiRemoteCore:
+    path: PiRemoteCore
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -12,6 +15,8 @@ targets:
     platform: iOS
     sources:
       - PiRemote
+    dependencies:
+      - package: PiRemoteCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.grimlee.piremote
