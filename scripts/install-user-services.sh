@@ -220,7 +220,7 @@ OMP executable:
 
 Next:
   1. Point your public tunnel hostname at http://127.0.0.1:$PORT
-  2. Verify: $SCRIPT_DIR/preflight-real-device.sh
+  2. Verify: bash $SCRIPT_DIR/preflight-real-device.sh
   3. Create a one-time pairing payload:
        $NPM --prefix "$ROOT/host" run pair
 
