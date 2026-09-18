@@ -6,6 +6,7 @@ actor RelayClient {
         case machinesSnapshot([RemoteMachine])
         case machinePresence(machineId: String, online: Bool)
         case rpcFrame(PiRpcRelayFrame)
+        case transportClosed(String)
     }
 
     enum RelayError: LocalizedError, Sendable {
@@ -308,6 +309,16 @@ actor RelayClient {
         }
     }
 
+    func isConnected() -> Bool {
+        guard authenticatedDevice != nil,
+              let socket,
+              receiveTask != nil
+        else {
+            return false
+        }
+        return socket.state == .running
+    }
+
     func disconnect() {
         receiveTask?.cancel()
         receiveTask = nil
@@ -535,6 +546,14 @@ actor RelayClient {
             } catch {
                 if !Task.isCancelled {
                     failAllPending(error)
+                    self.socket = nil
+                    authenticatedDevice = nil
+                    receiveTask = nil
+                    await onEvent(
+                        .transportClosed(
+                            error.localizedDescription
+                        )
+                    )
                 }
                 return
             }
