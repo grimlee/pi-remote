@@ -237,7 +237,11 @@ public actor CollabGuestClient {
             return
         }
 
-        replica.snapshot.phase = everConnected ? .reconnecting : .waiting
+        if everConnected {
+            replica.markReconnecting()
+        } else {
+            replica.markWaiting()
+        }
         everConnected = true
         emitSnapshot()
         armWelcomeTimeout(for: task)
