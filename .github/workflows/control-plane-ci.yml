@@ -36,7 +36,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npm run build
 
   relay:
     name: Relay typecheck and tests
@@ -52,6 +51,7 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
 
   deployment:
     name: Deployment script syntax
