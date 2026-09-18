@@ -14,25 +14,6 @@ struct RootView: View {
                     SessionDetailView(session: session)
                 }
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(
-                        "Forget Host",
-                        systemImage: "trash",
-                        role: .destructive
-                    ) {
-                        Task {
-                            await store.forgetHost()
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .disabled(store.connectionState == .unpaired)
-                .opacity(store.connectionState == .unpaired ? 0 : 1)
-            }
-        }
         .task {
             await store.start()
         }
@@ -82,9 +63,24 @@ struct RootView: View {
                     }
                 }
             } else {
-                List(store.sessions) { session in
-                    NavigationLink(value: session) {
-                        SessionRow(session: session)
+                List {
+                    Section {
+                        ForEach(store.sessions) { session in
+                            NavigationLink(value: session) {
+                                SessionRow(session: session)
+                            }
+                        }
+                    }
+
+                    Section {
+                        Button(
+                            "Forget Host",
+                            role: .destructive
+                        ) {
+                            Task {
+                                await store.forgetHost()
+                            }
+                        }
                     }
                 }
                 .refreshable {
@@ -110,6 +106,15 @@ struct RootView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+
+                Button(
+                    "Forget Host",
+                    role: .destructive
+                ) {
+                    Task {
+                        await store.forgetHost()
+                    }
+                }
             }
         }
     }
