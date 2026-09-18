@@ -162,6 +162,16 @@ export class RelayRouter {
       return;
     }
 
+    if (request.authorization.deviceId !== client.principal.id) {
+      this.#sendError(
+        clientPeer,
+        request,
+        "forbidden",
+        "Control request is signed for a different device.",
+      );
+      return;
+    }
+
     if (this.#pending.has(request.requestId)) {
       this.#sendError(
         clientPeer,
