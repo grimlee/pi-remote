@@ -1,360 +1,202 @@
-# First Real iPhone Test
+# Pi Agent Real iPhone Test
 
-This is the first end-to-end Pi Remote validation path:
+This runbook validates the native Pi Agent backend:
 
 ~~~text
 iPhone
   |
-  | authenticated Pi Remote Relay control plane
+  | authenticated Relay + E2EE RPC frames
   v
 Pi Remote Relay
   |
-  | signed control requests
+  | ciphertext routing
   v
 pi-remote-host
   |
-  | omp collab list/link
+  | JSONL stdin/stdout
   v
-Pi / OMP
-  |
-  | native E2EE Pi Collab data plane
-  v
-iPhone
+pi --session <path> --mode rpc
 ~~~
 
-The UI is intentionally diagnostic. Success means the complete control/data path works on a real iPhone.
+The UI remains intentionally diagnostic. Success means a real iPhone can resume and control a persisted Pi session without exposing Pi RPC contents to Cloudflare or Pi Remote Relay.
 
 ## 1. Public Relay hostname
 
-For the first test, it is acceptable to run Pi Remote Relay on the same Omarchy machine and expose it through the existing Cloudflare Tunnel.
-
-Create a dedicated public hostname, for example:
+Expose the loopback Relay through your public tunnel, for example:
 
 ~~~text
-relay.example.com
+relay.example.com -> http://127.0.0.1:8780
 ~~~
 
-Route that hostname to:
+Do not place an interactive Cloudflare Access login in front of the hostname; Pi Remote performs its own cryptographic device authentication.
 
-~~~text
-http://127.0.0.1:8780
-~~~
-
-Pi Remote Relay itself binds loopback by default. The Tunnel is the only public ingress.
-
-Do not put an interactive Cloudflare Access login page in front of this hostname. Pi Remote performs its own device authentication and pairing over WebSocket.
-
-Expected public paths:
-
-~~~text
-https://relay.example.com/healthz
-wss://relay.example.com/v0/host
-wss://relay.example.com/v0/client
-~~~
-
-Verify the public health endpoint before pairing:
+Verify:
 
 ~~~bash
 curl -fsS https://relay.example.com/healthz
 ~~~
 
-Expected JSON:
+Expected:
 
 ~~~json
 {"ok":true,"protocolVersion":0}
 ~~~
 
-## 2. Install Relay and Host as user services
+## 2. Install Relay and Host
 
-From the Pi Remote repository checkout:
-
-~~~bash
-bash scripts/install-user-services.sh   --relay-url wss://relay.example.com/v0/host   --omp "$(command -v omp)"
-~~~
-
-The installer:
-
-- installs Node dependencies inside relay/ and host/;
-- builds production dist/ output;
-- writes owner-only environment files under ~/.config/pi-remote/;
-- writes systemd user units;
-- enables and starts pi-remote-relay.service;
-- enables and starts pi-remote-host.service;
-- verifies local Relay /healthz.
-
-No sudo or system-wide Node installation is required.
-
-Service files:
-
-~~~text
-~/.config/systemd/user/pi-remote-relay.service
-~/.config/systemd/user/pi-remote-host.service
-~~~
-
-Environment files:
-
-~~~text
-~/.config/pi-remote/relay.env
-~/.config/pi-remote/host.env
-~~~
-
-Logs:
+From the Pi Remote checkout:
 
 ~~~bash
-journalctl --user -u pi-remote-relay.service -f
-journalctl --user -u pi-remote-host.service -f
+bash scripts/install-user-services.sh \
+  --relay-url wss://relay.example.com/v0/host \
+  --pi "$(command -v pi)"
 ~~~
 
-## 3. Run the preflight
+The installer builds Host/Relay, writes owner-only environment files under `~/.config/pi-remote`, installs user systemd units, and starts them.
+
+## 3. Preflight
 
 ~~~bash
 bash scripts/preflight-real-device.sh
 ~~~
 
-The preflight checks:
+The preflight verifies:
 
 - Relay service active;
 - Host service active;
 - local Relay health;
-- configured OMP executable;
-- omp collab list --json;
-- local pairing IPC socket.
+- configured Pi executable;
+- Pi advertises RPC output mode;
+- pairing IPC socket exists.
 
-If the OMP Collab registry shows zero active hosts, start/share a Pi session before continuing.
+## 4. Confirm Pi sessions exist
 
-## 4. Make a Pi session remotely discoverable
-
-The Host discovers only active Pi Collab hosts.
-
-Check:
-
-~~~bash
-omp collab list --json
-~~~
-
-You should see at least one entry in hosts[].
-
-If none exists, start Pi/OMP and enable Collab for the session, or use the upstream collab.autoStart configuration if desired.
-
-The session generation shown here is what protects Pi Remote from connecting to a stale/replaced room.
-
-## 5. Install the current iPhone build
-
-On GitHub Actions for main, download the latest:
+Pi Remote discovers persisted sessions from Pi's native session store, normally:
 
 ~~~text
-PiRemote-Sideload
+~/.pi/agent/sessions/
 ~~~
 
-artifact and extract PiRemote-Sideload.ipa.
+You do **not** need to enable Pi Collab.
 
-Install/re-sign it using SideStore.
+A direct RPC smoke test that does not invoke a model is:
 
-The app stores its device signing/X25519 private keys and Host authorization grants in iOS Keychain.
+~~~bash
+printf '%s\n' '{"id":"smoke","type":"get_state"}' | pi --mode rpc
+~~~
 
-## 6. Create the one-time pairing payload
+To verify a specific historical session can be resumed:
 
-The Host service must already be running.
+~~~bash
+printf '%s\n' '{"id":"resume","type":"get_state"}' \
+  | pi --session "/path/to/session.jsonl" --mode rpc
+~~~
 
-From the repository:
+## 5. Install the iPhone build
+
+Download the current `PiRemote-Sideload` GitHub Actions artifact, extract the IPA, and install/re-sign it with SideStore.
+
+The iPhone stores its stable device private keys and Host grants in Keychain.
+
+## 6. Pair
+
+With `pi-remote-host` running:
 
 ~~~bash
 npm --prefix host run pair
 ~~~
 
-It prints a payload beginning with:
+Copy the one-time `piremote-pair-v1....` payload to the iPhone and pair.
+
+Pairing remains the same trust flow: device Relay authentication, one-time HMAC proof, Host verification, Host-signed MachineGrant, and Keychain storage.
+
+## 7. Open a Pi session
+
+After pairing, Pi Remote should list persisted Pi sessions.
+
+Selecting one performs:
 
 ~~~text
-piremote-pair-v1.
-~~~
-
-The payload is short-lived and one-time.
-
-It contains:
-
-- public Relay client URL;
-- Host public identity;
-- one-time pairing ID;
-- one-time random secret.
-
-The one-time secret is not sent to Pi Remote Relay. The iPhone proves possession using HMAC and its device key.
-
-## 7. Pair the iPhone
-
-Open Pi Remote.
-
-1. Tap Paste from Clipboard.
-2. Paste the one-time payload.
-3. Tap Pair this iPhone.
-
-Expected sequence:
-
-~~~text
-iPhone authenticates device key to Relay
+signed sessions.link(instanceId, generation)
   ->
-pairing.request routed to exact Host signing key
+Host verifies paired device
   ->
-Host validates one-time HMAC + device signature
+Host starts pi --session <path> --mode rpc
   ->
-Host authorizes device locally
+Host creates random 256-bit RPC channel key
   ->
-Host signs MachineGrant
+channel descriptor encrypted to the exact iPhone X25519 key
   ->
-iPhone verifies Host signature + MachineGrant
-  ->
-grant/profile stored in Keychain
-  ->
-Host becomes visible
-~~~
-
-If a test configuration becomes unusable, use the top-right menu -> Forget Host. This clears only the current Host profile and MachineGrant; the iPhone device identity remains stable.
-
-## 8. Open a real Pi session
-
-After pairing, the app should show the real sessions returned by:
-
-~~~bash
-omp collab list --json
-~~~
-
-Tap one.
-
-Expected control-plane path:
-
-~~~text
-sessions.link(instanceId, generation)
-  ->
-Host calls omp collab link
-  ->
-Host encrypts Collab capability to this iPhone X25519 key
-  ->
-Relay sees ciphertext only
+Relay sees only encrypted capability
   ->
 iPhone decrypts capability
 ~~~
 
-Then the app switches to the native Pi Collab data plane.
+Then Pi RPC commands/events travel as AES-256-GCM encrypted `rpc.frame` messages. Machine ID, device ID, channel ID, direction, and sequence number are authenticated as AAD.
 
-Expected data-plane path:
+## 8. Functional checks
 
-~~~text
-CollabGuestClient
-  ->
-hello proto v3
-  ->
-welcome
-  ->
-snapshot-chunk...
-  ->
-live
+### History and state
+
+Opening the session automatically sends:
+
+~~~json
+{"type":"get_state"}
+{"type":"get_messages"}
 ~~~
 
-The diagnostic session screen should display the existing transcript as raw JSON cards.
-
-## 9. First functional checks
-
-Run these in order.
-
-### Existing transcript
-
-Confirm historical session entries appear after the authoritative snapshot finishes.
+Confirm historical messages appear and the displayed model matches the selected Pi session.
 
 ### Prompt
 
-From iPhone, send:
+Send:
 
 ~~~text
 Reply with exactly: PI_REMOTE_PROMPT_OK
 ~~~
 
-Confirm the host Pi receives it and the iPhone receives the resulting live state/events.
+Confirm Pi receives it and the iPhone receives the resulting agent/message/tool events.
 
 ### Abort
 
-Start a request that runs long enough to interrupt, then tap Stop.
+Start a long turn, then tap Stop. Confirm Pi receives the native RPC `abort` command.
 
-Confirm the host Pi aborts the active turn.
+### Extension UI
 
-### Interactive request
-
-Trigger a Pi select/editor request if available.
-
-Confirm the iPhone renders the request and the response reaches the Host.
+Trigger a Pi extension `select`, `confirm`, `input`, or `editor` request. Confirm the iPhone renders it and sends the matching `extension_ui_response`.
 
 ### Background reconciliation
 
-While the Pi session is still active:
+Background and foreground Pi Remote. The mobile Relay/RPC sockets are discarded; on foreground the app re-authenticates, refreshes Host sessions, and re-opens the selected persisted session.
 
-1. background Pi Remote;
-2. let Pi continue doing work on the computer;
-3. foreground Pi Remote.
-
-Expected behavior:
-
-~~~text
-old mobile sockets discarded
-  ->
-Relay reconnect/authenticate
-  ->
-sessions refresh
-  ->
-fresh generation-bound link
-  ->
-fresh Collab welcome/snapshot
-  ->
-mobile state replaced by Host-authoritative state
-~~~
-
-No Pi process should restart.
-
-## 10. Useful diagnostics
-
-Control plane:
+## 9. Diagnostics
 
 ~~~bash
 systemctl --user status pi-remote-relay.service
 systemctl --user status pi-remote-host.service
 journalctl --user -u pi-remote-relay.service -n 100 --no-pager
 journalctl --user -u pi-remote-host.service -n 100 --no-pager
-~~~
-
-Pi registry:
-
-~~~bash
-omp collab list --json
-~~~
-
-New pairing payload:
-
-~~~bash
-npm --prefix host run pair
-~~~
-
-Local Relay:
-
-~~~bash
 curl -fsS http://127.0.0.1:8780/healthz
-~~~
-
-Public Relay:
-
-~~~bash
 curl -fsS https://relay.example.com/healthz
 ~~~
 
+## Current limitation
+
+Pi RPC can resume a persisted session, but it cannot attach to an independent Pi TUI process that is already running. Do not open the same session concurrently in the TUI and Pi Remote during this milestone. A future Pi extension can provide live-process attachment.
+
 ## MVP success criterion
 
-The first real-device milestone is considered technically closed when one real iPhone can:
+One real iPhone can:
 
 - pair to the Host;
 - see the real Omarchy machine;
-- list a real Pi session;
-- enter that session through native Pi Collab;
-- receive the authoritative transcript;
+- list persisted Pi sessions;
+- open an existing session through native Pi RPC;
+- receive authoritative state/history;
 - send a prompt;
-- receive live activity;
+- receive live agent/tool events;
 - abort a turn;
-- answer an interactive request;
-- background and foreground without stopping Pi.
+- answer extension UI requests;
+- background and foreground without losing the persisted Pi session.
 
-UI polish is explicitly outside this milestone.
+UI polish remains outside this milestone.
