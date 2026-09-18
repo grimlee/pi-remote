@@ -1,13 +1,7 @@
 import CryptoKit
 import Foundation
+import PiRemoteCore
 import Security
-
-struct DevicePublicIdentity: Codable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let signingPublicKey: String
-    let keyAgreementPublicKey: String
-}
 
 enum DeviceIdentityStoreError: LocalizedError {
     case invalidStoredIdentity
@@ -155,14 +149,5 @@ actor DeviceIdentityStore {
         guard status == errSecSuccess else {
             throw DeviceIdentityStoreError.keychain(status)
         }
-    }
-}
-
-private extension Data {
-    func base64URLEncodedString() -> String {
-        base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 }
