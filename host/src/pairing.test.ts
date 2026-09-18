@@ -13,6 +13,7 @@ import path from "node:path";
 import test from "node:test";
 import { AuthorizedDeviceStore } from "./authorizedDevices.js";
 import { loadOrCreateMachineIdentity } from "./machineIdentity.js";
+import { verifyMachineGrant } from "./machineGrant.js";
 import {
   PairingError,
   PairingService,
@@ -129,6 +130,10 @@ test("valid one-time pairing authorizes a device and cannot be replayed", async 
 
   assert.equal(acceptance.machine.id, machine.id);
   assert.equal(acceptance.deviceId, device.identity.id);
+  assert.equal(verifyMachineGrant(acceptance.grant), true);
+  assert.equal(acceptance.grant.machine.id, machine.id);
+  assert.equal(acceptance.grant.device.id, device.identity.id);
+  assert.equal(acceptance.grant.role, "owner");
 
   const authorized = await devices.getActive(device.identity.id);
   assert.equal(authorized?.signingPublicKey, device.identity.signingPublicKey);

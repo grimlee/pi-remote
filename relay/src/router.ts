@@ -1,4 +1,12 @@
+import {
+  authorizationSnapshotAllows,
+  type HostAuthorizationDevice,
+  type MachineGrant,
+  verifyMachineGrant,
+} from "./authorization.js";
+import type { RelayAuthPrincipal } from "./auth.js";
 import type {
+  ClientHello,
   ControlRequest,
   ControlResponse,
   MachineDescriptor,
@@ -13,50 +21,129 @@ export interface RelayPeer {
 }
 
 interface HostRecord {
+  key: string;
   peer: RelayPeer;
   machine: MachineDescriptor;
+  authorizedDevices: HostAuthorizationDevice[];
+}
+
+interface ClientRecord {
+  peer: RelayPeer;
+  device: ClientHello["device"];
+  principal: RelayAuthPrincipal;
+  grants: MachineGrant[];
+  visible: Map<string, string>;
 }
 
 interface PendingRequest {
   client: RelayPeer;
+  hostKey: string;
   machineId: string;
   timer: NodeJS.Timeout;
 }
 
+function hostKey(machineId: string, signingPublicKey: string): string {
+  return machineId + ":" + signingPublicKey;
+}
+
 export class RelayRouter {
   readonly #hosts = new Map<string, HostRecord>();
-  readonly #clients = new Set<RelayPeer>();
+  readonly #clients = new Map<RelayPeer, ClientRecord>();
   readonly #pending = new Map<string, PendingRequest>();
 
   constructor(private readonly requestTimeoutMs = 15_000) {}
 
   registerHost(peer: RelayPeer, machine: MachineDescriptor): void {
-    const previous = this.#hosts.get(machine.id);
+    this.removeHost(peer);
+
+    const key = hostKey(machine.id, machine.signingPublicKey);
+    const previous = this.#hosts.get(key);
     if (previous && previous.peer !== peer) {
       previous.peer.close(4001, "machine connection replaced");
+      this.removeHost(previous.peer);
     }
 
-    this.#hosts.set(machine.id, { peer, machine });
-    this.#broadcastPresence(machine.id, true);
+    this.#hosts.set(key, {
+      key,
+      peer,
+      machine,
+      authorizedDevices: [],
+    });
+    this.#reconcileAllClients();
+  }
+
+  setHostAuthorizationSnapshot(
+    peer: RelayPeer,
+    machineId: string,
+    devices: HostAuthorizationDevice[],
+  ): boolean {
+    const host = [...this.#hosts.values()].find(
+      record => record.peer === peer && record.machine.id === machineId,
+    );
+    if (!host) return false;
+
+    host.authorizedDevices = devices.map(device => ({ ...device }));
+    this.#reconcileAllClients();
+    return true;
   }
 
   removeHost(peer: RelayPeer): void {
-    for (const [machineId, record] of this.#hosts) {
+    const removedKeys: string[] = [];
+    for (const [key, record] of this.#hosts) {
       if (record.peer !== peer) continue;
-      this.#hosts.delete(machineId);
-      this.#broadcastPresence(machineId, false);
-      this.#failPendingForMachine(machineId, "machine_offline", "The machine went offline.");
+      this.#hosts.delete(key);
+      removedKeys.push(key);
     }
+
+    if (removedKeys.length === 0) return;
+
+    for (const [requestId, pending] of this.#pending) {
+      if (!removedKeys.includes(pending.hostKey)) continue;
+      clearTimeout(pending.timer);
+      this.#pending.delete(requestId);
+      this.#sendErrorByFields(
+        pending.client,
+        requestId,
+        pending.machineId,
+        "machine_offline",
+        "The machine went offline.",
+      );
+    }
+
+    this.#reconcileAllClients();
   }
 
-  registerClient(peer: RelayPeer): void {
-    this.#clients.add(peer);
-    const snapshot: MachinesSnapshot = {
-      protocolVersion: PROTOCOL_VERSION,
-      type: "machines.snapshot",
-      machines: [...this.#hosts.values()].map(({ machine }) => ({ ...machine, online: true })),
+  registerClient(
+    peer: RelayPeer,
+    principal: RelayAuthPrincipal,
+    device: ClientHello["device"],
+  ): void {
+    this.removeClient(peer);
+    const record: ClientRecord = {
+      peer,
+      principal,
+      device,
+      grants: [],
+      visible: new Map(),
     };
-    peer.send(JSON.stringify(snapshot));
+    this.#clients.set(peer, record);
+    this.#sendSnapshot(record);
+  }
+
+  setClientAuthorizations(peer: RelayPeer, grants: MachineGrant[]): boolean {
+    const client = this.#clients.get(peer);
+    if (!client) return false;
+
+    for (const grant of grants) {
+      if (!verifyMachineGrant(grant, client.principal)
+        || grant.device.keyAgreementPublicKey !== client.device.keyAgreementPublicKey) {
+        return false;
+      }
+    }
+
+    client.grants = grants.map(grant => structuredClone(grant));
+    this.#reconcileClient(client, true);
+    return true;
   }
 
   removeClient(peer: RelayPeer): void {
@@ -68,10 +155,26 @@ export class RelayRouter {
     }
   }
 
-  routeClientRequest(client: RelayPeer, request: ControlRequest): void {
+  routeClientRequest(clientPeer: RelayPeer, request: ControlRequest): void {
+    const client = this.#clients.get(clientPeer);
+    if (!client) {
+      this.#sendError(clientPeer, request, "unauthorized", "Client is not authenticated.");
+      return;
+    }
+
+    if (request.authorization.deviceId !== client.principal.id) {
+      this.#sendError(
+        clientPeer,
+        request,
+        "forbidden",
+        "Control request is signed for a different device.",
+      );
+      return;
+    }
+
     if (this.#pending.has(request.requestId)) {
       this.#sendError(
-        client,
+        clientPeer,
         request,
         "invalid_request",
         "requestId is already in flight.",
@@ -79,9 +182,36 @@ export class RelayRouter {
       return;
     }
 
-    const host = this.#hosts.get(request.machineId);
+    const grant = client.grants.find(item => item.machine.id === request.machineId);
+    if (!grant) {
+      this.#sendError(
+        clientPeer,
+        request,
+        "forbidden",
+        "The device has no valid grant for this machine.",
+      );
+      return;
+    }
+
+    const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
+    const host = this.#hosts.get(key);
     if (!host) {
-      this.#sendError(client, request, "machine_offline", "The requested machine is offline.");
+      this.#sendError(
+        clientPeer,
+        request,
+        "machine_offline",
+        "The trusted machine is offline.",
+      );
+      return;
+    }
+
+    if (!authorizationSnapshotAllows(host.authorizedDevices, grant)) {
+      this.#sendError(
+        clientPeer,
+        request,
+        "forbidden",
+        "The host no longer authorizes this device.",
+      );
       return;
     }
 
@@ -89,9 +219,10 @@ export class RelayRouter {
       const pending = this.#pending.get(request.requestId);
       if (!pending) return;
       this.#pending.delete(request.requestId);
-      this.#sendError(
+      this.#sendErrorByFields(
         pending.client,
-        request,
+        request.requestId,
+        request.machineId,
         "timeout",
         "The host did not answer the control request in time.",
       );
@@ -99,7 +230,8 @@ export class RelayRouter {
 
     timer.unref();
     this.#pending.set(request.requestId, {
-      client,
+      client: clientPeer,
+      hostKey: key,
       machineId: request.machineId,
       timer,
     });
@@ -107,43 +239,98 @@ export class RelayRouter {
   }
 
   routeHostResponse(hostPeer: RelayPeer, response: ControlResponse): void {
-    const host = this.#hosts.get(response.machineId);
-    if (!host || host.peer !== hostPeer) return;
-
     const pending = this.#pending.get(response.requestId);
     if (!pending || pending.machineId !== response.machineId) return;
+
+    const host = this.#hosts.get(pending.hostKey);
+    if (!host || host.peer !== hostPeer) return;
 
     clearTimeout(pending.timer);
     this.#pending.delete(response.requestId);
     pending.client.send(JSON.stringify(response));
   }
 
-  #broadcastPresence(machineId: string, online: boolean): void {
-    const frame: MachinePresence = {
-      protocolVersion: PROTOCOL_VERSION,
-      type: "machine.presence",
-      machineId,
-      online,
-    };
-    const text = JSON.stringify(frame);
-    for (const client of this.#clients) client.send(text);
+  #authorizedHosts(client: ClientRecord): Map<string, HostRecord> {
+    const result = new Map<string, HostRecord>();
+
+    for (const grant of client.grants) {
+      const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
+      const host = this.#hosts.get(key);
+      if (!host) continue;
+      if (!authorizationSnapshotAllows(host.authorizedDevices, grant)) continue;
+      result.set(grant.machine.id, host);
+    }
+
+    return result;
   }
 
-  #failPendingForMachine(machineId: string, code: string, message: string): void {
-    for (const [requestId, pending] of this.#pending) {
-      if (pending.machineId !== machineId) continue;
-      clearTimeout(pending.timer);
-      this.#pending.delete(requestId);
-      const response: ControlResponse = {
-        protocolVersion: PROTOCOL_VERSION,
-        type: "control.response",
-        requestId,
-        machineId,
-        ok: false,
-        error: { code, message },
-      };
-      pending.client.send(JSON.stringify(response));
+  #sendSnapshot(client: ClientRecord): void {
+    const hosts = this.#authorizedHosts(client);
+    client.visible = new Map(
+      [...hosts].map(([machineId, host]) => [machineId, host.key]),
+    );
+
+    const snapshot: MachinesSnapshot = {
+      protocolVersion: PROTOCOL_VERSION,
+      type: "machines.snapshot",
+      machines: [...hosts.values()].map(({ machine }) => ({
+        ...machine,
+        online: true,
+      })),
+    };
+    client.peer.send(JSON.stringify(snapshot));
+  }
+
+  #reconcileAllClients(): void {
+    for (const client of this.#clients.values()) {
+      this.#reconcileClient(client, false);
     }
+  }
+
+  #reconcileClient(client: ClientRecord, forceSnapshot: boolean): void {
+    const hosts = this.#authorizedHosts(client);
+    const nextVisible = new Map(
+      [...hosts].map(([machineId, host]) => [machineId, host.key]),
+    );
+
+    let changed = forceSnapshot;
+    const presence: MachinePresence[] = [];
+
+    for (const [machineId, key] of client.visible) {
+      if (nextVisible.get(machineId) === key) continue;
+      changed = true;
+      presence.push({
+        protocolVersion: PROTOCOL_VERSION,
+        type: "machine.presence",
+        machineId,
+        online: false,
+      });
+    }
+
+    for (const [machineId, key] of nextVisible) {
+      if (client.visible.get(machineId) === key) continue;
+      changed = true;
+      presence.push({
+        protocolVersion: PROTOCOL_VERSION,
+        type: "machine.presence",
+        machineId,
+        online: true,
+      });
+    }
+
+    if (!changed) return;
+
+    client.visible = nextVisible;
+    const snapshot: MachinesSnapshot = {
+      protocolVersion: PROTOCOL_VERSION,
+      type: "machines.snapshot",
+      machines: [...hosts.values()].map(({ machine }) => ({
+        ...machine,
+        online: true,
+      })),
+    };
+    client.peer.send(JSON.stringify(snapshot));
+    for (const frame of presence) client.peer.send(JSON.stringify(frame));
   }
 
   #sendError(
@@ -152,11 +339,27 @@ export class RelayRouter {
     code: string,
     message: string,
   ): void {
+    this.#sendErrorByFields(
+      client,
+      request.requestId,
+      request.machineId,
+      code,
+      message,
+    );
+  }
+
+  #sendErrorByFields(
+    client: RelayPeer,
+    requestId: string,
+    machineId: string,
+    code: string,
+    message: string,
+  ): void {
     const response: ControlResponse = {
       protocolVersion: PROTOCOL_VERSION,
       type: "control.response",
-      requestId: request.requestId,
-      machineId: request.machineId,
+      requestId,
+      machineId,
       ok: false,
       error: { code, message },
     };

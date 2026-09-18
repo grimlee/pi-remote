@@ -1,42 +1,26 @@
 # Pairing and Device Identity v1
 
-Pi Remote trust is based on cryptographic device identities, not network location.
+Pi Remote trust is based on cryptographic identities, not network location.
 
 ## Long-lived identities
 
-Each host keeps:
+Host:
 
-- a stable opaque `machineId`
-- an Ed25519 signing keypair
-- an X25519 key-agreement keypair
+- stable opaque `machineId`;
+- Ed25519 signing keypair;
+- X25519 key-agreement keypair.
 
-Each iOS device keeps:
+iPhone:
 
-- a stable opaque `deviceId`
-- an Ed25519 signing keypair
-- an X25519 key-agreement keypair
+- stable opaque `deviceId`;
+- Ed25519 signing keypair;
+- X25519 key-agreement keypair.
 
 Private keys never enter Pi Remote Relay.
 
-The host stores paired-device public keys plus authorization/revocation metadata.
-
-## Why two keypairs
-
-Ed25519 answers:
-
-> Did this exact trusted device sign this control message?
-
-X25519 answers:
-
-> Can host and device derive an encryption key that the relay cannot derive?
-
-Keeping signing and key agreement separate makes key use explicit and lets us later encrypt Collab capabilities host-to-device without reusing signing keys.
-
 ## Pairing invitation
 
-Pairing is initiated locally on the host.
-
-The host creates a short-lived, single-use invitation:
+Host creates a short-lived single-use invitation:
 
 ```json
 {
@@ -51,100 +35,83 @@ The host creates a short-lived, single-use invitation:
     "fingerprint": "..."
   },
   "expiresAt": "2026-09-18T00:02:00.000Z",
-  "secret": "32-byte-random-secret"
+  "secret": "32-byte random secret"
 }
 ```
 
-The invitation is intended to be encoded into a QR code shown on the trusted host.
+The invitation is intended for a QR displayed locally on the trusted Host.
 
-The secret is random, short-lived and single-use. It is not a permanent bearer credential.
+The secret is random, short-lived, single-use, and is not a long-term credential.
 
 ## Pair request
 
-The phone already has its own long-lived device keypairs.
+The phone sends its public identity plus:
 
-It sends:
+- HMAC-SHA256 over the canonical pairing request using the QR secret;
+- Ed25519 signature over the same canonical request.
+
+The Host therefore verifies both physical/local challenge possession and device-key possession.
+
+## Acceptance
+
+After verification the Host:
+
+1. writes the device public identity to its authorization store;
+2. consumes the pairing challenge;
+3. returns a Host-signed acceptance;
+4. issues a Host-signed MachineGrant.
+
+MachineGrant:
 
 ```json
 {
   "version": 1,
-  "pairingId": "pair_...",
-  "machineId": "machine_...",
-  "device": {
-    "id": "device_...",
-    "name": "iPhone",
+  "grantId": "grant_...",
+  "machine": {
+    "id": "machine_...",
     "signingPublicKey": "...",
     "keyAgreementPublicKey": "..."
   },
-  "proof": "HMAC-SHA256(...)",
-  "deviceSignature": "Ed25519(...)"
+  "device": {
+    "id": "device_...",
+    "signingPublicKey": "...",
+    "keyAgreementPublicKey": "..."
+  },
+  "role": "owner",
+  "issuedAt": "2026-09-18T00:00:00.000Z",
+  "signature": "host Ed25519 signature"
 }
 ```
 
-The HMAC is keyed by the one-time QR secret and covers a domain-separated canonical representation of the pairing request.
+The iPhone verifies and stores the MachineGrant in Keychain.
 
-The Ed25519 signature covers the same canonical request.
-
-The host therefore verifies both:
-
-1. the requester possessed the one-time local pairing secret;
-2. the requester possesses the private key corresponding to the public device identity it wants authorized.
-
-## Host acceptance
-
-After successful verification the host:
-
-1. writes the device public identity to its authorization store;
-2. consumes the pairing challenge so it cannot be replayed;
-3. returns an acceptance signed by the host Ed25519 key.
-
-The acceptance binds:
-
-- pairing ID
-- machine ID
-- device ID
-- device signing public key
-- device key-agreement public key
-- acceptance timestamp
-
-The phone verifies that host signature against the host public signing key obtained in the QR invitation.
-
-That prevents the relay from silently replacing the host identity during pairing.
+The grant proves that the machine key authorized this exact device key. It is not sufficient by itself after revocation: Relay routing also requires the device to appear in the currently connected Host's live authorization snapshot.
 
 ## Revocation
 
-Revoking a device marks its authorization record revoked while retaining an audit record.
+Host revocation is authoritative.
 
-Revocation does not require changing:
+A revoked device disappears from the live authorization snapshot and its future per-request signatures are rejected by the Host's local authorization check.
 
-- Pi provider credentials
-- machine identity
-- other paired devices
-- network configuration
-
-Revoked devices must not receive future relay authorization or new Collab capabilities.
+Re-pairing can deliberately restore authorization.
 
 ## Relay role
 
-The final relay may route pairing frames, but it is not the trust anchor.
+Relay routes pairing/authentication data but is not the trust anchor.
 
-Long-term authorization is anchored in:
+Long-term trust remains cryptographic:
 
 ```text
-host private key <-> stored device public key
-device private key <-> stored host public identity
+Host private key <-> device stores signed Host grant
+device private key <-> Host stores device public key
 ```
-
-The current bootstrap bearer token remains a development transport credential until relay challenge-response authentication is implemented.
 
 ## Storage
 
-Host identity and authorized-device records are stored owner-readable only.
+Host identity and authorized-device records are owner-only.
 
-iOS private key material is stored in Keychain, not `UserDefaults`.
+iOS private keys and MachineGrants use Keychain.
 
-## Next security layer
+## Next layer
 
-After pairing is established, X25519 device/host keys will be used to derive per-message encryption keys for sensitive capability delivery, especially Pi Collab control links.
-
-That work is intentionally separate from pairing so each primitive can be tested independently.
+The same paired X25519 keys will be used to protect sensitive Host-to-device capability delivery, especially Pi Collab control links.

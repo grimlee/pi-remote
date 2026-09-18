@@ -1,172 +1,155 @@
 # Security Model
 
+## Core rule
+
+The Relay is a router, not the root of trust.
+
+Pi Remote must remain safe against a Relay that is curious or partially compromised. A compromised Relay may observe control-plane metadata and cause denial of service, but it should not be able to manufacture a valid paired-device control request or obtain provider credentials.
+
 ## Trust boundaries
-
-Pi Remote separates the machine control plane from Pi session content.
-
-### Session content
-
-Pi Collab remains responsible for session confidentiality and control authorization. The remote client must preserve Collab's existing end-to-end encrypted transport semantics.
-
-Normal transcript, tool output, prompts, thinking, and subagent traffic must not be proxied through Pi Remote Relay.
-
-### Machine control
-
-`pi-remote-host` exposes only narrow machine/session operations through an outbound connection to Pi Remote Relay.
-
-The control plane may:
-
-- announce machine presence
-- enumerate Pi Collab sessions
-- issue a generation-bound Collab capability
-- later start/resume/stop explicitly authorized sessions
-
-It must not become a generic remote shell or arbitrary filesystem API.
-
-## Network exposure
-
-The Pi agent and `pi-remote-host` do not require a public inbound port.
-
-Canonical topology:
-
-```text
-pi-remote-host -> authenticated outbound WSS -> Pi Remote Relay <- WSS <- iPhone
-```
-
-LAN, Tailscale, and Cloudflare Tunnel may exist for development or emergency access, but they are not the trust model and must not weaken application-layer authentication.
-
-The public relay is an Internet-facing service and must treat every connection as untrusted until authenticated.
-
-## Identities and secrets
-
-### iOS
-
-Store in Keychain:
-
-- device private key / paired-device credential
-- relay/account credential as appropriate
-- trusted machine identity/fingerprint metadata when needed
-- Collab capability material only for the minimum reconnect lifetime
-
-Do not store these in `UserDefaults`, analytics, or application logs.
 
 ### Host
 
-Store with owner-only permissions:
+The Host owns:
 
-- stable machine private identity
-- pairing state / authorized device public identities
-- short-lived relay credentials
-- push credentials if later enabled
+- machine Ed25519 signing private key;
+- machine X25519 key-agreement private key;
+- paired-device authorization/revocation state;
+- Pi runtime and local credentials.
 
-The current development implementation stores only a non-secret stable machine ID under the user's config directory and uses a bootstrap bearer token from the environment. That bootstrap token is **development-only**.
+### iPhone
 
-Never copy provider API keys, SSH keys, browser cookies, MCP credentials, or full environment variables into Pi Remote Relay.
+The iPhone owns:
 
-## Relay knowledge
+- device Ed25519 signing private key;
+- device X25519 key-agreement private key;
+- Host-signed MachineGrants.
 
-The relay needs only enough information to route the control plane:
+Private device material and grants are stored in Keychain with this-device-only accessibility.
 
-- machine ID/name/platform/capabilities
-- online/offline presence
-- device/account routing identity
-- request IDs and operation names
-- session discovery metadata required by the UI
+### Relay
 
-The relay must not log:
+The Relay may know:
 
-- Collab URLs
-- room keys
-- write tokens
-- prompts or assistant content
-- tool output
-- provider credentials
-- full environment variables
+- public machine/device identities;
+- online/offline state;
+- Host-signed MachineGrants;
+- current Host authorization snapshots;
+- request IDs and operation metadata;
+- session discovery metadata.
 
-### Collab capability delivery
+The Relay must never receive provider API keys, SSH keys, browser cookies, MCP credentials, full environment variables, or arbitrary Host filesystem access.
 
-Development protocol v0 currently allows a `collabUrl` to pass through relay memory as part of a response so the vertical slice can be proven.
+## Connection authentication
 
-This is not the desired production boundary.
+Host and client WebSockets use short-lived Relay challenges.
 
-Before production use, capability delivery should be encrypted to the paired device so the relay routes opaque ciphertext and cannot reuse the Collab capability.
+Each side proves possession of its Ed25519 private key. The signed challenge is domain-separated and binds role, nonce, principal type, principal ID, and signing public key.
 
-## Pairing
+There is no shared bearer token in the canonical authentication flow.
 
-Production pairing should require explicit local/physical approval on the host.
-
-Recommended shape:
-
-1. host creates a short-lived pairing challenge;
-2. host displays a QR code containing relay identity, machine identity/fingerprint, nonce, and ephemeral public material;
-3. iPhone creates its device keypair and scans the challenge;
-4. pairing messages travel through the relay but are cryptographically bound to the host/device keys;
-5. host explicitly approves and records the device public identity;
-6. subsequent control requests use short-lived authenticated sessions bound to that device identity.
-
-Do not put a permanent bearer credential in the QR code.
-
-The development bootstrap bearer token exists only to bring up the first relay/host/iOS vertical slice and must be removed from the production pairing flow.
+Public deployment requires WSS/TLS even though device/Host identity is cryptographically authenticated, because TLS still protects metadata and server identity and prevents trivial active network interference.
 
 ## Authorization
 
-Initial role: `owner`.
+Pairing produces a Host-signed MachineGrant binding:
 
-The owner may:
+```text
+machine public identity
+        +
+device public identity
+        +
+role
+```
 
-- observe authorized machine presence
-- list active Pi sessions
-- obtain a Collab control/view link for an explicitly selected session generation
-- later start/resume/stop sessions
+The Relay verifies the grant but does not treat it as irrevocable authority.
 
-Authorization is by machine/device identity, not by possession of an IP address, VPN membership, or knowledge of a relay URL.
+The authenticated Host also publishes its current active-device authorization snapshot. A request is routable only if the signed grant and live Host snapshot agree.
 
-Every link request must include the generation observed during discovery. If the host has rotated rooms, it returns `stale_generation`.
+This preserves Host-authoritative revocation.
 
-## Host authoritative state
+## Per-request device signatures
 
-Disconnecting the phone or relay does not stop Pi.
+Relay-level routing checks are not sufficient because a compromised Relay could otherwise invent requests toward the Host.
 
-After reconnection:
+Every control request therefore carries a device Ed25519 signature over an operation-specific canonical message.
 
-1. mobile re-authenticates to the relay;
-2. refreshes machine presence;
-3. refreshes session metadata;
-4. reconnects through Pi Collab;
-5. accepts the authoritative session snapshot.
+The Host independently verifies:
 
-No security or correctness property may depend on a mobile socket staying alive.
+- local paired-device state;
+- request signature;
+- target machine ID;
+- issuance time window;
+- request-ID replay cache.
+
+The Relay cannot forge a new request without the iPhone private key.
+
+A Relay may replay a previously observed signed request, so the Host rejects duplicate request IDs and stale timestamps. The in-memory replay cache is bounded by the acceptance window; persistent replay protection across an immediate Host restart may be added if later threat modeling requires it.
+
+## Machine impersonation
+
+A `machineId` is not sufficient identity.
+
+Relay routing binds a grant to the machine Ed25519 signing public key. A connection claiming the same opaque machine ID with another key cannot receive requests authorized for the trusted machine key.
+
+## Pairing
+
+Pairing uses:
+
+- short-lived single-use QR secret;
+- HMAC proof of possession of that secret;
+- device Ed25519 proof of possession;
+- Host-signed acceptance and MachineGrant.
+
+The QR does not contain a permanent bearer credential.
 
 ## Revocation
 
-A paired device must be revocable without rotating Pi provider credentials.
+A device can be revoked without rotating:
 
-Revocation should invalidate:
+- provider credentials;
+- machine identity;
+- other device identities;
+- network configuration.
 
-- future relay/control-plane authorization for that device;
-- device-bound session/control credentials;
-- future Collab capability issuance.
+Revocation removes the device from the Host live authorization snapshot and causes future Host control signature checks to fail.
 
-An already-issued Collab capability follows upstream Pi Collab semantics. Immediate revocation may require rotating/stopping that Collab room.
+Already-issued Pi Collab capabilities follow upstream Collab semantics until their room/generation rotates. The next layer will make newly issued Collab capabilities Host-to-device encrypted.
 
-## Logging
+## Collab capability delivery
 
-Allowed operational logs should be limited to data such as:
+Current control-plane v0 can still return a plaintext `collabUrl` through Relay memory.
 
-- timestamps
-- opaque machine/device IDs
-- operation name
-- session instance ID and generation where required
-- success/failure code
-- connection lifecycle events
+This is the next known security boundary to remove.
 
-Never log secret capability values or session content.
+The planned layer uses the paired Host/device X25519 keys to derive encryption material so the Relay only routes ciphertext.
 
-## Threats explicitly out of scope for MVP
+## Session data
 
-- fully compromised host computer
-- fully compromised/jailbroken iPhone with key extraction capability
-- malicious Pi tools already authorized by the user
-- relay traffic metadata anonymity
+Normal Pi transcript, assistant streaming, tool output, prompts, and subagent traffic stay on Pi Collab's end-to-end encrypted data plane. Pi Remote Relay does not duplicate that protocol.
 
-These boundaries do not justify weakening transport, authentication, or secret handling.
+## Storage
+
+Host private identity files and authorization records are owner-only.
+
+iOS private identity and MachineGrants are stored in Keychain, not `UserDefaults`.
+
+Secrets and capability material must never enter logs, analytics, crash breadcrumbs, or telemetry.
+
+## Network exposure
+
+The Host requires no public inbound port:
+
+```text
+pi-remote-host -> WSS Relay <- WSS iPhone
+```
+
+LAN/Tailscale/Cloudflare may be debugging fallbacks, never authorization signals.
+
+## Out of scope for MVP
+
+- fully compromised Host OS;
+- fully compromised/jailbroken iPhone with extracted Keychain material;
+- malicious Pi tools already explicitly authorized by the user;
+- traffic-metadata anonymity;
+- protection against Relay denial of service.

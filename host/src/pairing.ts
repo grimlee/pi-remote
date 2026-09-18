@@ -9,6 +9,7 @@ import {
   verify,
 } from "node:crypto";
 import type { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import { issueMachineGrant, type MachineGrant } from "./machineGrant.js";
 import {
   publicMachineIdentity,
   type MachineIdentity,
@@ -46,6 +47,7 @@ export interface PairingAcceptance {
   deviceId: string;
   acceptedAt: string;
   hostSignature: string;
+  grant: MachineGrant;
 }
 
 export class PairingError extends Error {
@@ -234,6 +236,7 @@ export class PairingService {
     }
 
     const acceptedAt = new Date(this.now()).toISOString();
+    const grant = issueMachineGrant(this.machine, request.device, acceptedAt);
 
     await this.devices.authorize({
       id: request.device.id,
@@ -263,6 +266,7 @@ export class PairingService {
       deviceId: request.device.id,
       acceptedAt,
       hostSignature,
+      grant,
     };
   }
 

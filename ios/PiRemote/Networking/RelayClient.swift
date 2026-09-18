@@ -1,4 +1,5 @@
 import Foundation
+import PiRemoteCore
 
 actor RelayClient {
     enum Event: Sendable {
@@ -9,6 +10,7 @@ actor RelayClient {
     enum RelayError: LocalizedError, Sendable {
         case notConnected
         case invalidFrame
+        case authenticationFailed
         case remote(code: String, message: String)
 
         var errorDescription: String? {
@@ -17,6 +19,8 @@ actor RelayClient {
                 return "Pi Remote Relay is not connected."
             case .invalidFrame:
                 return "Pi Remote Relay returned an invalid frame."
+            case .authenticationFailed:
+                return "Pi Remote Relay authentication failed."
             case let .remote(_, message):
                 return message
             }
@@ -25,9 +29,12 @@ actor RelayClient {
 
     struct Configuration: Sendable {
         let url: URL
-        let token: String
-        let deviceId: String
         let deviceName: String
+
+        init(url: URL, deviceName: String = "iPhone") {
+            self.url = url
+            self.deviceName = deviceName
+        }
     }
 
     private struct FrameHeader: Decodable {
@@ -35,15 +42,30 @@ actor RelayClient {
         let type: String
     }
 
+    private struct AuthResponse: Encodable, Sendable {
+        let protocolVersion = 0
+        let type = "auth.response"
+        let challengeId: String
+        let principal: RelayAuthPrincipal
+        let signature: String
+    }
+
+    private struct AuthAccepted: Decodable {
+        let protocolVersion: Int
+        let type: String
+        let principal: RelayAuthPrincipal
+    }
+
     private struct ClientHello: Encodable, Sendable {
         let protocolVersion = 0
         let type = "client.hello"
-        let device: Device
+        let device: DevicePublicIdentity
+    }
 
-        struct Device: Encodable, Sendable {
-            let id: String
-            let name: String
-        }
+    private struct ClientAuthorizations: Encodable, Sendable {
+        let protocolVersion = 0
+        let type = "client.authorizations"
+        let grants: [MachineGrant]
     }
 
     private struct MachinesSnapshotFrame: Decodable {
@@ -59,12 +81,19 @@ actor RelayClient {
         let online: Bool
     }
 
+    private struct ControlAuthorization: Encodable, Sendable {
+        let deviceId: String
+        let issuedAtMs: Int64
+        let signature: String
+    }
+
     private struct ControlRequest<Payload: Encodable & Sendable>: Encodable, Sendable {
         let protocolVersion = 0
         let type = "control.request"
         let requestId: String
         let machineId: String
         let payload: Payload
+        let authorization: ControlAuthorization
     }
 
     private struct SessionsListPayload: Encodable, Sendable {
@@ -107,6 +136,8 @@ actor RelayClient {
     }
 
     private let configuration: Configuration
+    private let identityStore: DeviceIdentityStore
+    private let grantStore: MachineGrantStore
     private let onEvent: @Sendable (Event) async -> Void
     private let session: URLSession
     private let encoder = JSONEncoder()
@@ -114,14 +145,19 @@ actor RelayClient {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var authenticatedDevice: DevicePublicIdentity?
     private var pendingSessionLists: [String: CheckedContinuation<[RemoteSession], Error>] = [:]
     private var pendingSessionLinks: [String: CheckedContinuation<SessionLink, Error>] = [:]
 
     init(
         configuration: Configuration,
+        identityStore: DeviceIdentityStore = DeviceIdentityStore(),
+        grantStore: MachineGrantStore = MachineGrantStore(),
         onEvent: @escaping @Sendable (Event) async -> Void
     ) {
         self.configuration = configuration
+        self.identityStore = identityStore
+        self.grantStore = grantStore
         self.onEvent = onEvent
         self.session = URLSession(configuration: .default)
 
@@ -133,24 +169,66 @@ actor RelayClient {
     func connect() async throws {
         disconnect()
 
-        var request = URLRequest(url: configuration.url)
-        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
-
-        let socket = session.webSocketTask(with: request)
+        let socket = session.webSocketTask(with: configuration.url)
         self.socket = socket
         socket.resume()
 
-        try await send(
-            ClientHello(
-                device: .init(
-                    id: configuration.deviceId,
-                    name: configuration.deviceName
+        do {
+            let challengeData = try await receiveData(from: socket)
+            let challenge = try decoder.decode(RelayAuthChallenge.self, from: challengeData)
+            guard challenge.protocolVersion == 0,
+                  challenge.type == "auth.challenge",
+                  challenge.role == .client
+            else {
+                throw RelayError.authenticationFailed
+            }
+
+            let identity = try await identityStore.loadOrCreate(
+                deviceName: configuration.deviceName
+            )
+            let principal = RelayAuthPrincipal(
+                kind: .device,
+                id: identity.id,
+                signingPublicKey: identity.signingPublicKey
+            )
+            let authMessage = RelayAuthCrypto.message(
+                challenge: challenge,
+                principal: principal
+            )
+            let signature = try await identityStore.signature(for: authMessage)
+                .base64URLEncodedString()
+
+            try await send(
+                AuthResponse(
+                    challengeId: challenge.challengeId,
+                    principal: principal,
+                    signature: signature
                 )
             )
-        )
 
-        receiveTask = Task { [weak self] in
-            await self?.receiveLoop()
+            let acceptedData = try await receiveData(from: socket)
+            let accepted = try decoder.decode(AuthAccepted.self, from: acceptedData)
+            guard accepted.protocolVersion == 0,
+                  accepted.type == "auth.accepted",
+                  accepted.principal == principal
+            else {
+                throw RelayError.authenticationFailed
+            }
+
+            authenticatedDevice = identity
+            try await send(ClientHello(device: identity))
+
+            let grants = try await grantStore.all(for: identity)
+            try await send(ClientAuthorizations(grants: grants))
+
+            receiveTask = Task { [weak self] in
+                await self?.receiveLoop()
+            }
+        } catch {
+            socket.cancel(with: .policyViolation, reason: nil)
+            self.socket = nil
+            authenticatedDevice = nil
+            throw error
         }
     }
 
@@ -159,6 +237,7 @@ actor RelayClient {
         receiveTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        authenticatedDevice = nil
 
         let error = CancellationError()
         for continuation in pendingSessionLists.values {
@@ -173,11 +252,30 @@ actor RelayClient {
     }
 
     func listSessions(machineId: String) async throws -> [RemoteSession] {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
         let requestId = UUID().uuidString
+        let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let message = ControlRequestCrypto.sessionsListMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: device.id,
+            issuedAtMs: issuedAtMs
+        )
+        let signature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+
         let request = ControlRequest(
             requestId: requestId,
             machineId: machineId,
-            payload: SessionsListPayload()
+            payload: SessionsListPayload(),
+            authorization: ControlAuthorization(
+                deviceId: device.id,
+                issuedAtMs: issuedAtMs,
+                signature: signature
+            )
         )
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -198,7 +296,24 @@ actor RelayClient {
         generation: Int,
         access: RemoteSession.Access
     ) async throws -> SessionLink {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
         let requestId = UUID().uuidString
+        let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let message = ControlRequestCrypto.sessionsLinkMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: device.id,
+            issuedAtMs: issuedAtMs,
+            instanceId: instanceId,
+            generation: generation,
+            access: access.rawValue
+        )
+        let signature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+
         let request = ControlRequest(
             requestId: requestId,
             machineId: machineId,
@@ -206,6 +321,11 @@ actor RelayClient {
                 instanceId: instanceId,
                 generation: generation,
                 access: access
+            ),
+            authorization: ControlAuthorization(
+                deviceId: device.id,
+                issuedAtMs: issuedAtMs,
+                signature: signature
             )
         )
 
@@ -227,24 +347,27 @@ actor RelayClient {
         try await socket.send(.data(data))
     }
 
+    private func receiveData(
+        from socket: URLSessionWebSocketTask
+    ) async throws -> Data {
+        let message = try await socket.receive()
+        switch message {
+        case let .data(value):
+            return value
+        case let .string(value):
+            guard let data = value.data(using: .utf8) else {
+                throw RelayError.invalidFrame
+            }
+            return data
+        @unknown default:
+            throw RelayError.invalidFrame
+        }
+    }
+
     private func receiveLoop() async {
         while !Task.isCancelled, let socket {
             do {
-                let message = try await socket.receive()
-                let data: Data
-
-                switch message {
-                case let .data(value):
-                    data = value
-                case let .string(value):
-                    guard let value = value.data(using: .utf8) else {
-                        throw RelayError.invalidFrame
-                    }
-                    data = value
-                @unknown default:
-                    throw RelayError.invalidFrame
-                }
-
+                let data = try await receiveData(from: socket)
                 try await handle(data)
             } catch {
                 if !Task.isCancelled {

@@ -1,19 +1,15 @@
-import { loadOrCreateMachineIdentity, publicMachineIdentity } from "./machineIdentity.js";
+import { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import { loadOrCreateMachineIdentity } from "./machineIdentity.js";
 import { RelayHostClient } from "./relayClient.js";
 
 const relayUrl = process.env.PI_REMOTE_RELAY_URL ?? "ws://127.0.0.1:8780/v0/host";
-const token = process.env.PI_REMOTE_RELAY_TOKEN;
 
-if (!token) {
-  throw new Error("PI_REMOTE_RELAY_TOKEN is required while development bootstrap authentication is in use");
-}
-
-const storedMachine = await loadOrCreateMachineIdentity();
-const machine = publicMachineIdentity(storedMachine);
+const machine = await loadOrCreateMachineIdentity();
+const devices = new AuthorizedDeviceStore();
 const client = new RelayHostClient({
   url: relayUrl,
-  token,
   machine,
+  devices,
 });
 
 client.start();

@@ -1,17 +1,18 @@
 import WebSocket from "ws";
-import type { PublicMachineIdentity } from "./machineIdentity.js";
+import type { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import { ControlRequestAuthorizer, type SignedControlRequest } from "./controlAuthorization.js";
+import {
+  publicMachineIdentity,
+  type MachineIdentity,
+} from "./machineIdentity.js";
 import { PiRegistry, PiRegistryError } from "./piRegistry.js";
+import {
+  signHostRelayChallenge,
+  type RelayAuthChallenge,
+} from "./relayAuth.js";
 import type { SessionAccess } from "./types.js";
 
 const PROTOCOL_VERSION = 0;
-
-interface ControlRequest {
-  protocolVersion: 0;
-  type: "control.request";
-  requestId: string;
-  machineId: string;
-  payload: Record<string, unknown>;
-}
 
 interface ControlResponse {
   protocolVersion: 0;
@@ -28,8 +29,8 @@ interface ControlResponse {
 
 export interface RelayHostClientOptions {
   url: string;
-  token: string;
-  machine: PublicMachineIdentity;
+  machine: MachineIdentity;
+  devices: AuthorizedDeviceStore;
   registry?: PiRegistry;
   minReconnectMs?: number;
   maxReconnectMs?: number;
@@ -41,29 +42,84 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function parseRequest(text: string): ControlRequest | null {
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(text);
-  } catch {
+function parseRequest(value: Record<string, unknown>): SignedControlRequest | null {
+  if (value.protocolVersion !== PROTOCOL_VERSION
+    || value.type !== "control.request"
+    || typeof value.requestId !== "string"
+    || typeof value.machineId !== "string") {
     return null;
   }
-  const frame = asRecord(decoded);
-  if (!frame
-    || frame.protocolVersion !== PROTOCOL_VERSION
-    || frame.type !== "control.request"
-    || typeof frame.requestId !== "string"
-    || typeof frame.machineId !== "string") {
+
+  const payload = asRecord(value.payload);
+  const authorization = asRecord(value.authorization);
+  if (!payload
+    || !authorization
+    || typeof authorization.deviceId !== "string"
+    || typeof authorization.issuedAtMs !== "number"
+    || typeof authorization.signature !== "string") {
     return null;
   }
-  const payload = asRecord(frame.payload);
-  if (!payload) return null;
+
+  if (payload.op === "sessions.list") {
+    return {
+      protocolVersion: 0,
+      type: "control.request",
+      requestId: value.requestId,
+      machineId: value.machineId,
+      payload: { op: "sessions.list" },
+      authorization: {
+        deviceId: authorization.deviceId,
+        issuedAtMs: authorization.issuedAtMs,
+        signature: authorization.signature,
+      },
+    };
+  }
+
+  const access = parseAccess(payload.access);
+  if (payload.op === "sessions.link"
+    && typeof payload.instanceId === "string"
+    && typeof payload.generation === "number"
+    && Number.isInteger(payload.generation)
+    && payload.generation >= 1
+    && access) {
+    return {
+      protocolVersion: 0,
+      type: "control.request",
+      requestId: value.requestId,
+      machineId: value.machineId,
+      payload: {
+        op: "sessions.link",
+        instanceId: payload.instanceId,
+        generation: payload.generation,
+        access,
+      },
+      authorization: {
+        deviceId: authorization.deviceId,
+        issuedAtMs: authorization.issuedAtMs,
+        signature: authorization.signature,
+      },
+    };
+  }
+
+  return null;
+}
+
+function parseAuthChallenge(value: Record<string, unknown>): RelayAuthChallenge | null {
+  if (value.protocolVersion !== 0
+    || value.type !== "auth.challenge"
+    || value.role !== "host"
+    || typeof value.challengeId !== "string"
+    || typeof value.nonce !== "string"
+    || typeof value.expiresAt !== "string") {
+    return null;
+  }
   return {
     protocolVersion: 0,
-    type: "control.request",
-    requestId: frame.requestId,
-    machineId: frame.machineId,
-    payload,
+    type: "auth.challenge",
+    challengeId: value.challengeId,
+    role: "host",
+    nonce: value.nonce,
+    expiresAt: value.expiresAt,
   };
 }
 
@@ -84,15 +140,21 @@ function safeMessage(error: unknown): string {
 
 export class RelayHostClient {
   readonly #registry: PiRegistry;
+  readonly #authorizer: ControlRequestAuthorizer;
   readonly #minReconnectMs: number;
   readonly #maxReconnectMs: number;
   #socket: WebSocket | null = null;
   #stopped = true;
+  #authenticated = false;
   #reconnectMs: number;
   #reconnectTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: RelayHostClientOptions) {
     this.#registry = options.registry ?? new PiRegistry();
+    this.#authorizer = new ControlRequestAuthorizer(
+      options.devices,
+      options.machine.id,
+    );
     this.#minReconnectMs = options.minReconnectMs ?? 1_000;
     this.#maxReconnectMs = options.maxReconnectMs ?? 30_000;
     this.#reconnectMs = this.#minReconnectMs;
@@ -112,37 +174,92 @@ export class RelayHostClient {
     }
     this.#socket?.close(1000, "host shutting down");
     this.#socket = null;
+    this.#authenticated = false;
+  }
+
+  async refreshAuthorizationSnapshot(): Promise<void> {
+    const ws = this.#socket;
+    if (!ws || !this.#authenticated || ws.readyState !== WebSocket.OPEN) return;
+    await this.#sendAuthorizationSnapshot(ws);
   }
 
   #connect(): void {
     if (this.#stopped) return;
 
-    const ws = new WebSocket(this.options.url, {
-      headers: {
-        authorization: `Bearer ${this.options.token}`,
-      },
-    });
+    const ws = new WebSocket(this.options.url);
     this.#socket = ws;
+    this.#authenticated = false;
 
     ws.on("open", () => {
       this.#reconnectMs = this.#minReconnectMs;
-      ws.send(JSON.stringify({
-        protocolVersion: PROTOCOL_VERSION,
-        type: "host.hello",
-        machine: {
-          id: this.options.machine.id,
-          name: this.options.machine.name,
-          platform: this.options.machine.platform,
-          capabilities: ["sessions.list", "sessions.link"],
-        },
-      }));
-      console.log(`Pi Remote host connected as ${this.options.machine.name} (${this.options.machine.id})`);
     });
 
     ws.on("message", raw => {
-      const request = parseRequest(raw.toString("utf8"));
-      if (!request || request.machineId !== this.options.machine.id) return;
-      void this.#handleRequest(ws, request);
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(raw.toString("utf8"));
+      } catch {
+        ws.close(1003, "invalid relay JSON");
+        return;
+      }
+
+      const value = asRecord(decoded);
+      if (!value) {
+        ws.close(1003, "invalid relay frame");
+        return;
+      }
+
+      const challenge = parseAuthChallenge(value);
+      if (challenge) {
+        if (Date.parse(challenge.expiresAt) <= Date.now()) {
+          ws.close(4003, "expired relay challenge");
+          return;
+        }
+        ws.send(JSON.stringify(
+          signHostRelayChallenge(this.options.machine, challenge),
+        ));
+        return;
+      }
+
+      if (value.protocolVersion === 0 && value.type === "auth.accepted") {
+        const principal = asRecord(value.principal);
+        if (!principal
+          || principal.kind !== "machine"
+          || principal.id !== this.options.machine.id
+          || principal.signingPublicKey !== this.options.machine.signingPrivateKey.x) {
+          ws.close(4003, "relay authenticated unexpected identity");
+          return;
+        }
+
+        this.#authenticated = true;
+        const machine = publicMachineIdentity(this.options.machine);
+        ws.send(JSON.stringify({
+          protocolVersion: PROTOCOL_VERSION,
+          type: "host.hello",
+          machine: {
+            id: machine.id,
+            name: machine.name,
+            platform: machine.platform,
+            capabilities: ["sessions.list", "sessions.link"],
+            signingPublicKey: machine.signingPublicKey,
+            keyAgreementPublicKey: machine.keyAgreementPublicKey,
+            fingerprint: machine.fingerprint,
+          },
+        }));
+        void this.#sendAuthorizationSnapshot(ws);
+        console.log(
+          `Pi Remote host authenticated as ${machine.name} (${machine.id})`,
+        );
+        return;
+      }
+
+      const request = parseRequest(value);
+      if (!request
+        || !this.#authenticated
+        || request.machineId !== this.options.machine.id) {
+        return;
+      }
+      void this.#authorizeAndHandleRequest(ws, request);
     });
 
     ws.on("error", error => {
@@ -151,6 +268,7 @@ export class RelayHostClient {
 
     ws.on("close", () => {
       if (this.#socket === ws) this.#socket = null;
+      this.#authenticated = false;
       this.#scheduleReconnect();
     });
   }
@@ -158,7 +276,10 @@ export class RelayHostClient {
   #scheduleReconnect(): void {
     if (this.#stopped || this.#reconnectTimer) return;
     const delay = this.#reconnectMs;
-    this.#reconnectMs = Math.min(this.#maxReconnectMs, Math.max(delay + 1, delay * 2));
+    this.#reconnectMs = Math.min(
+      this.#maxReconnectMs,
+      Math.max(delay + 1, delay * 2),
+    );
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = null;
       this.#connect();
@@ -166,7 +287,52 @@ export class RelayHostClient {
     this.#reconnectTimer.unref();
   }
 
-  async #handleRequest(ws: WebSocket, request: ControlRequest): Promise<void> {
+  async #sendAuthorizationSnapshot(ws: WebSocket): Promise<void> {
+    const devices = (await this.options.devices.list())
+      .filter(device => device.revokedAt === null)
+      .map(device => ({
+        id: device.id,
+        signingPublicKey: device.signingPublicKey,
+        keyAgreementPublicKey: device.keyAgreementPublicKey,
+        role: device.role,
+      }));
+
+    if (ws.readyState !== WebSocket.OPEN || ws !== this.#socket) return;
+    ws.send(JSON.stringify({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "host.authorization_snapshot",
+      machineId: this.options.machine.id,
+      devices,
+    }));
+  }
+
+  async #authorizeAndHandleRequest(
+    ws: WebSocket,
+    request: SignedControlRequest,
+  ): Promise<void> {
+    if (!await this.#authorizer.authorize(request)) {
+      const response: ControlResponse = {
+        protocolVersion: 0,
+        type: "control.response",
+        requestId: request.requestId,
+        machineId: request.machineId,
+        ok: false,
+        error: {
+          code: "unauthorized",
+          message: "Control request signature is invalid, expired, revoked, or replayed.",
+        },
+      };
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+      return;
+    }
+
+    await this.#handleRequest(ws, request);
+  }
+
+  async #handleRequest(
+    ws: WebSocket,
+    request: SignedControlRequest,
+  ): Promise<void> {
     let response: ControlResponse;
 
     try {
@@ -182,18 +348,11 @@ export class RelayHostClient {
           payload: { op, sessions },
         };
       } else if (op === "sessions.link") {
-        const instanceId = request.payload.instanceId;
-        const generation = request.payload.generation;
-        const access = parseAccess(request.payload.access);
-        if (typeof instanceId !== "string"
-          || typeof generation !== "number"
-          || !Number.isInteger(generation)
-          || generation < 1
-          || !access) {
-          throw new TypeError("sessions.link requires instanceId, positive generation, and access");
-        }
-
-        const link = await this.#registry.createLink(instanceId, generation, access);
+        const link = await this.#registry.createLink(
+          request.payload.instanceId,
+          request.payload.generation,
+          request.payload.access,
+        );
         response = {
           protocolVersion: 0,
           type: "control.response",
