@@ -66,6 +66,21 @@ actor DeviceIdentityStore {
         return try key.signature(for: message)
     }
 
+    func decryptCollabCapability(
+        _ envelope: EncryptedCollabCapability,
+        machineKeyAgreementPublicKey: String
+    ) throws -> String {
+        guard let stored = try loadStoredIdentity() else {
+            throw DeviceIdentityStoreError.invalidStoredIdentity
+        }
+
+        return try CollabCapabilityCrypto.decrypt(
+            envelope,
+            devicePrivateKeyRaw: stored.keyAgreementPrivateKey,
+            machinePublicKeyBase64URL: machineKeyAgreementPublicKey
+        )
+    }
+
     private func publicIdentity(from stored: StoredIdentity) throws -> DevicePublicIdentity {
         guard stored.version == 1,
               stored.id.hasPrefix("device_"),

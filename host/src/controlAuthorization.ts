@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from "node:crypto";
-import type { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import type { AuthorizedDevice, AuthorizedDeviceStore } from "./authorizedDevices.js";
 import type { SessionAccess } from "./types.js";
 
 export interface ControlAuthorization {
@@ -67,7 +67,7 @@ export class ControlRequestAuthorizer {
     private readonly maxSkewMs = 60_000,
   ) {}
 
-  async authorize(request: SignedControlRequest): Promise<boolean> {
+  async authorize(request: SignedControlRequest): Promise<AuthorizedDevice | null> {
     const now = this.now();
     this.#prune(now);
 
@@ -75,11 +75,11 @@ export class ControlRequestAuthorizer {
       || !Number.isSafeInteger(request.authorization.issuedAtMs)
       || Math.abs(now - request.authorization.issuedAtMs) > this.maxSkewMs
       || this.#seen.has(request.requestId)) {
-      return false;
+      return null;
     }
 
     const device = await this.devices.getActive(request.authorization.deviceId);
-    if (!device) return false;
+    if (!device) return null;
 
     let valid = false;
     try {
@@ -107,10 +107,10 @@ export class ControlRequestAuthorizer {
       valid = false;
     }
 
-    if (!valid) return false;
+    if (!valid) return null;
 
     this.#seen.set(request.requestId, now);
-    return true;
+    return device;
   }
 
   #prune(now: number): void {
