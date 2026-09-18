@@ -57,6 +57,8 @@ final class AppStore {
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
     private var shouldRefreshAfterNewSession = false
+    private var backgroundedAt: Date?
+    private let backgroundGraceInterval: TimeInterval = 3 * 60
 
     func start() async {
         guard !started else { return }
@@ -350,19 +352,32 @@ final class AppStore {
     }
 
     func suspend() async {
-        needsSessionRestore = selectedSessionID != nil
-        await disconnectRelayAndRpc()
-        if profile != nil {
-            connectionState = .disconnected
-        }
+        backgroundedAt = Date()
     }
 
     func resume() async {
         guard let profile else {
+            backgroundedAt = nil
             connectionState = .unpaired
             return
         }
-        guard relayClient == nil else { return }
+
+        let elapsed = backgroundedAt.map {
+            Date().timeIntervalSince($0)
+        }
+        backgroundedAt = nil
+
+        if let relayClient {
+            let connected = await relayClient.isConnected()
+            if connected,
+               elapsed == nil
+                || elapsed! <= backgroundGraceInterval {
+                return
+            }
+
+            needsSessionRestore = selectedSessionID != nil
+            await disconnectRelayAndRpc()
+        }
 
         do {
             try await connectRelay(profile: profile)
@@ -451,6 +466,15 @@ final class AppStore {
                 try await rpcClient.receive(frame)
             } catch {
                 sessionError = error.localizedDescription
+            }
+
+        case let .transportClosed(reason):
+            relayClient = nil
+            needsSessionRestore = selectedSessionID != nil
+
+            if backgroundedAt == nil {
+                connectionState = .disconnected
+                sessionError = reason
             }
         }
     }
