@@ -10,6 +10,8 @@ struct PiRpcSnapshot: Sendable {
 
     var phase: Phase = .connecting
     var messages: [JSONValue] = []
+    var liveMessage: JSONValue?
+    var messageRevision: Int = 0
     var state: JSONValue?
     var lastEvent: JSONValue?
     var uiRequest: JSONValue?
@@ -49,7 +51,7 @@ actor PiRpcClient {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    private var snapshot = PiRpcSnapshot()
+    private var snapshot: PiRpcSnapshot
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
     private var isClosed = false
@@ -58,6 +60,7 @@ actor PiRpcClient {
         capabilityString: String,
         machineId: String,
         deviceId: String,
+        initialMessages: [JSONValue] = [],
         sendFrame: @escaping @Sendable (PiRpcRelayFrame) async throws -> Void
     ) throws {
         let stream = AsyncStream<PiRpcClientEvent>.makeStream()
@@ -66,6 +69,7 @@ actor PiRpcClient {
         self.capability = try PiRpcCapability.parse(capabilityString)
         self.machineId = machineId
         self.deviceId = deviceId
+        self.snapshot = PiRpcSnapshot(messages: initialMessages)
         self.sendFrame = sendFrame
     }
 
@@ -159,6 +163,7 @@ actor PiRpcClient {
         }
         isClosed = true
         snapshot.phase = .closed
+        snapshot.liveMessage = nil
         emitSnapshot()
         continuation.finish()
     }
@@ -203,17 +208,32 @@ actor PiRpcClient {
                 snapshot.phase = .live
             } else if success,
                       command == "get_messages",
-                      let messages = object["data"]?.objectValue?["messages"]?.arrayValue {
+                      let messages = object["data"]?
+                        .objectValue?["messages"]?
+                        .arrayValue {
                 snapshot.messages = messages
+                snapshot.messageRevision += 1
                 snapshot.phase = .live
             } else {
                 snapshot.lastEvent = value
             }
 
+        case "message_start":
+            if let message = object["message"] {
+                snapshot.liveMessage = message
+            }
+            snapshot.lastEvent = value
+
+        case "message_update":
+            applyMessageUpdate(object)
+            snapshot.lastEvent = value
+
         case "message_end":
             if let message = object["message"] {
                 snapshot.messages.append(message)
+                snapshot.messageRevision += 1
             }
+            snapshot.liveMessage = nil
             snapshot.lastEvent = value
 
         case "agent_start":
@@ -235,6 +255,7 @@ actor PiRpcClient {
         case "piremote.channel_closed":
             isClosed = true
             snapshot.phase = .closed
+            snapshot.liveMessage = nil
             snapshot.lastEvent = value
             continuation.yield(.snapshot(snapshot))
             continuation.yield(.disconnected("The Pi RPC process closed."))
@@ -246,6 +267,125 @@ actor PiRpcClient {
         }
 
         emitSnapshot()
+    }
+
+    private func applyMessageUpdate(_ object: [String: JSONValue]) {
+        guard let update = object["assistantMessageEvent"]?.objectValue,
+              let updateType = update["type"]?.stringValue,
+              let rawIndex = update["contentIndex"]?.integerValue,
+              let index = Int(exactly: rawIndex),
+              index >= 0,
+              var message = snapshot.liveMessage?.objectValue
+        else {
+            return
+        }
+
+        var content = message["content"]?.arrayValue ?? []
+        while content.count <= index {
+            content.append(.object([:]))
+        }
+
+        switch updateType {
+        case "text_start":
+            content[index] = .object([
+                "type": .string("text"),
+                "text": .string("")
+            ])
+
+        case "text_delta":
+            appendDelta(
+                update["delta"]?.stringValue ?? "",
+                key: "text",
+                type: "text",
+                index: index,
+                content: &content
+            )
+
+        case "text_end":
+            content[index] = .object([
+                "type": .string("text"),
+                "text": .string(
+                    update["content"]?.stringValue
+                        ?? textValue(
+                            content[index],
+                            key: "text"
+                        )
+                )
+            ])
+
+        case "thinking_start":
+            content[index] = .object([
+                "type": .string("thinking"),
+                "thinking": .string("")
+            ])
+
+        case "thinking_delta":
+            appendDelta(
+                update["delta"]?.stringValue ?? "",
+                key: "thinking",
+                type: "thinking",
+                index: index,
+                content: &content
+            )
+
+        case "thinking_end":
+            content[index] = .object([
+                "type": .string("thinking"),
+                "thinking": .string(
+                    update["content"]?.stringValue
+                        ?? textValue(
+                            content[index],
+                            key: "thinking"
+                        )
+                )
+            ])
+
+        case "toolcall_start":
+            var block: [String: JSONValue] = [
+                "type": .string("toolCall"),
+                "name": .string(
+                    update["toolName"]?.stringValue ?? "Tool"
+                )
+            ]
+            if let id = update["id"]?.stringValue {
+                block["id"] = .string(id)
+            }
+            content[index] = .object(block)
+
+        case "toolcall_end":
+            if let toolCall = update["toolCall"]?.objectValue {
+                var block = toolCall
+                block["type"] = .string("toolCall")
+                content[index] = .object(block)
+            }
+
+        default:
+            break
+        }
+
+        message["content"] = .array(content)
+        snapshot.liveMessage = .object(message)
+    }
+
+    private func appendDelta(
+        _ delta: String,
+        key: String,
+        type: String,
+        index: Int,
+        content: inout [JSONValue]
+    ) {
+        var block = content[index].objectValue ?? [:]
+        block["type"] = .string(type)
+        let existing = block[key]?.stringValue ?? ""
+        block[key] = .string(existing + delta)
+        content[index] = .object(block)
+    }
+
+    private func textValue(
+        _ value: JSONValue,
+        key: String
+    ) -> String {
+        value.objectValue?[key]?.stringValue ?? ""
     }
 
     private func setStreaming(_ streaming: Bool) {
