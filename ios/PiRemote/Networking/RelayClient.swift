@@ -81,12 +81,19 @@ actor RelayClient {
         let online: Bool
     }
 
+    private struct ControlAuthorization: Encodable, Sendable {
+        let deviceId: String
+        let issuedAtMs: Int64
+        let signature: String
+    }
+
     private struct ControlRequest<Payload: Encodable & Sendable>: Encodable, Sendable {
         let protocolVersion = 0
         let type = "control.request"
         let requestId: String
         let machineId: String
         let payload: Payload
+        let authorization: ControlAuthorization
     }
 
     private struct SessionsListPayload: Encodable, Sendable {
@@ -138,6 +145,7 @@ actor RelayClient {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var authenticatedDevice: DevicePublicIdentity?
     private var pendingSessionLists: [String: CheckedContinuation<[RemoteSession], Error>] = [:]
     private var pendingSessionLinks: [String: CheckedContinuation<SessionLink, Error>] = [:]
 
@@ -207,6 +215,7 @@ actor RelayClient {
                 throw RelayError.authenticationFailed
             }
 
+            authenticatedDevice = identity
             try await send(ClientHello(device: identity))
 
             let grants = try await grantStore.all(for: identity)
@@ -218,6 +227,7 @@ actor RelayClient {
         } catch {
             socket.cancel(with: .policyViolation, reason: nil)
             self.socket = nil
+            authenticatedDevice = nil
             throw error
         }
     }
@@ -227,6 +237,7 @@ actor RelayClient {
         receiveTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        authenticatedDevice = nil
 
         let error = CancellationError()
         for continuation in pendingSessionLists.values {
@@ -241,11 +252,30 @@ actor RelayClient {
     }
 
     func listSessions(machineId: String) async throws -> [RemoteSession] {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
         let requestId = UUID().uuidString
+        let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let message = ControlRequestCrypto.sessionsListMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: device.id,
+            issuedAtMs: issuedAtMs
+        )
+        let signature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+
         let request = ControlRequest(
             requestId: requestId,
             machineId: machineId,
-            payload: SessionsListPayload()
+            payload: SessionsListPayload(),
+            authorization: ControlAuthorization(
+                deviceId: device.id,
+                issuedAtMs: issuedAtMs,
+                signature: signature
+            )
         )
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -266,7 +296,24 @@ actor RelayClient {
         generation: Int,
         access: RemoteSession.Access
     ) async throws -> SessionLink {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
         let requestId = UUID().uuidString
+        let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let message = ControlRequestCrypto.sessionsLinkMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: device.id,
+            issuedAtMs: issuedAtMs,
+            instanceId: instanceId,
+            generation: generation,
+            access: access.rawValue
+        )
+        let signature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+
         let request = ControlRequest(
             requestId: requestId,
             machineId: machineId,
@@ -274,6 +321,11 @@ actor RelayClient {
                 instanceId: instanceId,
                 generation: generation,
                 access: access
+            ),
+            authorization: ControlAuthorization(
+                deviceId: device.id,
+                issuedAtMs: issuedAtMs,
+                signature: signature
             )
         )
 
