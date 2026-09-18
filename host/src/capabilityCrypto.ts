@@ -75,6 +75,16 @@ function x25519PublicKey(x: string) {
   });
 }
 
+function deriveKeyFromSharedSecret(
+  sharedSecret: Buffer,
+  salt: Buffer,
+  context: Buffer,
+): Buffer {
+  return Buffer.from(
+    hkdfSync("sha256", sharedSecret, salt, context, 32),
+  );
+}
+
 function deriveKey(
   privateKey: ReturnType<typeof machineAgreementPrivateKey>,
   peerPublicKey: ReturnType<typeof x25519PublicKey>,
@@ -85,8 +95,54 @@ function deriveKey(
     privateKey,
     publicKey: peerPublicKey,
   });
-  return Buffer.from(
-    hkdfSync("sha256", sharedSecret, salt, context, 32),
+  return deriveKeyFromSharedSecret(sharedSecret, salt, context);
+}
+
+function encryptWithSharedSecret(
+  context: CapabilityContext,
+  collabUrl: string,
+  sharedSecret: Buffer,
+  salt: Buffer,
+  nonce: Buffer,
+): EncryptedCollabCapability {
+  const aad = capabilityContextMessage(context);
+  const key = deriveKeyFromSharedSecret(
+    sharedSecret,
+    salt,
+    aad,
+  );
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([
+    cipher.update(collabUrl, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    version: 1,
+    algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+    ...context,
+    salt: salt.toString("base64url"),
+    nonce: nonce.toString("base64url"),
+    ciphertext: ciphertext.toString("base64url"),
+    tag: tag.toString("base64url"),
+  };
+}
+
+export function encryptCollabCapabilityVectorForTest(
+  context: CapabilityContext,
+  collabUrl: string,
+  sharedSecret: Buffer,
+  salt: Buffer,
+  nonce: Buffer,
+): EncryptedCollabCapability {
+  return encryptWithSharedSecret(
+    context,
+    collabUrl,
+    sharedSecret,
+    salt,
+    nonce,
   );
 }
 
@@ -105,32 +161,18 @@ export function encryptCollabCapability(
     access: link.access,
   };
   const aad = capabilityContextMessage(context);
-  const salt = randomBytes(32);
-  const nonce = randomBytes(12);
-  const key = deriveKey(
-    machineAgreementPrivateKey(machine),
-    x25519PublicKey(device.keyAgreementPublicKey),
-    salt,
-    aad,
+  const sharedSecret = diffieHellman({
+    privateKey: machineAgreementPrivateKey(machine),
+    publicKey: x25519PublicKey(device.keyAgreementPublicKey),
+  });
+
+  return encryptWithSharedSecret(
+    context,
+    link.collabUrl,
+    sharedSecret,
+    randomBytes(32),
+    randomBytes(12),
   );
-
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(aad);
-  const ciphertext = Buffer.concat([
-    cipher.update(link.collabUrl, "utf8"),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
-
-  return {
-    version: 1,
-    algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
-    ...context,
-    salt: salt.toString("base64url"),
-    nonce: nonce.toString("base64url"),
-    ciphertext: ciphertext.toString("base64url"),
-    tag: tag.toString("base64url"),
-  };
 }
 
 export function decryptCollabCapabilityForTest(
