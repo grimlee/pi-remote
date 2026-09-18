@@ -22,4 +22,17 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         TARGETED_DEVICE_FAMILY: "1"
     scheme:
-      testTargets: []
+      testTargets:
+        - PiRemoteTests
+
+  PiRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - PiRemoteTests
+    dependencies:
+      - target: PiRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.grimlee.piremote.tests
+        GENERATE_INFOPLIST_FILE: YES
