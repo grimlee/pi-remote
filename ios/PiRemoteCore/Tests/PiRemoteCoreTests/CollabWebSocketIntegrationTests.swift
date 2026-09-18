@@ -151,10 +151,7 @@ func nativeCollabGuestCompletesRealWebSocketRoundTrip() async throws {
             encoding: .utf8
         ) ?? ""
         Issue.record(
-            "mock Collab relay exited with status "
-                + String(process.terminationStatus)
-                + ": "
-                + errorText
+            "mock Collab relay exited with status \(process.terminationStatus): \(errorText)"
         )
     }
     #expect(process.terminationStatus == 0)
