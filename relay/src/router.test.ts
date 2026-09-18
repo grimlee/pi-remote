@@ -30,7 +30,9 @@ class FakePeer implements RelayPeer {
 }
 
 function okpPublicKey(type: "ed25519" | "x25519") {
-  const key = generateKeyPairSync(type);
+  const key = type === "ed25519"
+    ? generateKeyPairSync("ed25519")
+    : generateKeyPairSync("x25519");
   const publicJwk = key.publicKey.export({ format: "jwk" });
   assert.equal(publicJwk.kty, "OKP");
   assert.ok(publicJwk.x);
