@@ -141,3 +141,33 @@ func pairingAcceptanceRequiresHostAndGrantSignatures() throws {
         )
     )
 }
+
+
+@Test
+func pairingBootstrapRejectsInsecureRelayURL() throws {
+    let bootstrap = PairingBootstrap(
+        relayUrl: "ws://relay.example/v0/client",
+        invitation: PairingInvitation(
+            pairingId: "pair_test",
+            machine: PairingMachineIdentity(
+                id: "machine_test",
+                name: "omarchy",
+                platform: "linux",
+                signingPublicKey: "signing",
+                keyAgreementPublicKey: "agreement",
+                fingerprint: "fingerprint"
+            ),
+            expiresAt: "2026-09-18T00:02:00.000Z",
+            secret: Data(repeating: 7, count: 32)
+                .base64URLEncodedString()
+        )
+    )
+
+    let encoded = PairingBootstrap.prefix
+        + (try JSONEncoder().encode(bootstrap))
+            .base64URLEncodedString()
+
+    #expect(throws: (any Error).self) {
+        try PairingBootstrap.parse(encoded)
+    }
+}
