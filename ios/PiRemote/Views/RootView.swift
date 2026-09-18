@@ -274,6 +274,8 @@ private struct SessionDetailView: View {
                 }
                 .padding()
             }
+            .defaultScrollAnchor(.bottom)
+            .scrollDismissesKeyboard(.interactively)
 
             Divider()
 
