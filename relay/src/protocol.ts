@@ -61,6 +61,11 @@ export interface ControlRequest {
   requestId: string;
   machineId: string;
   payload: Record<string, unknown>;
+  authorization: {
+    deviceId: string;
+    issuedAtMs: number;
+    signature: string;
+  };
 }
 
 export interface ControlResponse {
@@ -99,7 +104,14 @@ export function isControlRequest(value: Record<string, unknown>): value is Recor
     && value.machineId.length > 0
     && typeof value.payload === "object"
     && value.payload !== null
-    && !Array.isArray(value.payload);
+    && !Array.isArray(value.payload)
+    && typeof value.authorization === "object"
+    && value.authorization !== null
+    && !Array.isArray(value.authorization)
+    && typeof (value.authorization as Record<string, unknown>).deviceId === "string"
+    && typeof (value.authorization as Record<string, unknown>).issuedAtMs === "number"
+    && Number.isSafeInteger((value.authorization as Record<string, unknown>).issuedAtMs)
+    && typeof (value.authorization as Record<string, unknown>).signature === "string";
 }
 
 export function isControlResponse(value: Record<string, unknown>): value is Record<string, unknown> & ControlResponse {
