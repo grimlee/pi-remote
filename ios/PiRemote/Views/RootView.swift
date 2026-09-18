@@ -400,8 +400,9 @@ private struct SessionDetailView: View {
                     }
                 }
                 .disabled(
-                    store.rpcSnapshot?.availableModels.isEmpty
-                        ?? true
+                    isStreaming
+                        || (store.rpcSnapshot?
+                            .availableModels.isEmpty ?? true)
                 )
             }
         }
@@ -566,7 +567,7 @@ private struct ModelPickerView: View {
                                         Image(
                                             systemName: "checkmark"
                                         )
-                                        .foregroundStyle(.tint)
+                                        .foregroundStyle(Color.accentColor)
                                     }
                                 }
                             }
