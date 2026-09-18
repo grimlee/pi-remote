@@ -62,3 +62,30 @@ func machineGrantVectorMatchesNode() {
     )
     #expect(MachineGrantCrypto.isValid(grant))
 }
+
+
+@Test
+func controlRequestCanonicalBytesMatchHost() {
+    #expect(
+        ControlRequestCrypto.sessionsListMessage(
+            requestId: "req_testvector",
+            machineId: "machine_testvector",
+            deviceId: "device_testvector",
+            issuedAtMs: 1_800_000_000_000
+        ).base64URLEncodedString()
+        == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpc3Q"
+    )
+
+    #expect(
+        ControlRequestCrypto.sessionsLinkMessage(
+            requestId: "req_testvector",
+            machineId: "machine_testvector",
+            deviceId: "device_testvector",
+            issuedAtMs: 1_800_000_000_000,
+            instanceId: "instance_test",
+            generation: 7,
+            access: "control"
+        ).base64URLEncodedString()
+        == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2w"
+    )
+}
