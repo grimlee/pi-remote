@@ -54,7 +54,7 @@ struct RootView: View {
                         systemImage: "desktopcomputer"
                     )
                 } description: {
-                    Text("Connected, but no active Pi Collab sessions were found.")
+                    Text("Connected, but no Pi sessions were found.")
                 } actions: {
                     Button("Refresh Sessions") {
                         Task {
@@ -245,7 +245,7 @@ private struct SessionDetailView: View {
                     spacing: 12
                 ) {
                     if store.isOpeningSession {
-                        ProgressView("Joining Pi Collab…")
+                        ProgressView("Opening Pi Agent…")
                             .frame(maxWidth: .infinity)
                             .padding()
                     }
@@ -256,9 +256,9 @@ private struct SessionDetailView: View {
                             .font(.footnote)
                     }
 
-                    if let snapshot = store.collabSnapshot {
+                    if let snapshot = store.rpcSnapshot {
                         ForEach(
-                            Array(snapshot.entries.enumerated()),
+                            Array(snapshot.messages.enumerated()),
                             id: \.offset
                         ) { _, entry in
                             WireCard(
@@ -324,7 +324,7 @@ private struct SessionDetailView: View {
     }
 
     private var canWrite: Bool {
-        guard let snapshot = store.collabSnapshot else {
+        guard let snapshot = store.rpcSnapshot else {
             return false
         }
         return snapshot.phase == .live && !snapshot.readOnly
@@ -332,7 +332,7 @@ private struct SessionDetailView: View {
 
     @ViewBuilder
     private var statusBar: some View {
-        if let snapshot = store.collabSnapshot {
+        if let snapshot = store.rpcSnapshot {
             HStack {
                 Circle()
                     .frame(width: 8, height: 8)
@@ -378,12 +378,11 @@ private struct SessionDetailView: View {
             return "Entry"
         }
 
-        if let message = object["message"]?.objectValue,
-           let role = message["role"]?.stringValue {
+        if let role = object["role"]?.stringValue {
             return role.capitalized
         }
 
-        return object["type"]?.stringValue ?? "Entry"
+        return object["type"]?.stringValue ?? "Message"
     }
 }
 
@@ -395,11 +394,9 @@ private struct InteractiveRequestCard: View {
 
     var body: some View {
         let object = request.objectValue ?? [:]
-        let kind = object["kind"]?.stringValue ?? "request"
-        let title = object["title"]?.stringValue
-            ?? "Pi needs input"
-        let reqId = object["reqId"]?.integerValue
-            .flatMap(Int.init(exactly:))
+        let method = object["method"]?.stringValue ?? "request"
+        let title = object["title"]?.stringValue ?? "Pi needs input"
+        let requestId = object["id"]?.stringValue
 
         VStack(alignment: .leading, spacing: 10) {
             Label(
@@ -408,18 +405,24 @@ private struct InteractiveRequestCard: View {
             )
             .font(.headline)
 
-            if kind == "select",
-               let values = object["options"]?.arrayValue {
+            if let message = object["message"]?.stringValue {
+                Text(message)
+                    .font(.callout)
+            }
+
+            if method == "select",
+               let values = object["options"]?.arrayValue,
+               let requestId {
                 ForEach(
                     Array(values.enumerated()),
                     id: \.offset
                 ) { _, option in
-                    if let value = option.stringValue,
-                       let reqId {
+                    if let value = option.stringValue {
                         Button(value) {
                             Task {
                                 await store.answerInteractiveRequest(
-                                    reqId: reqId,
+                                    id: requestId,
+                                    method: method,
                                     value: value
                                 )
                             }
@@ -427,9 +430,49 @@ private struct InteractiveRequestCard: View {
                         .buttonStyle(.bordered)
                     }
                 }
-            } else if kind == "editor", let reqId {
+
+                Button("Cancel") {
+                    Task {
+                        await store.answerInteractiveRequest(
+                            id: requestId,
+                            method: method,
+                            value: nil
+                        )
+                    }
+                }
+                .buttonStyle(.bordered)
+
+            } else if method == "confirm", let requestId {
+                HStack {
+                    Button("Confirm") {
+                        Task {
+                            await store.answerInteractiveRequest(
+                                id: requestId,
+                                method: method,
+                                value: nil,
+                                confirmed: true
+                            )
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Cancel") {
+                        Task {
+                            await store.answerInteractiveRequest(
+                                id: requestId,
+                                method: method,
+                                value: nil,
+                                confirmed: false
+                            )
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+            } else if (method == "editor" || method == "input"),
+                      let requestId {
                 TextField(
-                    "Response",
+                    object["placeholder"]?.stringValue ?? "Response",
                     text: $editorResponse,
                     axis: .vertical
                 )
@@ -441,7 +484,8 @@ private struct InteractiveRequestCard: View {
                         editorResponse = ""
                         Task {
                             await store.answerInteractiveRequest(
-                                reqId: reqId,
+                                id: requestId,
+                                method: method,
                                 value: value
                             )
                         }
@@ -452,13 +496,15 @@ private struct InteractiveRequestCard: View {
                         editorResponse = ""
                         Task {
                             await store.answerInteractiveRequest(
-                                reqId: reqId,
+                                id: requestId,
+                                method: method,
                                 value: nil
                             )
                         }
                     }
                     .buttonStyle(.bordered)
                 }
+
             } else {
                 Text(prettyJSON(request))
                     .font(.system(.caption, design: .monospaced))
