@@ -55,6 +55,43 @@ export interface MachinePresence {
   online: boolean;
 }
 
+
+export interface PairingRequestFrame {
+  protocolVersion: 0;
+  type: "pairing.request";
+  requestId: string;
+  machine: {
+    id: string;
+    signingPublicKey: string;
+  };
+  pairing: {
+    version: 1;
+    pairingId: string;
+    machineId: string;
+    device: {
+      id: string;
+      name: string;
+      signingPublicKey: string;
+      keyAgreementPublicKey: string;
+    };
+    proof: string;
+    deviceSignature: string;
+  };
+}
+
+export interface PairingResponseFrame {
+  protocolVersion: 0;
+  type: "pairing.response";
+  requestId: string;
+  machineId: string;
+  ok: boolean;
+  acceptance?: Record<string, unknown>;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
 export interface ControlRequest {
   protocolVersion: 0;
   type: "control.request";
@@ -93,6 +130,63 @@ export function parseJsonObject(data: string): Record<string, unknown> | null {
 
 export function isProtocolVersion(value: unknown): value is 0 {
   return value === PROTOCOL_VERSION;
+}
+
+
+export function isPairingRequest(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & PairingRequestFrame {
+  if (value.type !== "pairing.request"
+    || !isProtocolVersion(value.protocolVersion)
+    || typeof value.requestId !== "string"
+    || value.requestId.length === 0) {
+    return false;
+  }
+
+  const machine = value.machine;
+  const pairing = value.pairing;
+  if (typeof machine !== "object" || machine === null || Array.isArray(machine)
+    || typeof pairing !== "object" || pairing === null || Array.isArray(pairing)) {
+    return false;
+  }
+
+  const machineRecord = machine as Record<string, unknown>;
+  const pairingRecord = pairing as Record<string, unknown>;
+  const device = pairingRecord.device;
+  if (typeof device !== "object" || device === null || Array.isArray(device)) {
+    return false;
+  }
+  const deviceRecord = device as Record<string, unknown>;
+
+  return typeof machineRecord.id === "string"
+    && machineRecord.id.startsWith("machine_")
+    && validPublicKey(machineRecord.signingPublicKey)
+    && pairingRecord.version === 1
+    && typeof pairingRecord.pairingId === "string"
+    && pairingRecord.pairingId.startsWith("pair_")
+    && pairingRecord.machineId === machineRecord.id
+    && typeof deviceRecord.id === "string"
+    && deviceRecord.id.startsWith("device_")
+    && typeof deviceRecord.name === "string"
+    && deviceRecord.name.length > 0
+    && validPublicKey(deviceRecord.signingPublicKey)
+    && validPublicKey(deviceRecord.keyAgreementPublicKey)
+    && typeof pairingRecord.proof === "string"
+    && pairingRecord.proof.length > 0
+    && typeof pairingRecord.deviceSignature === "string"
+    && pairingRecord.deviceSignature.length > 0;
+}
+
+export function isPairingResponse(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & PairingResponseFrame {
+  return value.type === "pairing.response"
+    && isProtocolVersion(value.protocolVersion)
+    && typeof value.requestId === "string"
+    && value.requestId.length > 0
+    && typeof value.machineId === "string"
+    && value.machineId.startsWith("machine_")
+    && typeof value.ok === "boolean";
 }
 
 export function isControlRequest(value: Record<string, unknown>): value is Record<string, unknown> & ControlRequest {
