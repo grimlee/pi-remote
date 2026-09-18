@@ -260,22 +260,9 @@ private struct SessionDetailView: View {
                     }
 
                     if let snapshot = store.rpcSnapshot {
-                        ForEach(
-                            Array(snapshot.messages.enumerated()),
-                            id: \.offset
-                        ) { _, entry in
-                            WireCard(
-                                title: entryTitle(entry),
-                                value: entry
-                            )
-                        }
-
-                        if let event = snapshot.lastEvent {
-                            WireCard(
-                                title: "Live event",
-                                value: event
-                            )
-                        }
+                        ConversationTranscriptView(
+                            snapshot: snapshot
+                        )
 
                         if let request = snapshot.uiRequest {
                             InteractiveRequestCard(
@@ -287,37 +274,58 @@ private struct SessionDetailView: View {
                 }
                 .padding()
             }
+            .defaultScrollAnchor(.bottom)
+            .scrollDismissesKeyboard(.interactively)
 
             Divider()
 
-            HStack(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 10) {
                 TextField(
-                    "Send a prompt to Pi…",
+                    "Message Pi",
                     text: $store.composerText,
                     axis: .vertical
                 )
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...5)
-
-                Button("Send") {
-                    Task {
-                        await store.sendPrompt()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canWrite)
+                .lineLimit(1...6)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.quaternary)
+                .clipShape(
+                    RoundedRectangle(cornerRadius: 20)
+                )
 
                 Button {
                     Task {
-                        await store.abort()
+                        if isStreaming {
+                            await store.abort()
+                        } else {
+                            await store.sendPrompt()
+                        }
                     }
                 } label: {
-                    Image(systemName: "stop.fill")
+                    Image(
+                        systemName: isStreaming
+                            ? "stop.fill"
+                            : "arrow.up"
+                    )
+                    .font(
+                        .system(
+                            size: 15,
+                            weight: .bold
+                        )
+                    )
+                    .frame(width: 34, height: 34)
                 }
-                .buttonStyle(.bordered)
-                .disabled(!canWrite)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.circle)
+                .disabled(
+                    isStreaming
+                        ? !canWrite
+                        : !canSend
+                )
             }
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.bar)
         }
         .navigationTitle(session.name ?? "Pi Session")
         .navigationBarTitleDisplayMode(.inline)
@@ -326,11 +334,27 @@ private struct SessionDetailView: View {
         }
     }
 
+    private var isStreaming: Bool {
+        store.rpcSnapshot?
+            .state?
+            .objectValue?["isStreaming"]?
+            .boolValue ?? false
+    }
+
     private var canWrite: Bool {
         guard let snapshot = store.rpcSnapshot else {
             return false
         }
         return snapshot.phase == .live && !snapshot.readOnly
+    }
+
+    private var canSend: Bool {
+        canWrite
+            && !store.composerText
+                .trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                .isEmpty
     }
 
     @ViewBuilder
@@ -509,8 +533,19 @@ private struct InteractiveRequestCard: View {
                 }
 
             } else {
-                Text(prettyJSON(request))
-                    .font(.system(.caption, design: .monospaced))
+                DisclosureGroup("Request details") {
+                    Text(
+                        ChatMessageParser.prettyJSON(request)
+                    )
+                    .font(
+                        .system(
+                            .caption,
+                            design: .monospaced
+                        )
+                    )
+                    .textSelection(.enabled)
+                    .padding(.top, 4)
+                }
             }
         }
         .padding()
