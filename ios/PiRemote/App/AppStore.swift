@@ -40,6 +40,7 @@ final class AppStore {
     var sessionError: String?
     var isPairing = false
     var isOpeningSession = false
+    var isCreatingSession = false
 
     private let identityStore = DeviceIdentityStore()
     private let grantStore = MachineGrantStore()
@@ -53,8 +54,9 @@ final class AppStore {
     private var started = false
     private var needsSessionRestore = false
     private var activeMachine: RemoteMachine?
-    private var activeSession: RemoteSession?
+    private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
+    private var shouldRefreshAfterNewSession = false
 
     func start() async {
         guard !started else { return }
@@ -160,7 +162,7 @@ final class AppStore {
         selectedSessionID = session.instanceId
 
         await closeRpc()
-        activeSession = session
+        activeCacheSessionId = session.sessionId
         lastCachedMessageRevision = 0
 
         let cachedMessages = (
@@ -216,6 +218,69 @@ final class AppStore {
         }
 
         isOpeningSession = false
+    }
+
+    func createNewSession(from bootstrap: RemoteSession) async {
+        guard !isOpeningSession, !isCreatingSession else { return }
+        guard let machine = activeMachine,
+              let relayClient
+        else {
+            sessionError = StoreError.noTrustedMachine.localizedDescription
+            return
+        }
+
+        isCreatingSession = true
+        sessionError = nil
+        selectedSessionID = nil
+        needsSessionRestore = false
+
+        await closeRpc()
+        activeCacheSessionId = nil
+        lastCachedMessageRevision = 0
+        shouldRefreshAfterNewSession = true
+        rpcSnapshot = PiRpcSnapshot(phase: .connecting)
+
+        do {
+            let link = try await relayClient.requestSessionLink(
+                machine: machine,
+                instanceId: bootstrap.instanceId,
+                generation: bootstrap.generation,
+                access: bootstrap.access
+            )
+            let device = try await identityStore.publicIdentity()
+            let client = try PiRpcClient(
+                capabilityString: link.collabUrl,
+                machineId: machine.id,
+                deviceId: device.id
+            ) { frame in
+                try await relayClient.sendRpcFrame(frame)
+            }
+
+            rpcClient = client
+            rpcEventsTask = Task { [weak self] in
+                for await event in client.events {
+                    await self?.handleRpcEvent(event)
+                }
+            }
+
+            try await client.startFreshSession()
+        } catch {
+            sessionError = error.localizedDescription
+            rpcSnapshot = nil
+            rpcClient = nil
+            shouldRefreshAfterNewSession = false
+        }
+
+        isCreatingSession = false
+    }
+
+    func selectModel(_ model: PiModelOption) async {
+        guard let rpcClient else { return }
+        do {
+            try await rpcClient.selectModel(model)
+        } catch {
+            sessionError = error.localizedDescription
+        }
     }
 
     func sendPrompt() async {
@@ -397,9 +462,19 @@ final class AppStore {
         case let .snapshot(snapshot):
             rpcSnapshot = snapshot
 
+            if let sessionId = snapshot.state?
+                .objectValue?["sessionId"]?
+                .stringValue {
+                activeCacheSessionId = sessionId
+                if selectedSessionID == nil,
+                   !shouldRefreshAfterNewSession {
+                    selectedSessionID = sessionId
+                }
+            }
+
             guard snapshot.messageRevision > lastCachedMessageRevision,
                   let machine = activeMachine,
-                  let session = activeSession
+                  let sessionId = activeCacheSessionId
             else {
                 return
             }
@@ -407,9 +482,21 @@ final class AppStore {
             lastCachedMessageRevision = snapshot.messageRevision
             try? await conversationCache.save(
                 machineId: machine.id,
-                sessionId: session.sessionId,
+                sessionId: sessionId,
                 messages: snapshot.messages
             )
+
+            if shouldRefreshAfterNewSession,
+               snapshot.messages.contains(where: { message in
+                   message.objectValue?["role"]?.stringValue
+                       == "assistant"
+               }) {
+                shouldRefreshAfterNewSession = false
+                selectedSessionID = sessionId
+                Task { [weak self] in
+                    await self?.refreshSessions()
+                }
+            }
 
         case let .disconnected(reason):
             sessionError = reason
@@ -425,8 +512,9 @@ final class AppStore {
         }
         self.rpcClient = nil
         rpcSnapshot = nil
-        activeSession = nil
+        activeCacheSessionId = nil
         lastCachedMessageRevision = 0
+        shouldRefreshAfterNewSession = false
     }
 
     private func disconnectRelayAndRpc() async {
