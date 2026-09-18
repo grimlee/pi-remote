@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import { ControlRequestAuthorizer, type SignedControlRequest } from "./controlAuthorization.js";
 import {
   publicMachineIdentity,
   type MachineIdentity,
@@ -12,14 +13,6 @@ import {
 import type { SessionAccess } from "./types.js";
 
 const PROTOCOL_VERSION = 0;
-
-interface ControlRequest {
-  protocolVersion: 0;
-  type: "control.request";
-  requestId: string;
-  machineId: string;
-  payload: Record<string, unknown>;
-}
 
 interface ControlResponse {
   protocolVersion: 0;
@@ -49,22 +42,66 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function parseRequest(value: Record<string, unknown>): ControlRequest | null {
+function parseRequest(value: Record<string, unknown>): SignedControlRequest | null {
   if (value.protocolVersion !== PROTOCOL_VERSION
     || value.type !== "control.request"
     || typeof value.requestId !== "string"
     || typeof value.machineId !== "string") {
     return null;
   }
+
   const payload = asRecord(value.payload);
-  if (!payload) return null;
-  return {
-    protocolVersion: 0,
-    type: "control.request",
-    requestId: value.requestId,
-    machineId: value.machineId,
-    payload,
-  };
+  const authorization = asRecord(value.authorization);
+  if (!payload
+    || !authorization
+    || typeof authorization.deviceId !== "string"
+    || typeof authorization.issuedAtMs !== "number"
+    || typeof authorization.signature !== "string") {
+    return null;
+  }
+
+  if (payload.op === "sessions.list") {
+    return {
+      protocolVersion: 0,
+      type: "control.request",
+      requestId: value.requestId,
+      machineId: value.machineId,
+      payload: { op: "sessions.list" },
+      authorization: {
+        deviceId: authorization.deviceId,
+        issuedAtMs: authorization.issuedAtMs,
+        signature: authorization.signature,
+      },
+    };
+  }
+
+  const access = parseAccess(payload.access);
+  if (payload.op === "sessions.link"
+    && typeof payload.instanceId === "string"
+    && typeof payload.generation === "number"
+    && Number.isInteger(payload.generation)
+    && payload.generation >= 1
+    && access) {
+    return {
+      protocolVersion: 0,
+      type: "control.request",
+      requestId: value.requestId,
+      machineId: value.machineId,
+      payload: {
+        op: "sessions.link",
+        instanceId: payload.instanceId,
+        generation: payload.generation,
+        access,
+      },
+      authorization: {
+        deviceId: authorization.deviceId,
+        issuedAtMs: authorization.issuedAtMs,
+        signature: authorization.signature,
+      },
+    };
+  }
+
+  return null;
 }
 
 function parseAuthChallenge(value: Record<string, unknown>): RelayAuthChallenge | null {
@@ -103,6 +140,7 @@ function safeMessage(error: unknown): string {
 
 export class RelayHostClient {
   readonly #registry: PiRegistry;
+  readonly #authorizer: ControlRequestAuthorizer;
   readonly #minReconnectMs: number;
   readonly #maxReconnectMs: number;
   #socket: WebSocket | null = null;
@@ -113,6 +151,10 @@ export class RelayHostClient {
 
   constructor(private readonly options: RelayHostClientOptions) {
     this.#registry = options.registry ?? new PiRegistry();
+    this.#authorizer = new ControlRequestAuthorizer(
+      options.devices,
+      options.machine.id,
+    );
     this.#minReconnectMs = options.minReconnectMs ?? 1_000;
     this.#maxReconnectMs = options.maxReconnectMs ?? 30_000;
     this.#reconnectMs = this.#minReconnectMs;
@@ -209,7 +251,7 @@ export class RelayHostClient {
         || request.machineId !== this.options.machine.id) {
         return;
       }
-      void this.#handleRequest(ws, request);
+      void this.#authorizeAndHandleRequest(ws, request);
     });
 
     ws.on("error", error => {
@@ -256,7 +298,33 @@ export class RelayHostClient {
     }));
   }
 
-  async #handleRequest(ws: WebSocket, request: ControlRequest): Promise<void> {
+  async #authorizeAndHandleRequest(
+    ws: WebSocket,
+    request: SignedControlRequest,
+  ): Promise<void> {
+    if (!await this.#authorizer.authorize(request)) {
+      const response: ControlResponse = {
+        protocolVersion: 0,
+        type: "control.response",
+        requestId: request.requestId,
+        machineId: request.machineId,
+        ok: false,
+        error: {
+          code: "unauthorized",
+          message: "Control request signature is invalid, expired, revoked, or replayed.",
+        },
+      };
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+      return;
+    }
+
+    await this.#handleRequest(ws, request);
+  }
+
+  async #handleRequest(
+    ws: WebSocket,
+    request: SignedControlRequest,
+  ): Promise<void> {
     let response: ControlResponse;
 
     try {
@@ -272,23 +340,10 @@ export class RelayHostClient {
           payload: { op, sessions },
         };
       } else if (op === "sessions.link") {
-        const instanceId = request.payload.instanceId;
-        const generation = request.payload.generation;
-        const access = parseAccess(request.payload.access);
-        if (typeof instanceId !== "string"
-          || typeof generation !== "number"
-          || !Number.isInteger(generation)
-          || generation < 1
-          || !access) {
-          throw new TypeError(
-            "sessions.link requires instanceId, positive generation, and access",
-          );
-        }
-
         const link = await this.#registry.createLink(
-          instanceId,
-          generation,
-          access,
+          request.payload.instanceId,
+          request.payload.generation,
+          request.payload.access,
         );
         response = {
           protocolVersion: 0,
