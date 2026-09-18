@@ -267,10 +267,12 @@ export class PiRegistry {
       );
     }
 
-    try {
-      await access(this.#executable, fsConstants.X_OK);
-    } catch (error) {
-      throw new PiRegistryError("pi_command_failed", "Pi executable is not available", { cause: error });
+    if (this.#executable.includes(path.sep)) {
+      try {
+        await access(this.#executable, fsConstants.X_OK);
+      } catch (error) {
+        throw new PiRegistryError("pi_command_failed", "Pi executable is not available", { cause: error });
+      }
     }
 
     const channelId = "rpc_" + randomUUID().replaceAll("-", "");
@@ -314,6 +316,11 @@ export class PiRegistry {
     });
     child.on("error", error => {
       console.error(`Pi RPC process error [${channelId}]:`, error.message);
+      this.#sendHostPayload(channel, {
+        type: "piremote.channel_closed",
+        error: "Pi RPC process failed to start",
+      });
+      this.#deleteChannel(channelId);
     });
     child.on("exit", (code, signal) => {
       if (this.#channels.get(channelId) !== channel) return;
@@ -456,7 +463,7 @@ export class PiRegistry {
     if (!channel.process.stdin.destroyed) channel.process.stdin.end();
     if (!channel.process.killed) channel.process.kill("SIGTERM");
     const killTimer = setTimeout(() => {
-      if (channel.process.exitCode === null && !channel.process.killed) {
+      if (channel.process.exitCode === null) {
         channel.process.kill("SIGKILL");
       }
     }, 2_000);
