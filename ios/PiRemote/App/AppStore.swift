@@ -206,7 +206,7 @@ final class AppStore {
     func abort() async {
         guard let rpcClient else { return }
         do {
-            try await rpcClient.sendAbort()
+            try await rpcClient.abort()
         } catch {
             sessionError = error.localizedDescription
         }
