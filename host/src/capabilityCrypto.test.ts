@@ -3,8 +3,10 @@ import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import type { AuthorizedDevice } from "./authorizedDevices.js";
 import {
+  capabilityContextMessage,
   decryptCollabCapabilityForTest,
   encryptCollabCapability,
+  encryptCollabCapabilityVectorForTest,
 } from "./capabilityCrypto.js";
 import type {
   MachineIdentity,
@@ -135,4 +137,40 @@ test("a different device private key cannot decrypt the capability", () => {
       machine.keyAgreementPrivateKey.x,
     );
   });
+});
+
+
+test("capability HKDF and AES-GCM vector matches Swift", () => {
+  const context = {
+    machineId: "machine_testvector",
+    deviceId: "device_testvector",
+    requestId: "req_capability_vector",
+    instanceId: "instance_test",
+    generation: 7,
+    access: "control" as const,
+  };
+  const sharedSecret = Buffer.alloc(32, 0x44);
+  const salt = Buffer.alloc(32, 0x55);
+  const nonce = Buffer.alloc(12, 0x66);
+
+  assert.equal(
+    capabilityContextMessage(context).toString("base64url"),
+    "cGlyZW1vdGUtY29sbGFiLWNhcGFiaWxpdHktdjEAbWFjaGluZV90ZXN0dmVjdG9yAGRldmljZV90ZXN0dmVjdG9yAHJlcV9jYXBhYmlsaXR5X3ZlY3RvcgBpbnN0YW5jZV90ZXN0ADcAY29udHJvbA",
+  );
+
+  const envelope = encryptCollabCapabilityVectorForTest(
+    context,
+    "https://collab.example/#opaque-test-capability",
+    sharedSecret,
+    salt,
+    nonce,
+  );
+
+  assert.equal(envelope.salt, "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU");
+  assert.equal(envelope.nonce, "ZmZmZmZmZmZmZmZm");
+  assert.equal(
+    envelope.ciphertext,
+    "IaWBOyFwTzHCbf_zFagdR6D1xa64RVPT2Ux01tnryZ-AyuIpEjKlQiZbHsKqUQ",
+  );
+  assert.equal(envelope.tag, "IAqDQdP0DV6fJOZ7OGSxqQ");
 });
