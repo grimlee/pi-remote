@@ -213,7 +213,11 @@ process.stdin.on("data", chunk => {
   const capability = JSON.parse(link.collabUrl) as {
     channelId: string;
     key: string;
+    nextClientSeq: number;
+    lastHostSeq: number;
   };
+  assert.equal(capability.nextClientSeq, 1);
+  assert.ok(capability.lastHostSeq >= 0);
   capabilityKey = Buffer.from(capability.key, "base64url");
 
   registry.handleRpcFrame(encryptRpcPayload(
@@ -235,6 +239,24 @@ process.stdin.on("data", chunk => {
     sessionId: "01RPCBRIDGE",
     isStreaming: false,
   });
+
+  const resumedLink = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const resumedCapability = JSON.parse(resumedLink.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    lastHostSeq: number;
+  };
+
+  assert.equal(resumedCapability.channelId, capability.channelId);
+  assert.equal(resumedCapability.key, capability.key);
+  assert.equal(resumedCapability.nextClientSeq, 2);
+  assert.ok(resumedCapability.lastHostSeq >= capability.lastHostSeq);
 
   registry.stop();
 });
