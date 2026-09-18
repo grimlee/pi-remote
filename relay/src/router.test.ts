@@ -117,6 +117,11 @@ function request(machineId = "machine_test"): ControlRequest {
     requestId: "req_1",
     machineId,
     payload: { op: "sessions.list" },
+    authorization: {
+      deviceId: "device_test",
+      issuedAtMs: 1_800_000_000_000,
+      signature: "signature_placeholder",
+    },
   };
 }
 
