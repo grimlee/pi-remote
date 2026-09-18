@@ -41,11 +41,27 @@ func pairingVectorMatchesHostImplementation() throws {
         == device.signingPublicKey
     )
 
-    #expect(
-        try PairingCrypto.deviceSignature(
-            signingPrivateKeyRaw: raw,
-            message: message
-        )
-        == "PzsKk2gTlKX9WgUEv-fpIL169aPcnSHXo9AG9gJOas-6aURwpX9Gj3_h4W4Lr9FuRTZ6wrFWCmhK-hLhDpNTAw"
+    let publicKeyRaw = try #require(
+        Data(base64URLEncoded: device.signingPublicKey)
     )
+    let publicKey = try Curve25519.Signing.PublicKey(
+        rawRepresentation: publicKeyRaw
+    )
+
+    let nodeSignature = try #require(
+        Data(
+            base64URLEncoded:
+                "PzsKk2gTlKX9WgUEv-fpIL169aPcnSHXo9AG9gJOas-6aURwpX9Gj3_h4W4Lr9FuRTZ6wrFWCmhK-hLhDpNTAw"
+        )
+    )
+    #expect(publicKey.isValidSignature(nodeSignature, for: message))
+
+    let swiftSignatureString = try PairingCrypto.deviceSignature(
+        signingPrivateKeyRaw: raw,
+        message: message
+    )
+    let swiftSignature = try #require(
+        Data(base64URLEncoded: swiftSignatureString)
+    )
+    #expect(publicKey.isValidSignature(swiftSignature, for: message))
 }
