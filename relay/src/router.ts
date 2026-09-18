@@ -14,6 +14,7 @@ import type {
   MachinesSnapshot,
   PairingRequestFrame,
   PairingResponseFrame,
+  RpcFrame,
 } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
@@ -376,6 +377,45 @@ export class RelayRouter {
     clearTimeout(pending.timer);
     this.#pending.delete(response.requestId);
     pending.client.send(JSON.stringify(response));
+  }
+
+  routeRpcFrame(peer: RelayPeer, frame: RpcFrame): void {
+    if (frame.direction === "client") {
+      const client = this.#clients.get(peer);
+      if (!client
+        || client.principal.id !== frame.deviceId
+        || client.device.id !== frame.deviceId) {
+        return;
+      }
+
+      const grant = client.grants.find(item => item.machine.id === frame.machineId);
+      if (!grant) return;
+      const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
+      const host = this.#hosts.get(key);
+      if (!host || !authorizationSnapshotAllows(host.authorizedDevices, grant)) return;
+      host.peer.send(JSON.stringify(frame));
+      return;
+    }
+
+    const host = [...this.#hosts.values()].find(
+      item => item.peer === peer && item.machine.id === frame.machineId,
+    );
+    if (!host) return;
+
+    const hostDevice = host.authorizedDevices.find(item => item.id === frame.deviceId);
+    if (!hostDevice) return;
+
+    for (const client of this.#clients.values()) {
+      if (client.principal.id !== frame.deviceId || client.device.id !== frame.deviceId) continue;
+      const grant = client.grants.find(item =>
+        item.machine.id === frame.machineId
+        && item.device.id === frame.deviceId
+      );
+      if (!grant) continue;
+      const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
+      if (key !== host.key || !authorizationSnapshotAllows(host.authorizedDevices, grant)) continue;
+      client.peer.send(JSON.stringify(frame));
+    }
   }
 
   #authorizedHosts(client: ClientRecord): Map<string, HostRecord> {
