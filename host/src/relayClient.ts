@@ -1,5 +1,6 @@
 import WebSocket from "ws";
-import type { AuthorizedDeviceStore } from "./authorizedDevices.js";
+import type { AuthorizedDevice, AuthorizedDeviceStore } from "./authorizedDevices.js";
+import { encryptCollabCapability } from "./capabilityCrypto.js";
 import { ControlRequestAuthorizer, type SignedControlRequest } from "./controlAuthorization.js";
 import {
   publicMachineIdentity,
@@ -310,7 +311,8 @@ export class RelayHostClient {
     ws: WebSocket,
     request: SignedControlRequest,
   ): Promise<void> {
-    if (!await this.#authorizer.authorize(request)) {
+    const authorizedDevice = await this.#authorizer.authorize(request);
+    if (!authorizedDevice) {
       const response: ControlResponse = {
         protocolVersion: 0,
         type: "control.response",
@@ -326,12 +328,13 @@ export class RelayHostClient {
       return;
     }
 
-    await this.#handleRequest(ws, request);
+    await this.#handleRequest(ws, request, authorizedDevice);
   }
 
   async #handleRequest(
     ws: WebSocket,
     request: SignedControlRequest,
+    authorizedDevice: AuthorizedDevice,
   ): Promise<void> {
     let response: ControlResponse;
 
@@ -353,13 +356,35 @@ export class RelayHostClient {
           request.payload.generation,
           request.payload.access,
         );
+
+        const currentDevice = await this.options.devices.getActive(
+          authorizedDevice.id,
+        );
+        if (!currentDevice
+          || currentDevice.signingPublicKey !== authorizedDevice.signingPublicKey
+          || currentDevice.keyAgreementPublicKey !== authorizedDevice.keyAgreementPublicKey) {
+          throw new TypeError("device authorization changed before capability issuance");
+        }
+
+        const capability = encryptCollabCapability(
+          this.options.machine,
+          currentDevice,
+          request.requestId,
+          link,
+        );
         response = {
           protocolVersion: 0,
           type: "control.response",
           requestId: request.requestId,
           machineId: request.machineId,
           ok: true,
-          payload: { op, ...link },
+          payload: {
+            op,
+            instanceId: link.instanceId,
+            generation: link.generation,
+            access: link.access,
+            capability,
+          },
         };
       } else {
         throw new TypeError("unsupported control operation");
