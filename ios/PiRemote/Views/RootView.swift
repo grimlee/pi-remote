@@ -56,7 +56,7 @@ struct RootView: View {
                 } description: {
                     Text(
                         store.sessionError
-                            ?? "Connected, but no Pi sessions were found."
+                            ?? "Host returned 0 persisted Pi sessions."
                     )
                 } actions: {
                     Button("Refresh Sessions") {

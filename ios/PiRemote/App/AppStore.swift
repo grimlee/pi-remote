@@ -120,12 +120,15 @@ final class AppStore {
             return
         }
 
+        sessionError = nil
+
         do {
             let values = try await relayClient.listSessions(
                 machineId: machine.id
             )
             sessions = values
                 .sorted { $0.startedAt > $1.startedAt }
+            sessionError = nil
 
             if needsSessionRestore,
                let selectedSessionID,

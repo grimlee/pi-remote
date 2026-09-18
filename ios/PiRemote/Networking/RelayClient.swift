@@ -636,30 +636,56 @@ actor RelayClient {
 
         let header = try decoder.decode(ResponseHeader.self, from: data)
 
-        if let continuation = pendingSessionLists.removeValue(forKey: header.requestId) {
-            let response = try decoder.decode(
-                ControlResponse<SessionsListResponsePayload>.self,
-                from: data
-            )
-            guard response.ok, let payload = response.payload else {
-                let error = response.error
+        if let continuation = pendingSessionLists[header.requestId] {
+            do {
+                let response = try decoder.decode(
+                    ControlResponse<SessionsListResponsePayload>.self,
+                    from: data
+                )
+                pendingSessionLists.removeValue(forKey: header.requestId)
+
+                guard response.ok, let payload = response.payload else {
+                    let error = response.error
+                    continuation.resume(
+                        throwing: RelayError.remote(
+                            code: error?.code ?? "internal_error",
+                            message: error?.message ?? "The host rejected the request."
+                        )
+                    )
+                    return
+                }
+
+                continuation.resume(returning: payload.sessions)
+            } catch {
+                pendingSessionLists.removeValue(forKey: header.requestId)
                 continuation.resume(
                     throwing: RelayError.remote(
-                        code: error?.code ?? "internal_error",
-                        message: error?.message ?? "The host rejected the request."
+                        code: "decode_error",
+                        message: "Could not decode the Host session list: \(String(describing: error))"
+                    )
+                )
+            }
+            return
+        }
+
+        if let pending = pendingSessionLinks[header.requestId] {
+            let response: ControlResponse<SessionsLinkResponsePayload>
+            do {
+                response = try decoder.decode(
+                    ControlResponse<SessionsLinkResponsePayload>.self,
+                    from: data
+                )
+                pendingSessionLinks.removeValue(forKey: header.requestId)
+            } catch {
+                pendingSessionLinks.removeValue(forKey: header.requestId)
+                pending.continuation.resume(
+                    throwing: RelayError.remote(
+                        code: "decode_error",
+                        message: "Could not decode the Host session capability: \(String(describing: error))"
                     )
                 )
                 return
             }
-            continuation.resume(returning: payload.sessions)
-            return
-        }
-
-        if let pending = pendingSessionLinks.removeValue(forKey: header.requestId) {
-            let response = try decoder.decode(
-                ControlResponse<SessionsLinkResponsePayload>.self,
-                from: data
-            )
             guard response.ok, let payload = response.payload else {
                 let error = response.error
                 pending.continuation.resume(

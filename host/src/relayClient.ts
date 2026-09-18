@@ -502,6 +502,9 @@ export class RelayHostClient {
       const op = request.payload.op;
       if (op === "sessions.list") {
         const sessions = await this.#registry.listSessions();
+        console.log(
+          `Pi Remote sessions.list -> ${sessions.length} persisted sessions for ${authorizedDevice.id}`,
+        );
         response = {
           protocolVersion: 0,
           type: "control.response",
