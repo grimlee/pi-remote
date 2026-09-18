@@ -466,7 +466,8 @@ final class AppStore {
                 .objectValue?["sessionId"]?
                 .stringValue {
                 activeCacheSessionId = sessionId
-                if selectedSessionID == nil {
+                if selectedSessionID == nil,
+                   !shouldRefreshAfterNewSession {
                     selectedSessionID = sessionId
                 }
             }
@@ -491,6 +492,7 @@ final class AppStore {
                        == "assistant"
                }) {
                 shouldRefreshAfterNewSession = false
+                selectedSessionID = sessionId
                 Task { [weak self] in
                     await self?.refreshSessions()
                 }
