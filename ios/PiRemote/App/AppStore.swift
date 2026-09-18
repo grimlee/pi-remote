@@ -44,6 +44,7 @@ final class AppStore {
     private let identityStore = DeviceIdentityStore()
     private let grantStore = MachineGrantStore()
     private let profileStore = PairedHostProfileStore()
+    private let conversationCache = ConversationCacheStore()
 
     private var profile: PairedHostProfile?
     private var relayClient: RelayClient?
@@ -52,6 +53,8 @@ final class AppStore {
     private var started = false
     private var needsSessionRestore = false
     private var activeMachine: RemoteMachine?
+    private var activeSession: RemoteSession?
+    private var lastCachedMessageRevision = 0
 
     func start() async {
         guard !started else { return }
@@ -157,6 +160,20 @@ final class AppStore {
         selectedSessionID = session.instanceId
 
         await closeRpc()
+        activeSession = session
+        lastCachedMessageRevision = 0
+
+        let cachedMessages = (
+            try? await conversationCache.load(
+                machineId: machine.id,
+                sessionId: session.sessionId
+            )
+        ) ?? []
+
+        rpcSnapshot = PiRpcSnapshot(
+            phase: .connecting,
+            messages: cachedMessages
+        )
 
         do {
             let link = try await relayClient.requestSessionLink(
@@ -169,13 +186,13 @@ final class AppStore {
             let client = try PiRpcClient(
                 capabilityString: link.collabUrl,
                 machineId: machine.id,
-                deviceId: device.id
+                deviceId: device.id,
+                initialMessages: cachedMessages
             ) { frame in
                 try await relayClient.sendRpcFrame(frame)
             }
 
             rpcClient = client
-            rpcSnapshot = PiRpcSnapshot(phase: .connecting)
 
             rpcEventsTask = Task { [weak self] in
                 for await event in client.events {
@@ -186,8 +203,16 @@ final class AppStore {
             try await client.start()
         } catch {
             sessionError = error.localizedDescription
-            rpcSnapshot = nil
             rpcClient = nil
+
+            if cachedMessages.isEmpty {
+                rpcSnapshot = nil
+            } else {
+                rpcSnapshot = PiRpcSnapshot(
+                    phase: .closed,
+                    messages: cachedMessages
+                )
+            }
         }
 
         isOpeningSession = false
@@ -242,6 +267,7 @@ final class AppStore {
         do {
             if let machineId {
                 try await grantStore.remove(machineId: machineId)
+                try await conversationCache.remove(machineId: machineId)
             }
             try await profileStore.clear()
 
@@ -366,10 +392,27 @@ final class AppStore {
 
     private func handleRpcEvent(
         _ event: PiRpcClientEvent
-    ) {
+    ) async {
         switch event {
         case let .snapshot(snapshot):
             rpcSnapshot = snapshot
+
+            guard snapshot.messageRevision > lastCachedMessageRevision,
+                  let machine = activeMachine,
+                  let session = activeSession
+            else {
+                return
+            }
+
+            lastCachedMessageRevision = snapshot.messageRevision
+            let messages = snapshot.messages
+            Task { [conversationCache] in
+                try? await conversationCache.save(
+                    machineId: machine.id,
+                    sessionId: session.sessionId,
+                    messages: messages
+                )
+            }
 
         case let .disconnected(reason):
             sessionError = reason
@@ -385,6 +428,8 @@ final class AppStore {
         }
         self.rpcClient = nil
         rpcSnapshot = nil
+        activeSession = nil
+        lastCachedMessageRevision = 0
     }
 
     private func disconnectRelayAndRpc() async {
