@@ -285,7 +285,7 @@ Therefore compromise of the Relay alone does not allow it to invent Host control
 
 The generation is mandatory. A changed Pi Collab room must fail with `stale_generation`.
 
-Current successful link payload still contains:
+A successful link response contains only an encrypted capability envelope:
 
 ```json
 {
@@ -293,11 +293,48 @@ Current successful link payload still contains:
   "instanceId": "...",
   "generation": 3,
   "access": "control",
-  "collabUrl": "https://.../#..."
+  "capability": {
+    "version": 1,
+    "algorithm": "X25519-HKDF-SHA256-AES-256-GCM",
+    "machineId": "machine_...",
+    "deviceId": "device_...",
+    "requestId": "req_...",
+    "instanceId": "...",
+    "generation": 3,
+    "access": "control",
+    "salt": "...",
+    "nonce": "...",
+    "ciphertext": "...",
+    "tag": "..."
+  }
 }
 ```
 
-This capability is still plaintext to the Relay in v0. The next security layer will encrypt it Host-to-device using the paired X25519 keys.
+The plaintext `collabUrl` is never placed in the Relay response.
+
+The Host derives an X25519 shared secret using its machine key-agreement private key and the authorized device's stored X25519 public key. It then derives an AES-256 key with HKDF-SHA256 using a fresh 32-byte salt.
+
+The HKDF info and AES-GCM AAD are the same domain-separated canonical context containing:
+
+- machine ID
+- device ID
+- request ID
+- session instance ID
+- session generation
+- requested access
+
+AES-GCM uses a fresh 12-byte nonce.
+
+The iPhone decrypts only after finding a locally verified MachineGrant whose machine signing and X25519 public keys exactly match the online machine identity. It uses the machine X25519 key from that trusted grant identity, not an arbitrary key supplied by the Relay.
+
+Consequences:
+
+- Relay cannot read the Collab URL, room key, or write token;
+- Relay cannot alter machine/device/request/session/access context without authentication failure;
+- a different paired device cannot decrypt the envelope;
+- replay into a different request or generation is rejected by context checks and AEAD.
+
+The scheme uses long-lived paired X25519 identities and therefore does not claim forward secrecy if a long-lived X25519 private key is later compromised.
 
 ## Response envelope
 
