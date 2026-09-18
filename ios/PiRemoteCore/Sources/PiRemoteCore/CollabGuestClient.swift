@@ -3,6 +3,7 @@ import Foundation
 public enum CollabGuestClientError: LocalizedError, Sendable {
     case notConnected
     case readOnly
+    case notLive
     case protocolMismatch(expected: Int, received: Int)
     case badKeyOrCorruptedFrame
     case invalidRelayURL
@@ -14,6 +15,8 @@ public enum CollabGuestClientError: LocalizedError, Sendable {
             return "Pi Collab guest is not connected."
         case .readOnly:
             return "This Pi Collab link is read-only."
+        case .notLive:
+            return "Pi Collab has not finished loading the authoritative session snapshot."
         case let .protocolMismatch(expected, received):
             return "Pi Collab protocol mismatch: expected v\(expected), received v\(received)."
         case .badKeyOrCorruptedFrame:
@@ -263,6 +266,9 @@ public actor CollabGuestClient {
         guard socket != nil, replica.snapshot.phase != .ended else {
             throw CollabGuestClientError.notConnected
         }
+        guard replica.snapshot.phase == .live else {
+            throw CollabGuestClientError.notLive
+        }
         if replica.snapshot.readOnly {
             throw CollabGuestClientError.readOnly
         }
@@ -368,7 +374,7 @@ public actor CollabGuestClient {
 
     private func handleTransportEnd(
         _ task: URLSessionWebSocketTask,
-        error: Error
+        error _: Error
     ) async {
         guard socket === task, !intentionalClose else {
             return
@@ -382,7 +388,7 @@ public actor CollabGuestClient {
         let code = task.closeCode.rawValue
         let decision = CollabRelayClosePolicy.decide(
             code: code,
-            reason: closeReason(task) ?? error.localizedDescription,
+            reason: closeReason(task),
             retryMissingRoom: retryMissingRoom
         )
 
@@ -393,7 +399,8 @@ public actor CollabGuestClient {
             emitSnapshot()
             continuation.yield(
                 .disconnected(
-                    reason: closeReason(task) ?? error.localizedDescription,
+                    reason: closeReason(task)
+                        ?? "connection lost (code \(code))",
                     willReconnect: true
                 )
             )
