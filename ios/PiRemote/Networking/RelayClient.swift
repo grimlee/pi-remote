@@ -228,7 +228,17 @@ actor RelayClient {
         self.session = URLSession(configuration: .default)
 
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            guard let date = PiRemoteDateCoding.parseISO8601(value) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Invalid ISO-8601 date: \(value)"
+                )
+            }
+            return date
+        }
         self.decoder = decoder
     }
 
