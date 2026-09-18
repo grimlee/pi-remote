@@ -20,7 +20,9 @@ export class PiRegistryError extends Error {
 }
 
 export class NodeCommandRunner implements CommandRunner {
-  constructor(private readonly executable = "omp") {}
+  constructor(
+    private readonly executable = process.env.PI_REMOTE_OMP_COMMAND ?? "omp",
+  ) {}
 
   async run(_command: string, args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
     try {
