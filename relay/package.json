@@ -7,9 +7,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "tsx src/server.ts",
+    "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts"
+    "test": "tsx --test src/*.test.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "dev": "tsx src/server.ts"
   },
   "dependencies": {
     "ws": "^8.18.3",
