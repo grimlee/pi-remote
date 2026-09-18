@@ -225,6 +225,30 @@ final class AppStore {
         }
     }
 
+    func forgetHost() async {
+        let machineId = profile?.machine.id
+
+        await disconnectRelayAndCollab()
+
+        do {
+            if let machineId {
+                try await grantStore.remove(machineId: machineId)
+            }
+            try await profileStore.clear()
+
+            profile = nil
+            selectedSessionID = nil
+            pairingPayload = ""
+            pairingError = nil
+            sessionError = nil
+            needsSessionRestore = false
+            connectionState = .unpaired
+        } catch {
+            sessionError = error.localizedDescription
+            connectionState = .disconnected
+        }
+    }
+
     func suspend() async {
         needsSessionRestore = selectedSessionID != nil
         await disconnectRelayAndCollab()
