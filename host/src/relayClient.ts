@@ -195,7 +195,15 @@ export class RelayHostClient {
     });
 
     ws.on("message", raw => {
-      const value = asRecord(JSON.parse(raw.toString("utf8")) as unknown);
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(raw.toString("utf8"));
+      } catch {
+        ws.close(1003, "invalid relay JSON");
+        return;
+      }
+
+      const value = asRecord(decoded);
       if (!value) {
         ws.close(1003, "invalid relay frame");
         return;
