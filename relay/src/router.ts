@@ -12,6 +12,8 @@ import type {
   MachineDescriptor,
   MachinePresence,
   MachinesSnapshot,
+  PairingRequestFrame,
+  PairingResponseFrame,
 } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 
@@ -42,6 +44,13 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+interface PendingPairing {
+  client: RelayPeer;
+  hostKey: string;
+  machineId: string;
+  timer: NodeJS.Timeout;
+}
+
 function hostKey(machineId: string, signingPublicKey: string): string {
   return machineId + ":" + signingPublicKey;
 }
@@ -50,8 +59,12 @@ export class RelayRouter {
   readonly #hosts = new Map<string, HostRecord>();
   readonly #clients = new Map<RelayPeer, ClientRecord>();
   readonly #pending = new Map<string, PendingRequest>();
+  readonly #pendingPairing = new Map<string, PendingPairing>();
 
-  constructor(private readonly requestTimeoutMs = 15_000) {}
+  constructor(
+    private readonly requestTimeoutMs = 15_000,
+    private readonly pairingTimeoutMs = 15_000,
+  ) {}
 
   registerHost(peer: RelayPeer, machine: MachineDescriptor): void {
     this.removeHost(peer);
@@ -110,6 +123,19 @@ export class RelayRouter {
       );
     }
 
+    for (const [requestId, pending] of this.#pendingPairing) {
+      if (!removedKeys.includes(pending.hostKey)) continue;
+      clearTimeout(pending.timer);
+      this.#pendingPairing.delete(requestId);
+      this.#sendPairingError(
+        pending.client,
+        requestId,
+        pending.machineId,
+        "machine_offline",
+        "The machine went offline.",
+      );
+    }
+
     this.#reconcileAllClients();
   }
 
@@ -153,6 +179,108 @@ export class RelayRouter {
       clearTimeout(pending.timer);
       this.#pending.delete(requestId);
     }
+
+    for (const [requestId, pending] of this.#pendingPairing) {
+      if (pending.client !== peer) continue;
+      clearTimeout(pending.timer);
+      this.#pendingPairing.delete(requestId);
+    }
+  }
+
+  routePairingRequest(
+    clientPeer: RelayPeer,
+    request: PairingRequestFrame,
+  ): void {
+    const client = this.#clients.get(clientPeer);
+    if (!client) {
+      this.#sendPairingError(
+        clientPeer,
+        request.requestId,
+        request.machine.id,
+        "unauthorized",
+        "Client is not authenticated.",
+      );
+      return;
+    }
+
+    if (request.pairing.device.id !== client.principal.id
+      || request.pairing.device.signingPublicKey !== client.principal.signingPublicKey
+      || request.pairing.device.signingPublicKey !== client.device.signingPublicKey
+      || request.pairing.device.keyAgreementPublicKey !== client.device.keyAgreementPublicKey) {
+      this.#sendPairingError(
+        clientPeer,
+        request.requestId,
+        request.machine.id,
+        "forbidden",
+        "Pairing request does not match the authenticated device.",
+      );
+      return;
+    }
+
+    if (this.#pendingPairing.has(request.requestId)
+      || this.#pending.has(request.requestId)) {
+      this.#sendPairingError(
+        clientPeer,
+        request.requestId,
+        request.machine.id,
+        "invalid_request",
+        "requestId is already in flight.",
+      );
+      return;
+    }
+
+    const key = hostKey(
+      request.machine.id,
+      request.machine.signingPublicKey,
+    );
+    const host = this.#hosts.get(key);
+    if (!host) {
+      this.#sendPairingError(
+        clientPeer,
+        request.requestId,
+        request.machine.id,
+        "machine_offline",
+        "The trusted pairing target is offline.",
+      );
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const pending = this.#pendingPairing.get(request.requestId);
+      if (!pending) return;
+      this.#pendingPairing.delete(request.requestId);
+      this.#sendPairingError(
+        pending.client,
+        request.requestId,
+        pending.machineId,
+        "timeout",
+        "The host did not answer the pairing request in time.",
+      );
+    }, this.pairingTimeoutMs);
+
+    timer.unref();
+    this.#pendingPairing.set(request.requestId, {
+      client: clientPeer,
+      hostKey: key,
+      machineId: request.machine.id,
+      timer,
+    });
+    host.peer.send(JSON.stringify(request));
+  }
+
+  routePairingResponse(
+    hostPeer: RelayPeer,
+    response: PairingResponseFrame,
+  ): void {
+    const pending = this.#pendingPairing.get(response.requestId);
+    if (!pending || pending.machineId !== response.machineId) return;
+
+    const host = this.#hosts.get(pending.hostKey);
+    if (!host || host.peer !== hostPeer) return;
+
+    clearTimeout(pending.timer);
+    this.#pendingPairing.delete(response.requestId);
+    pending.client.send(JSON.stringify(response));
   }
 
   routeClientRequest(clientPeer: RelayPeer, request: ControlRequest): void {
@@ -331,6 +459,24 @@ export class RelayRouter {
     };
     client.peer.send(JSON.stringify(snapshot));
     for (const frame of presence) client.peer.send(JSON.stringify(frame));
+  }
+
+  #sendPairingError(
+    client: RelayPeer,
+    requestId: string,
+    machineId: string,
+    code: string,
+    message: string,
+  ): void {
+    const response: PairingResponseFrame = {
+      protocolVersion: PROTOCOL_VERSION,
+      type: "pairing.response",
+      requestId,
+      machineId,
+      ok: false,
+      error: { code, message },
+    };
+    client.send(JSON.stringify(response));
   }
 
   #sendError(
