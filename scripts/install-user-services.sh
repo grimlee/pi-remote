@@ -8,7 +8,7 @@ Usage:
 
 Options:
   --relay-url URL   Public Pi Remote Relay host WebSocket URL. Required.
-  --omp PATH        OMP executable path. Defaults to command -v omp.
+  --pi PATH         Pi executable path. Defaults to command -v pi.
   --port PORT       Local Relay listen port. Defaults to 8780.
   --no-enable       Install/build units without enabling or starting them.
   -h, --help        Show this help.
@@ -16,7 +16,7 @@ EOF
 }
 
 RELAY_URL=""
-OMP_COMMAND=""
+PI_COMMAND=""
 PORT="8780"
 ENABLE="1"
 
@@ -27,9 +27,9 @@ while [ "$#" -gt 0 ]; do
       RELAY_URL="$2"
       shift 2
       ;;
-    --omp)
-      [ "$#" -ge 2 ] || { echo "missing value for --omp" >&2; exit 2; }
-      OMP_COMMAND="$2"
+    --pi)
+      [ "$#" -ge 2 ] || { echo "missing value for --pi" >&2; exit 2; }
+      PI_COMMAND="$2"
       shift 2
       ;;
     --port)
@@ -96,11 +96,11 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 1
 fi
 
-if [ -z "$OMP_COMMAND" ]; then
-  OMP_COMMAND="$(command -v omp || true)"
+if [ -z "$PI_COMMAND" ]; then
+  PI_COMMAND="$(command -v pi || true)"
 fi
-if [ -z "$OMP_COMMAND" ] || [ ! -x "$OMP_COMMAND" ]; then
-  echo "OMP executable not found. Pass --omp /absolute/path/to/omp." >&2
+if [ -z "$PI_COMMAND" ] || [ ! -x "$PI_COMMAND" ]; then
+  echo "Pi executable not found. Pass --pi /absolute/path/to/pi." >&2
   exit 1
 fi
 
@@ -126,7 +126,7 @@ EOF
 
 cat > "$CONFIG_DIR/host.env" <<EOF
 PI_REMOTE_RELAY_URL=$RELAY_URL
-PI_REMOTE_OMP_COMMAND=$OMP_COMMAND
+PI_REMOTE_PI_COMMAND=$PI_COMMAND
 EOF
 
 chmod 600 "$CONFIG_DIR/relay.env" "$CONFIG_DIR/host.env"
@@ -215,8 +215,8 @@ Relay local origin:
 Host outbound Relay URL:
   $RELAY_URL
 
-OMP executable:
-  $OMP_COMMAND
+Pi executable:
+  $PI_COMMAND
 
 Next:
   1. Point your public tunnel hostname at http://127.0.0.1:$PORT

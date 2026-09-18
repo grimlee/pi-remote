@@ -5,6 +5,7 @@ actor RelayClient {
     enum Event: Sendable {
         case machinesSnapshot([RemoteMachine])
         case machinePresence(machineId: String, online: Bool)
+        case rpcFrame(PiRpcRelayFrame)
     }
 
     enum RelayError: LocalizedError, Sendable {
@@ -27,7 +28,7 @@ actor RelayClient {
             case .missingMachineGrant:
                 return "No trusted MachineGrant matches the selected host identity."
             case .invalidCapability:
-                return "The encrypted Pi Collab capability did not match the requested session."
+                return "The encrypted Pi session capability did not match the requested session."
             case .invalidPairingAcceptance:
                 return "The host pairing acceptance could not be verified."
             case let .remote(_, message):
@@ -486,6 +487,13 @@ actor RelayClient {
         }
     }
 
+    func sendRpcFrame(_ frame: PiRpcRelayFrame) async throws {
+        guard frame.direction == .client else {
+            throw RelayError.invalidFrame
+        }
+        try await send(frame)
+    }
+
     private func send<T: Encodable & Sendable>(_ frame: T) async throws {
         guard let socket else { throw RelayError.notConnected }
         let data = try encoder.encode(frame)
@@ -541,6 +549,13 @@ actor RelayClient {
 
         case "control.response":
             try await handleControlResponse(data)
+
+        case "rpc.frame":
+            let frame = try decoder.decode(PiRpcRelayFrame.self, from: data)
+            guard frame.direction == .host else {
+                throw RelayError.invalidFrame
+            }
+            await onEvent(.rpcFrame(frame))
 
         default:
             break

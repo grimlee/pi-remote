@@ -1,103 +1,89 @@
 # Pi Remote
 
-Native iOS remote control for a Pi / Oh My Pi agent running on your computer.
+Native iOS remote control for **Pi Agent** running on your computer.
 
-The goal is a ChatGPT Remote-style experience: the agent and tools stay on the host computer while the iPhone acts as a secure, low-latency control surface for discovering machines and sessions, observing work, steering, interrupting, and answering interactive requests.
+The goal is a ChatGPT Remote-style experience: Pi and its tools stay on the host computer while the iPhone acts as a secure control surface for discovering persisted sessions, resuming work, observing events, steering, interrupting, and answering interactive requests.
 
 ## Product principles
 
-- **Native iOS UX** — SwiftUI, native navigation, keyboard handling, haptics, notifications, and background recovery.
+- **Native iOS UX** — SwiftUI, native navigation, keyboard handling, notifications, and background recovery.
 - **Host executes everything** — LLM calls, shell commands, filesystem access, MCP tools, browser tools, and subagents remain on the computer.
 - **Machine identity, not IP addresses** — users interact with trusted machines and sessions, not hostnames, VPNs, ports, or tunnel URLs.
-- **Outbound-only host connectivity** — the host initiates the control-plane connection to Pi Remote Relay; no inbound port is required.
-- **Pi Collab remains the session data plane** — transcript replication, live tool state, prompt/interrupt, and E2EE stay on the upstream Collab protocol.
-- **Host-authoritative state** — mobile disconnects are routine; reconnecting restores current state without restarting Pi.
-- **Transport is replaceable** — Tailscale, LAN, or Cloudflare may exist as development/fallback transports, but they are not the product model.
+- **Outbound-only host connectivity** — the host initiates the Relay connection; no inbound host port is required.
+- **Native Pi RPC backend** — remote sessions run through `pi --session <path> --mode rpc`.
+- **End-to-end encrypted agent traffic** — prompt, transcript, tool, state, and extension-UI payloads are encrypted between the paired iPhone and Host. Relay routes opaque frames.
+- **Host-authoritative state** — mobile disconnects are routine; reconnecting re-discovers persisted Pi sessions and resumes the selected session.
+- **Provider credentials stay on Host** — Antigravity and other provider credentials are never moved to the phone or Relay.
 
-## Target architecture
+## Architecture
 
-```text
-                         CONTROL PLANE
-       outbound WSS                           WSS
-Host computer ───────────────► Pi Remote Relay ◄────────────── iPhone
-┌──────────────────────┐      ┌───────────────┐               ┌─────────────┐
-│ pi-remote-host       │      │ machine       │               │ Pi Remote   │
-│ - machine identity   │      │ presence      │               │ SwiftUI     │
-│ - session discovery  │      │ routing       │               │             │
-│ - issue Collab link  │      │ auth/pairing  │               │             │
-└──────────┬───────────┘      └───────────────┘               └──────┬──────┘
-           │                                                          │
-           │ local Pi registry                                        │
-           ▼                                                          │
-     Pi / OMP session                                                  │
-           │                                                          │
-           └──────────── E2EE Pi Collab data plane ───────────────────┘
-                         via Pi Collab relay
-```
+~~~text
+                     authenticated control plane
+Host computer ── outbound WSS ─► Pi Remote Relay ◄─ WSS ─ iPhone
+┌──────────────────────┐         ┌───────────────┐          ┌─────────────┐
+│ pi-remote-host       │         │ machine       │          │ Pi Remote   │
+│ machine identity     │         │ presence      │          │ SwiftUI     │
+│ pairing / grants     │         │ routing only  │          │             │
+│ Pi session registry  │         │               │          │             │
+└──────────┬───────────┘         └───────┬───────┘          └──────┬──────┘
+           │                             │                         │
+           │ JSONL stdin/stdout          │ opaque ciphertext       │
+           ▼                             │                         │
+ pi --session ... --mode rpc             └──── E2EE RPC frames ───┘
+~~~
 
-Pi Remote Relay is deliberately a narrow rendezvous/control service. It should not proxy normal transcript or tool traffic when Pi Collab already provides that channel.
+The Relay can see routing metadata such as machine/device/channel identifiers, but not Pi prompts, assistant messages, tool arguments/results, or transcript contents.
+
+## Session model
+
+Pi Remote lists persisted Pi session files from the Host's native Pi session store. Selecting one opens a dedicated RPC process:
+
+~~~bash
+pi --session <session-path> --mode rpc
+~~~
+
+The iPhone then requests authoritative state and history with Pi's native RPC commands and receives live Pi events.
+
+Current limitation: the RPC backend resumes persisted sessions; it does not attach to an already-running interactive Pi TUI process. Live attachment can be added later with a Pi extension.
 
 ## MVP
 
-1. Register one host machine with a stable machine identity.
-2. Keep an outbound host connection to Pi Remote Relay.
-3. Pair one iPhone with the host/account identity.
-4. Show host online/offline presence without IP configuration.
-5. List active Pi Collab sessions through the relay.
-6. Request a generation-bound Collab control capability.
-7. Connect the iPhone directly to the Pi Collab session.
-8. Render transcript and live tool activity.
-9. Send prompt / interrupt / answer interactive requests.
-10. Reconnect after backgrounding and recover authoritative host/session state.
+1. Register one Host with a stable machine identity.
+2. Keep an outbound Host connection to Pi Remote Relay.
+3. Pair one iPhone using its stable Ed25519/X25519 identity.
+4. Show trusted Host presence.
+5. List persisted Pi sessions.
+6. Open a generation-bound Pi RPC channel.
+7. Deliver the per-channel key only to the paired iPhone through the existing X25519/HKDF capability envelope.
+8. Load Pi state and message history.
+9. Stream agent/tool/extension events.
+10. Send prompt / abort / extension UI responses.
+11. Reconnect after backgrounding and restore authoritative Host/session state.
 
-Later phases add new-session creation, workspace/model controls, file and diff viewers, push notifications, Live Activities, multiple hosts, and richer subagent controls.
+Later phases add new-session creation, workspace/model controls, file and diff viewers, push notifications, Live Activities, multiple hosts, richer subagent controls, and live attachment to an existing Pi TUI process.
 
 ## Repository layout
 
-```text
-docs/       Architecture and security decisions
-host/       Host-side control agent; maintains outbound relay connection
-ios/        Native SwiftUI application
-protocol/   Pi Remote relay/control-plane protocol
-relay/      Minimal Pi Remote control relay
-```
-
-## Relationship to Pi Collab
-
-Pi Remote does not replace Pi Collab.
-
-**Pi Remote Relay / pi-remote-host** provide the machine control plane:
-
-- trusted machine identity
-- host online/offline presence
-- session discovery
-- session capability issuance
-- later: start/resume/stop and push metadata
-
-**Pi Collab** remains the session data plane:
-
-- transcript snapshot and events
-- streaming assistant output
-- tool calls/results
-- prompt and interrupt
-- interactive requests
-- subagents
-- end-to-end encrypted session content
-
-This split keeps Pi Remote's own relay small and avoids reimplementing Pi's real-time session protocol.
+~~~text
+docs/       Architecture, security decisions, and real-device runbooks
+host/       Host-side control agent and Pi RPC process bridge
+ios/        Native SwiftUI application and shared cryptographic core
+protocol/   Pi Remote control-plane protocol notes
+relay/      Minimal authenticated router for control and opaque E2EE RPC frames
+~~~
 
 ## Connectivity policy
 
-Primary product path:
+Primary logical path:
 
-```text
-host -> Pi Remote Relay <- iPhone
-```
+~~~text
+pi-remote-host -> Pi Remote Relay <- iPhone
+~~~
 
-Development/fallback paths may include LAN, Tailscale, or Cloudflare Tunnel, but the UI and resource model must not depend on any of them.
+Cloudflare Tunnel is currently a development/public-ingress transport for the Relay. The product identity model does not depend on Cloudflare, LAN addresses, or a VPN.
 
 ## Status
 
-Early development. The first vertical slice is:
+The current vertical slice is:
 
-**iPhone -> Pi Remote Relay -> pi-remote-host -> active Pi session -> Pi Collab -> iPhone**.
+**iPhone -> authenticated Relay -> pi-remote-host -> native Pi RPC session**, with Pi RPC contents encrypted end-to-end between iPhone and Host.

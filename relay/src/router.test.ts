@@ -12,6 +12,7 @@ import type {
   ControlRequest,
   ControlResponse,
   MachineDescriptor,
+  RpcFrame,
 } from "./protocol.js";
 import type { RelayPeer } from "./router.js";
 import { RelayRouter } from "./router.js";
@@ -247,4 +248,39 @@ test("rejects a grant signed for a different device identity", () => {
 
   router.registerClient(client, fx.principal, fx.device);
   assert.equal(router.setClientAuthorizations(client, [mismatched]), false);
+});
+
+test("routes opaque Pi RPC frames only between the authorized device and host", () => {
+  const router = new RelayRouter();
+  const host = new FakePeer();
+  const client = new FakePeer();
+  const fx = fixture();
+
+  router.registerHost(host, fx.machine);
+  router.setHostAuthorizationSnapshot(host, fx.machine.id, [fx.authorizedDevice]);
+  router.registerClient(client, fx.principal, fx.device);
+  assert.equal(router.setClientAuthorizations(client, [fx.grant]), true);
+
+  const clientFrame: RpcFrame = {
+    protocolVersion: 0,
+    type: "rpc.frame",
+    machineId: fx.machine.id,
+    deviceId: fx.device.id,
+    channelId: "rpc_test",
+    direction: "client",
+    seq: 1,
+    nonce: "opaque-nonce",
+    ciphertext: "opaque-ciphertext",
+    tag: "opaque-tag",
+  };
+  router.routeRpcFrame(client, clientFrame);
+  assert.deepEqual(JSON.parse(host.sent.at(-1) ?? "{}"), clientFrame);
+
+  const hostFrame: RpcFrame = {
+    ...clientFrame,
+    direction: "host",
+    seq: 1,
+  };
+  router.routeRpcFrame(host, hostFrame);
+  assert.deepEqual(JSON.parse(client.sent.at(-1) ?? "{}"), hostFrame);
 });

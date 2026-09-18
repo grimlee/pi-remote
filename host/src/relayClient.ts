@@ -8,6 +8,7 @@ import {
 } from "./machineIdentity.js";
 import { PairingError, type PairingRequest, type PairingService } from "./pairing.js";
 import { PiRegistry, PiRegistryError } from "./piRegistry.js";
+import { isRpcRelayFrame, type RpcRelayFrame } from "./rpcCrypto.js";
 import {
   signHostRelayChallenge,
   type RelayAuthChallenge,
@@ -237,6 +238,7 @@ export class RelayHostClient {
     this.#minReconnectMs = options.minReconnectMs ?? 1_000;
     this.#maxReconnectMs = options.maxReconnectMs ?? 30_000;
     this.#reconnectMs = this.#minReconnectMs;
+    this.#registry.setOutboundFrameHandler(frame => this.#sendRpcFrame(frame));
   }
 
   start(): void {
@@ -254,6 +256,7 @@ export class RelayHostClient {
     this.#socket?.close(1000, "host shutting down");
     this.#socket = null;
     this.#authenticated = false;
+    this.#registry.stop();
   }
 
   async refreshAuthorizationSnapshot(): Promise<void> {
@@ -319,7 +322,7 @@ export class RelayHostClient {
             id: machine.id,
             name: machine.name,
             platform: machine.platform,
-            capabilities: ["sessions.list", "sessions.link"],
+            capabilities: ["sessions.list", "sessions.link", "pi.rpc"],
             signingPublicKey: machine.signingPublicKey,
             keyAgreementPublicKey: machine.keyAgreementPublicKey,
             fingerprint: machine.fingerprint,
@@ -329,6 +332,16 @@ export class RelayHostClient {
         console.log(
           `Pi Remote host authenticated as ${machine.name} (${machine.id})`,
         );
+        return;
+      }
+
+      if (isRpcRelayFrame(value)) {
+        if (!this.#authenticated
+          || value.machineId !== this.options.machine.id
+          || value.direction !== "client") {
+          return;
+        }
+        this.#registry.handleRpcFrame(value);
         return;
       }
 
@@ -371,6 +384,12 @@ export class RelayHostClient {
       this.#connect();
     }, delay);
     this.#reconnectTimer.unref();
+  }
+
+  #sendRpcFrame(frame: RpcRelayFrame): void {
+    const ws = this.#socket;
+    if (!ws || !this.#authenticated || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(frame));
   }
 
   async #sendAuthorizationSnapshot(ws: WebSocket): Promise<void> {
@@ -492,12 +511,6 @@ export class RelayHostClient {
           payload: { op, sessions },
         };
       } else if (op === "sessions.link") {
-        const link = await this.#registry.createLink(
-          request.payload.instanceId,
-          request.payload.generation,
-          request.payload.access,
-        );
-
         const currentDevice = await this.options.devices.getActive(
           authorizedDevice.id,
         );
@@ -506,6 +519,16 @@ export class RelayHostClient {
           || currentDevice.keyAgreementPublicKey !== authorizedDevice.keyAgreementPublicKey) {
           throw new TypeError("device authorization changed before capability issuance");
         }
+
+        const link = await this.#registry.createLink(
+          request.payload.instanceId,
+          request.payload.generation,
+          request.payload.access,
+          {
+            machineId: this.options.machine.id,
+            deviceId: currentDevice.id,
+          },
+        );
 
         const capability = encryptCollabCapability(
           this.options.machine,

@@ -118,6 +118,19 @@ export interface ControlResponse {
   };
 }
 
+export interface RpcFrame {
+  protocolVersion: 0;
+  type: "rpc.frame";
+  machineId: string;
+  deviceId: string;
+  channelId: string;
+  direction: "client" | "host";
+  seq: number;
+  nonce: string;
+  ciphertext: string;
+  tag: string;
+}
+
 export function parseJsonObject(data: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(data);
@@ -280,4 +293,24 @@ export function isClientAuthorizations(
   return value.type === "client.authorizations"
     && isProtocolVersion(value.protocolVersion)
     && Array.isArray(value.grants);
+}
+
+export function isRpcFrame(value: Record<string, unknown>): value is Record<string, unknown> & RpcFrame {
+  return value.type === "rpc.frame"
+    && isProtocolVersion(value.protocolVersion)
+    && typeof value.machineId === "string"
+    && value.machineId.length > 0
+    && typeof value.deviceId === "string"
+    && value.deviceId.startsWith("device_")
+    && typeof value.channelId === "string"
+    && value.channelId.startsWith("rpc_")
+    && (value.direction === "client" || value.direction === "host")
+    && typeof value.seq === "number"
+    && Number.isSafeInteger(value.seq)
+    && value.seq >= 1
+    && typeof value.nonce === "string"
+    && value.nonce.length > 0
+    && typeof value.ciphertext === "string"
+    && typeof value.tag === "string"
+    && value.tag.length > 0;
 }

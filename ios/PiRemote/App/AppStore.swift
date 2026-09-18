@@ -33,7 +33,7 @@ final class AppStore {
     var machines: [RemoteMachine] = []
     var sessions: [RemoteSession] = []
     var selectedSessionID: String?
-    var collabSnapshot: CollabGuestSnapshot?
+    var rpcSnapshot: PiRpcSnapshot?
     var pairingPayload = ""
     var composerText = ""
     var pairingError: String?
@@ -47,8 +47,8 @@ final class AppStore {
 
     private var profile: PairedHostProfile?
     private var relayClient: RelayClient?
-    private var collabClient: CollabGuestClient?
-    private var collabEventsTask: Task<Void, Never>?
+    private var rpcClient: PiRpcClient?
+    private var rpcEventsTask: Task<Void, Never>?
     private var started = false
     private var needsSessionRestore = false
     private var activeMachine: RemoteMachine?
@@ -87,7 +87,7 @@ final class AppStore {
                 throw StoreError.invalidRelayURL
             }
 
-            await disconnectRelayAndCollab()
+            await disconnectRelayAndRpc()
 
             let client = makeRelayClient(url: relayURL)
             relayClient = client
@@ -153,7 +153,7 @@ final class AppStore {
         sessionError = nil
         selectedSessionID = session.instanceId
 
-        await closeCollab()
+        await closeRpc()
 
         do {
             let link = try await relayClient.requestSessionLink(
@@ -162,27 +162,29 @@ final class AppStore {
                 generation: session.generation,
                 access: session.access
             )
+            let device = try await identityStore.publicIdentity()
+            let client = try PiRpcClient(
+                capabilityString: link.collabUrl,
+                machineId: machine.id,
+                deviceId: device.id
+            ) { frame in
+                try await relayClient.sendRpcFrame(frame)
+            }
 
-            let client = try CollabGuestClient(
-                link: link.collabUrl,
-                displayName: "Pi Remote iPhone"
-            )
-            collabClient = client
-            collabSnapshot = CollabGuestSnapshot(
-                phase: .connecting
-            )
+            rpcClient = client
+            rpcSnapshot = PiRpcSnapshot(phase: .connecting)
 
-            collabEventsTask = Task { [weak self] in
+            rpcEventsTask = Task { [weak self] in
                 for await event in client.events {
-                    await self?.handleCollabEvent(event)
+                    await self?.handleRpcEvent(event)
                 }
             }
 
-            await client.connect()
+            try await client.start()
         } catch {
             sessionError = error.localizedDescription
-            collabSnapshot = nil
-            collabClient = nil
+            rpcSnapshot = nil
+            rpcClient = nil
         }
 
         isOpeningSession = false
@@ -191,10 +193,10 @@ final class AppStore {
     func sendPrompt() async {
         let text = composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let collabClient else { return }
+        guard !text.isEmpty, let rpcClient else { return }
 
         do {
-            try await collabClient.sendPrompt(text)
+            try await rpcClient.sendPrompt(text)
             composerText = ""
         } catch {
             sessionError = error.localizedDescription
@@ -202,23 +204,27 @@ final class AppStore {
     }
 
     func abort() async {
-        guard let collabClient else { return }
+        guard let rpcClient else { return }
         do {
-            try await collabClient.sendAbort()
+            try await rpcClient.abort()
         } catch {
             sessionError = error.localizedDescription
         }
     }
 
     func answerInteractiveRequest(
-        reqId: Int,
-        value: String?
+        id: String,
+        method: String,
+        value: String?,
+        confirmed: Bool? = nil
     ) async {
-        guard let collabClient else { return }
+        guard let rpcClient else { return }
         do {
-            try await collabClient.sendUiResponse(
-                reqId: reqId,
-                value: value
+            try await rpcClient.answerInteractiveRequest(
+                id: id,
+                method: method,
+                value: value,
+                confirmed: confirmed
             )
         } catch {
             sessionError = error.localizedDescription
@@ -228,7 +234,7 @@ final class AppStore {
     func forgetHost() async {
         let machineId = profile?.machine.id
 
-        await disconnectRelayAndCollab()
+        await disconnectRelayAndRpc()
 
         do {
             if let machineId {
@@ -251,7 +257,7 @@ final class AppStore {
 
     func suspend() async {
         needsSessionRestore = selectedSessionID != nil
-        await disconnectRelayAndCollab()
+        await disconnectRelayAndRpc()
         if profile != nil {
             connectionState = .disconnected
         }
@@ -337,44 +343,42 @@ final class AppStore {
                 sessions = []
                 activeMachine = nil
             }
+
+        case let .rpcFrame(frame):
+            guard let rpcClient else { return }
+            do {
+                try await rpcClient.receive(frame)
+            } catch {
+                sessionError = error.localizedDescription
+            }
         }
     }
 
-    private func handleCollabEvent(
-        _ event: CollabGuestClientEvent
+    private func handleRpcEvent(
+        _ event: PiRpcClientEvent
     ) {
         switch event {
         case let .snapshot(snapshot):
-            collabSnapshot = snapshot
+            rpcSnapshot = snapshot
 
-        case .frame:
-            break
-
-        case let .relayControl(message):
-            if message.contains("room-closed") {
-                sessionError = "The Pi Collab room was closed."
-            }
-
-        case let .disconnected(reason, willReconnect):
-            if !willReconnect {
-                sessionError = reason
-            }
+        case let .disconnected(reason):
+            sessionError = reason
         }
     }
 
-    private func closeCollab() async {
-        collabEventsTask?.cancel()
-        collabEventsTask = nil
+    private func closeRpc() async {
+        rpcEventsTask?.cancel()
+        rpcEventsTask = nil
 
-        if let collabClient {
-            await collabClient.close()
+        if let rpcClient {
+            await rpcClient.close()
         }
-        self.collabClient = nil
-        collabSnapshot = nil
+        self.rpcClient = nil
+        rpcSnapshot = nil
     }
 
-    private func disconnectRelayAndCollab() async {
-        await closeCollab()
+    private func disconnectRelayAndRpc() async {
+        await closeRpc()
 
         if let relayClient {
             await relayClient.disconnect()

@@ -15,6 +15,7 @@ import {
   isHostHello,
   isPairingRequest,
   isPairingResponse,
+  isRpcFrame,
   parseJsonObject,
 } from "./protocol.js";
 import { RelayRouter, type RelayPeer } from "./router.js";
@@ -169,6 +170,13 @@ server.on("upgrade", (req, socket, head) => {
 
       if (role === "client" && isControlRequest(value)) {
         router.routeClientRequest(relayPeer, value);
+        return;
+      }
+
+      if (isRpcFrame(value)
+        && ((role === "client" && value.direction === "client")
+          || (role === "host" && value.direction === "host"))) {
+        router.routeRpcFrame(relayPeer, value);
         return;
       }
 

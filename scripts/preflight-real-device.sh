@@ -20,7 +20,7 @@ set -a
 set +a
 
 PORT="${PORT:-8780}"
-OMP_COMMAND="${PI_REMOTE_OMP_COMMAND:-omp}"
+PI_COMMAND="${PI_REMOTE_PI_COMMAND:-pi}"
 
 echo "Checking services..."
 "$SYSTEMCTL" --user --quiet is-active pi-remote-relay.service
@@ -44,29 +44,22 @@ fetch(url)
 ' "http://127.0.0.1:$PORT/healthz"
 echo "PASS Relay healthz"
 
-echo "Checking OMP Collab registry..."
-if [ ! -x "$OMP_COMMAND" ]; then
-  echo "FAIL OMP executable is not executable: $OMP_COMMAND" >&2
+echo "Checking Pi RPC support..."
+if [ ! -x "$PI_COMMAND" ]; then
+  echo "FAIL Pi executable is not executable: $PI_COMMAND" >&2
   exit 1
 fi
 
-COLLAB_JSON="$("$OMP_COMMAND" collab list --json)"
-printf '%s' "$COLLAB_JSON" | "$NODE" -e '
-let body="";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => body += chunk);
-process.stdin.on("end", () => {
-  const value=JSON.parse(body);
-  if (!Array.isArray(value.hosts)) {
-    console.error("OMP response has no hosts[]");
-    process.exit(1);
-  }
-  console.log("PASS OMP Collab registry readable; active hosts:", value.hosts.length);
-  for (const host of value.hosts) {
-    console.log("  -", host.instanceId, "generation", host.generation, host.sessionName ?? host.cwd);
-  }
-});
-'
+PI_VERSION="$("$PI_COMMAND" --version 2>/dev/null || true)"
+if [ -z "$PI_VERSION" ]; then
+  echo "FAIL Pi --version returned no output" >&2
+  exit 1
+fi
+if ! "$PI_COMMAND" --help 2>&1 | grep -q -- "--mode <mode>"; then
+  echo "FAIL Pi does not advertise --mode rpc support" >&2
+  exit 1
+fi
+echo "PASS Pi RPC executable: $PI_COMMAND ($PI_VERSION)"
 
 if [ -n "${PI_REMOTE_PAIR_SOCKET:-}" ]; then
   PAIR_SOCKET="$PI_REMOTE_PAIR_SOCKET"
