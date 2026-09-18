@@ -108,9 +108,14 @@ actor PiRpcClient {
         snapshot.state = nil
         emitSnapshot()
 
-        _ = try await sendRequest([
+        let result = try await sendRequest([
             "type": .string("new_session")
         ])
+        if result.objectValue?["cancelled"]?.boolValue == true {
+            throw ClientError.remote(
+                "A Pi extension cancelled the new session."
+            )
+        }
 
         try await sendCommand([
             "id": .string("fresh-state-" + UUID().uuidString),
