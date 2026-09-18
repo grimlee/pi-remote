@@ -203,7 +203,7 @@ private struct SessionRow: View {
 
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
-    let session
+    let session: RemoteSession
 
     @State private var editorResponse = ""
 
