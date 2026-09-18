@@ -232,18 +232,23 @@ public enum CollabLinkParser {
         guard (10...64).contains(value.count) else {
             return false
         }
-        return value.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.alphanumerics.contains(scalar)
-                || scalar == "_"
-                || scalar == "-"
-        }
+        return value.unicodeScalars.allSatisfy(isBase64URLScalar)
     }
 
     private static func isBase64URL(_ value: String) -> Bool {
-        !value.isEmpty && value.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.alphanumerics.contains(scalar)
-                || scalar == "_"
-                || scalar == "-"
+        !value.isEmpty && value.unicodeScalars.allSatisfy(isBase64URLScalar)
+    }
+
+    private static func isBase64URLScalar(
+        _ scalar: UnicodeScalar
+    ) -> Bool {
+        switch scalar.value {
+        case 45, 95:
+            return true
+        case 48...57, 65...90, 97...122:
+            return true
+        default:
+            return false
         }
     }
 }
