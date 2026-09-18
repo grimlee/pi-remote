@@ -13,7 +13,7 @@ import { RelayRouter } from "./router.js";
 
 class FakePeer implements RelayPeer {
   readonly sent: string[] = [];
-  closed: { code?: number; reason?: string } | null = null;
+  closed: { code: number | undefined; reason: string | undefined } | null = null;
 
   send(text: string): void {
     this.sent.push(text);
