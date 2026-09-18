@@ -405,14 +405,11 @@ final class AppStore {
             }
 
             lastCachedMessageRevision = snapshot.messageRevision
-            let messages = snapshot.messages
-            Task { [conversationCache = self.conversationCache] in
-                try? await conversationCache.save(
-                    machineId: machine.id,
-                    sessionId: session.sessionId,
-                    messages: messages
-                )
-            }
+            try? await conversationCache.save(
+                machineId: machine.id,
+                sessionId: session.sessionId,
+                messages: snapshot.messages
+            )
 
         case let .disconnected(reason):
             sessionError = reason
