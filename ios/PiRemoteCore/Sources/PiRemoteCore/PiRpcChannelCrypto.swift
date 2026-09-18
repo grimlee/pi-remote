@@ -48,24 +48,32 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
     public let wireProtocol: String
     public let channelId: String
     public let key: String
+    public let nextClientSeq: Int64?
+    public let lastHostSeq: Int64?
 
     private enum CodingKeys: String, CodingKey {
         case version
         case wireProtocol = "protocol"
         case channelId
         case key
+        case nextClientSeq
+        case lastHostSeq
     }
 
     public init(
         version: Int,
         wireProtocol: String,
         channelId: String,
-        key: String
+        key: String,
+        nextClientSeq: Int64? = nil,
+        lastHostSeq: Int64? = nil
     ) {
         self.version = version
         self.wireProtocol = wireProtocol
         self.channelId = channelId
         self.key = key
+        self.nextClientSeq = nextClientSeq
+        self.lastHostSeq = lastHostSeq
     }
 
     public static func parse(_ value: String) throws -> PiRpcCapability {
@@ -77,7 +85,9 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
               capability.wireProtocol == "piremote-pi-rpc-v1",
               capability.channelId.hasPrefix("rpc_"),
               let key = Data(piRpcBase64URL: capability.key),
-              key.count == 32
+              key.count == 32,
+              capability.nextClientSeq.map({ $0 >= 1 }) ?? true,
+              capability.lastHostSeq.map({ $0 >= 0 }) ?? true
         else {
             throw PiRpcCryptoError.invalidCapability
         }
