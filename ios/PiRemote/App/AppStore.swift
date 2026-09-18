@@ -337,7 +337,14 @@ final class AppStore {
             }
 
             connectionState = .connected(hostName: machine.name)
-            await refreshSessions()
+
+            // Do not await refreshSessions() from inside the RelayClient event
+            // callback. The RelayClient receive loop is waiting for this
+            // callback to return; awaiting a control response here would block
+            // the same receive loop that must read that response.
+            Task { [weak self] in
+                await self?.refreshSessions()
+            }
 
         case let .machinePresence(machineId, online):
             guard machineId == profile?.machine.id else { return }
