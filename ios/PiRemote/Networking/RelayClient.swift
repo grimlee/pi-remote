@@ -11,6 +11,8 @@ actor RelayClient {
         case notConnected
         case invalidFrame
         case authenticationFailed
+        case missingMachineGrant
+        case invalidCapability
         case remote(code: String, message: String)
 
         var errorDescription: String? {
@@ -21,6 +23,10 @@ actor RelayClient {
                 return "Pi Remote Relay returned an invalid frame."
             case .authenticationFailed:
                 return "Pi Remote Relay authentication failed."
+            case .missingMachineGrant:
+                return "No trusted MachineGrant matches the selected host identity."
+            case .invalidCapability:
+                return "The encrypted Pi Collab capability did not match the requested session."
             case let .remote(_, message):
                 return message
             }
@@ -117,7 +123,7 @@ actor RelayClient {
         let instanceId: String
         let generation: Int
         let access: RemoteSession.Access
-        let collabUrl: String
+        let capability: EncryptedCollabCapability
     }
 
     private struct RemoteError: Decodable {
@@ -145,9 +151,18 @@ actor RelayClient {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private struct PendingSessionLink {
+        let continuation: CheckedContinuation<SessionLink, Error>
+        let machine: RemoteMachine
+        let deviceId: String
+        let instanceId: String
+        let generation: Int
+        let access: RemoteSession.Access
+    }
+
     private var authenticatedDevice: DevicePublicIdentity?
     private var pendingSessionLists: [String: CheckedContinuation<[RemoteSession], Error>] = [:]
-    private var pendingSessionLinks: [String: CheckedContinuation<SessionLink, Error>] = [:]
+    private var pendingSessionLinks: [String: PendingSessionLink] = [:]
 
     init(
         configuration: Configuration,
@@ -245,8 +260,8 @@ actor RelayClient {
         }
         pendingSessionLists.removeAll()
 
-        for continuation in pendingSessionLinks.values {
-            continuation.resume(throwing: error)
+        for pending in pendingSessionLinks.values {
+            pending.continuation.resume(throwing: error)
         }
         pendingSessionLinks.removeAll()
     }
@@ -291,7 +306,7 @@ actor RelayClient {
     }
 
     func requestSessionLink(
-        machineId: String,
+        machine: RemoteMachine,
         instanceId: String,
         generation: Int,
         access: RemoteSession.Access
@@ -300,11 +315,20 @@ actor RelayClient {
             throw RelayError.authenticationFailed
         }
 
+        guard try await grantStore.grant(
+            machineId: machine.id,
+            signingPublicKey: machine.signingPublicKey,
+            keyAgreementPublicKey: machine.keyAgreementPublicKey,
+            for: device
+        ) != nil else {
+            throw RelayError.missingMachineGrant
+        }
+
         let requestId = UUID().uuidString
         let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
         let message = ControlRequestCrypto.sessionsLinkMessage(
             requestId: requestId,
-            machineId: machineId,
+            machineId: machine.id,
             deviceId: device.id,
             issuedAtMs: issuedAtMs,
             instanceId: instanceId,
@@ -316,7 +340,7 @@ actor RelayClient {
 
         let request = ControlRequest(
             requestId: requestId,
-            machineId: machineId,
+            machineId: machine.id,
             payload: SessionsLinkPayload(
                 instanceId: instanceId,
                 generation: generation,
@@ -330,7 +354,14 @@ actor RelayClient {
         )
 
         return try await withCheckedThrowingContinuation { continuation in
-            pendingSessionLinks[requestId] = continuation
+            pendingSessionLinks[requestId] = PendingSessionLink(
+                continuation: continuation,
+                machine: machine,
+                deviceId: device.id,
+                instanceId: instanceId,
+                generation: generation,
+                access: access
+            )
             Task { [weak self] in
                 do {
                     try await self?.send(request)
@@ -392,14 +423,14 @@ actor RelayClient {
             await onEvent(.machinePresence(machineId: frame.machineId, online: frame.online))
 
         case "control.response":
-            try handleControlResponse(data)
+            try await handleControlResponse(data)
 
         default:
             break
         }
     }
 
-    private func handleControlResponse(_ data: Data) throws {
+    private func handleControlResponse(_ data: Data) async throws {
         struct ResponseHeader: Decodable {
             let requestId: String
         }
@@ -425,14 +456,14 @@ actor RelayClient {
             return
         }
 
-        if let continuation = pendingSessionLinks.removeValue(forKey: header.requestId) {
+        if let pending = pendingSessionLinks.removeValue(forKey: header.requestId) {
             let response = try decoder.decode(
                 ControlResponse<SessionsLinkResponsePayload>.self,
                 from: data
             )
             guard response.ok, let payload = response.payload else {
                 let error = response.error
-                continuation.resume(
+                pending.continuation.resume(
                     throwing: RelayError.remote(
                         code: error?.code ?? "internal_error",
                         message: error?.message ?? "The host rejected the request."
@@ -440,14 +471,41 @@ actor RelayClient {
                 )
                 return
             }
-            continuation.resume(
-                returning: SessionLink(
-                    instanceId: payload.instanceId,
-                    generation: payload.generation,
-                    access: payload.access,
-                    collabUrl: payload.collabUrl
+
+            let capability = payload.capability
+            guard response.machineId == pending.machine.id,
+                  payload.op == "sessions.link",
+                  payload.instanceId == pending.instanceId,
+                  payload.generation == pending.generation,
+                  payload.access == pending.access,
+                  capability.machineId == pending.machine.id,
+                  capability.deviceId == pending.deviceId,
+                  capability.requestId == header.requestId,
+                  capability.instanceId == pending.instanceId,
+                  capability.generation == pending.generation,
+                  capability.access == pending.access.rawValue
+            else {
+                pending.continuation.resume(throwing: RelayError.invalidCapability)
+                throw RelayError.invalidCapability
+            }
+
+            do {
+                let collabUrl = try await identityStore.decryptCollabCapability(
+                    capability,
+                    machineKeyAgreementPublicKey: pending.machine.keyAgreementPublicKey
                 )
-            )
+                pending.continuation.resume(
+                    returning: SessionLink(
+                        instanceId: payload.instanceId,
+                        generation: payload.generation,
+                        access: payload.access,
+                        collabUrl: collabUrl
+                    )
+                )
+            } catch {
+                pending.continuation.resume(throwing: error)
+                throw error
+            }
         }
     }
 
@@ -456,7 +514,9 @@ actor RelayClient {
     }
 
     private func failSessionLink(requestId: String, error: Error) {
-        pendingSessionLinks.removeValue(forKey: requestId)?.resume(throwing: error)
+        pendingSessionLinks.removeValue(forKey: requestId)?
+            .continuation
+            .resume(throwing: error)
     }
 
     private func failAllPending(_ error: Error) {
@@ -465,8 +525,8 @@ actor RelayClient {
         }
         pendingSessionLists.removeAll()
 
-        for continuation in pendingSessionLinks.values {
-            continuation.resume(throwing: error)
+        for pending in pendingSessionLinks.values {
+            pending.continuation.resume(throwing: error)
         }
         pendingSessionLinks.removeAll()
     }
