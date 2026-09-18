@@ -89,3 +89,74 @@ func controlRequestCanonicalBytesMatchHost() {
         == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2w"
     )
 }
+
+
+@Test
+func collabCapabilityCryptoVectorMatchesNode() throws {
+    let envelope = EncryptedCollabCapability(
+        machineId: "machine_testvector",
+        deviceId: "device_testvector",
+        requestId: "req_capability_vector",
+        instanceId: "instance_test",
+        generation: 7,
+        access: "control",
+        salt: "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+        nonce: "ZmZmZmZmZmZmZmZm",
+        ciphertext:
+            "IaWBOyFwTzHCbf_zFagdR6D1xa64RVPT2Ux01tnryZ-AyuIpEjKlQiZbHsKqUQ",
+        tag: "IAqDQdP0DV6fJOZ7OGSxqQ"
+    )
+
+    #expect(
+        CollabCapabilityCrypto.contextMessage(envelope: envelope)
+            .base64URLEncodedString()
+        == "cGlyZW1vdGUtY29sbGFiLWNhcGFiaWxpdHktdjEAbWFjaGluZV90ZXN0dmVjdG9yAGRldmljZV90ZXN0dmVjdG9yAHJlcV9jYXBhYmlsaXR5X3ZlY3RvcgBpbnN0YW5jZV90ZXN0ADcAY29udHJvbA"
+    )
+
+    let sharedSecret = Data(repeating: 0x44, count: 32)
+    let plaintext = try CollabCapabilityCrypto.decryptWithSharedSecretForTest(
+        envelope,
+        sharedSecretRaw: sharedSecret
+    )
+
+    #expect(
+        plaintext == "https://collab.example/#opaque-test-capability"
+    )
+}
+
+@Test
+func collabCapabilityRejectsAuthenticatedContextTampering() throws {
+    let original = EncryptedCollabCapability(
+        machineId: "machine_testvector",
+        deviceId: "device_testvector",
+        requestId: "req_capability_vector",
+        instanceId: "instance_test",
+        generation: 7,
+        access: "control",
+        salt: "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+        nonce: "ZmZmZmZmZmZmZmZm",
+        ciphertext:
+            "IaWBOyFwTzHCbf_zFagdR6D1xa64RVPT2Ux01tnryZ-AyuIpEjKlQiZbHsKqUQ",
+        tag: "IAqDQdP0DV6fJOZ7OGSxqQ"
+    )
+
+    let tampered = EncryptedCollabCapability(
+        machineId: original.machineId,
+        deviceId: original.deviceId,
+        requestId: original.requestId,
+        instanceId: original.instanceId,
+        generation: 8,
+        access: original.access,
+        salt: original.salt,
+        nonce: original.nonce,
+        ciphertext: original.ciphertext,
+        tag: original.tag
+    )
+
+    #expect(throws: (any Error).self) {
+        try CollabCapabilityCrypto.decryptWithSharedSecretForTest(
+            tampered,
+            sharedSecretRaw: Data(repeating: 0x44, count: 32)
+        )
+    }
+}
