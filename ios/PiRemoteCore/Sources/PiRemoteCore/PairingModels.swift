@@ -81,7 +81,9 @@ public struct PairingBootstrap: Codable, Hashable, Sendable {
               value.invitation.version == 1,
               value.invitation.pairingId.hasPrefix("pair_"),
               value.invitation.machine.id.hasPrefix("machine_"),
-              URL(string: value.relayUrl) != nil
+              let relayURL = URL(string: value.relayUrl),
+              relayURL.scheme?.lowercased() == "wss",
+              relayURL.host != nil
         else {
             throw PairingBootstrapError.invalidPayload
         }
