@@ -81,6 +81,17 @@ func collabLinkRejectsInsecureRemoteRelayAndWrongSecretLength() throws {
 }
 
 @Test
+func collabLinkRejectsUnicodeOutsideUpstreamASCIIGrammar() {
+    let key = Data((0..<32).map(UInt8.init)).base64URLEncodedString()
+
+    #expect(throws: (any Error).self) {
+        try CollabLinkParser.parse(
+            "éQIDBAUGBwgJCgsMDQ4PEA." + key
+        )
+    }
+}
+
+@Test
 func collabEnvelopeMatchesUpstreamBigEndianLayout() throws {
     let envelope = CollabEnvelope(
         peerId: 0xDEADBEEF,
