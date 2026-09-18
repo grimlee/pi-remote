@@ -98,3 +98,25 @@ test("rejects role reflection", () => {
 
   assert.equal(verifyRelayAuthResponse(challenge, response, now + 100), false);
 });
+
+
+test("relay auth canonical bytes match the Swift fixed vector", () => {
+  const challenge = {
+    protocolVersion: 0 as const,
+    type: "auth.challenge" as const,
+    challengeId: "auth_testvector",
+    role: "client" as const,
+    nonce: "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+    expiresAt: "2026-09-18T00:00:30.000Z",
+  };
+  const principal: RelayAuthPrincipal = {
+    kind: "device",
+    id: "device_testvector",
+    signingPublicKey: "yM6EbQV4R3kp5yy_dnkBqsme8jA9ypGFMbhwAvc6hZc",
+  };
+
+  assert.equal(
+    relayAuthMessage(challenge, principal).toString("base64url"),
+    "cGlyZW1vdGUtcmVsYXktYXV0aC12MQBjbGllbnQAYXV0aF90ZXN0dmVjdG9yAElpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUkAZGV2aWNlAGRldmljZV90ZXN0dmVjdG9yAHlNNkViUVY0UjNrcDV5eV9kbmtCcXNtZThqQTl5cEdGTWJod0F2YzZoWmM",
+  );
+});
