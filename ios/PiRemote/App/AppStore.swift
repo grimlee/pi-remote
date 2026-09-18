@@ -486,7 +486,10 @@ final class AppStore {
             )
 
             if shouldRefreshAfterNewSession,
-               !snapshot.messages.isEmpty {
+               snapshot.messages.contains(where: { message in
+                   message.objectValue?["role"]?.stringValue
+                       == "assistant"
+               }) {
                 shouldRefreshAfterNewSession = false
                 Task { [weak self] in
                     await self?.refreshSessions()
