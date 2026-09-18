@@ -71,6 +71,50 @@ function validRequest(
   };
 }
 
+
+test("fixed pairing vector matches the Swift implementation", () => {
+  const device: PairingDevicePublicIdentity = {
+    id: "device_testvector",
+    name: "iPhone",
+    signingPublicKey: "yM6EbQV4R3kp5yy_dnkBqsme8jA9ypGFMbhwAvc6hZc",
+    keyAgreementPublicKey: "OHWQojocMsWFkAFfLZ0XtemKwhoYP_h0kv3KIN8FM34",
+  };
+
+  const message = pairingRequestMessage({
+    pairingId: "pair_testvector",
+    machineId: "machine_testvector",
+    device,
+  });
+
+  assert.equal(
+    message.toString("base64url"),
+    "cGlyZW1vdGUtcGFpci1yZXF1ZXN0LXYxAHBhaXJfdGVzdHZlY3RvcgBtYWNoaW5lX3Rlc3R2ZWN0b3IAZGV2aWNlX3Rlc3R2ZWN0b3IAaVBob25lAHlNNkViUVY0UjNrcDV5eV9kbmtCcXNtZThqQTl5cEdGTWJod0F2YzZoWmMAT0hXUW9qb2NNc1dGa0FGZkxaMFh0ZW1Ld2hvWVBfaDBrdjNLSU44Rk0zNA",
+  );
+
+  assert.equal(
+    createHmac(
+      "sha256",
+      Buffer.from("ERERERERERERERERERERERERERERERERERERERERERE", "base64url"),
+    ).update(message).digest("base64url"),
+    "dNuxN6BRlMe0IZ_Mx0vQrUeI9yYI7sPZIZlXIjvKFHE",
+  );
+
+  const privateKey = createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "Ed25519",
+      x: "yM6EbQV4R3kp5yy_dnkBqsme8jA9ypGFMbhwAvc6hZc",
+      d: "ZROu6neDb7zKDoTNlziatRJ-rt9vudG1KuBsQ0Egizo",
+    },
+    format: "jwk",
+  });
+
+  assert.equal(
+    sign(null, message, privateKey).toString("base64url"),
+    "PzsKk2gTlKX9WgUEv-fpIL169aPcnSHXo9AG9gJOas-6aURwpX9Gj3_h4W4Lr9FuRTZ6wrFWCmhK-hLhDpNTAw",
+  );
+});
+
 test("valid one-time pairing authorizes a device and cannot be replayed", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pairing-"));
   const machine = await loadOrCreateMachineIdentity(path.join(dir, "machine.json"));
