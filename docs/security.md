@@ -118,11 +118,28 @@ Already-issued Pi Collab capabilities follow upstream Collab semantics until the
 
 ## Collab capability delivery
 
-Current control-plane v0 can still return a plaintext `collabUrl` through Relay memory.
+Pi Collab capabilities are end-to-end encrypted from the Host to the paired iPhone before entering the Relay.
 
-This is the next known security boundary to remove.
+The Host briefly receives the plaintext `collabUrl` from the local `omp collab link` command, then immediately encrypts it using:
 
-The planned layer uses the paired Host/device X25519 keys to derive encryption material so the Relay only routes ciphertext.
+- X25519 shared secret from the machine private key and authorized device public key;
+- HKDF-SHA256 with a fresh 32-byte salt;
+- AES-256-GCM with a fresh 12-byte nonce.
+
+The authenticated context binds machine ID, device ID, control request ID, session instance ID, generation, and access level. The same context is used as HKDF info and AES-GCM AAD.
+
+Only the encrypted envelope crosses Pi Remote Relay. The Relay can still observe routing/session metadata such as instance ID, generation, and requested access, but cannot recover the Collab URL, room key, or write token.
+
+The iPhone will decrypt only when the online machine cryptographic identity exactly matches a locally verified Host-signed MachineGrant.
+
+A malicious Relay can drop or replay ciphertext, but it cannot:
+
+- decrypt the capability;
+- retarget it to another device;
+- change generation/access/request context without AES-GCM failure;
+- forge a new valid capability without the Host X25519 private key.
+
+This static paired-X25519 construction does **not** provide forward secrecy against later compromise of a long-lived Host or device X25519 private key. If that threat becomes material, capability delivery can evolve to an authenticated ephemeral key exchange without changing the Relay routing model.
 
 ## Session data
 
