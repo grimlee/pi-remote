@@ -13,6 +13,7 @@ struct PiRpcSnapshot: Sendable {
     var liveMessage: JSONValue?
     var messageRevision: Int = 0
     var state: JSONValue?
+    var availableModels: [PiModelOption] = []
     var lastEvent: JSONValue?
     var uiRequest: JSONValue?
     var readOnly: Bool { false }
@@ -28,6 +29,7 @@ actor PiRpcClient {
         case invalidCapability
         case invalidFrame
         case closed
+        case remote(String)
 
         var errorDescription: String? {
             switch self {
@@ -37,6 +39,8 @@ actor PiRpcClient {
                 return "The Pi RPC channel returned an invalid encrypted frame."
             case .closed:
                 return "The Pi RPC channel is closed."
+            case let .remote(message):
+                return message
             }
         }
     }
@@ -55,6 +59,8 @@ actor PiRpcClient {
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
     private var isClosed = false
+    private var pendingResponses:
+        [String: CheckedContinuation<JSONValue, Error>] = [:]
 
     init(
         capabilityString: String,
@@ -86,6 +92,51 @@ actor PiRpcClient {
             "id": .string("bootstrap-messages"),
             "type": .string("get_messages")
         ])
+        try await sendCommand([
+            "id": .string("bootstrap-models"),
+            "type": .string("get_available_models")
+        ])
+    }
+
+    func startFreshSession() async throws {
+        guard !isClosed else { throw ClientError.closed }
+
+        snapshot.phase = .connecting
+        snapshot.messages = []
+        snapshot.liveMessage = nil
+        snapshot.messageRevision += 1
+        snapshot.state = nil
+        emitSnapshot()
+
+        _ = try await sendRequest([
+            "type": .string("new_session")
+        ])
+
+        try await sendCommand([
+            "id": .string("fresh-state-" + UUID().uuidString),
+            "type": .string("get_state")
+        ])
+        try await sendCommand([
+            "id": .string("fresh-messages-" + UUID().uuidString),
+            "type": .string("get_messages")
+        ])
+        try await sendCommand([
+            "id": .string("fresh-models-" + UUID().uuidString),
+            "type": .string("get_available_models")
+        ])
+    }
+
+    func selectModel(_ model: PiModelOption) async throws {
+        let data = try await sendRequest([
+            "type": .string("set_model"),
+            "provider": .string(model.provider),
+            "modelId": .string(model.modelId)
+        ])
+
+        var state = snapshot.state?.objectValue ?? [:]
+        state["model"] = data
+        snapshot.state = .object(state)
+        emitSnapshot()
     }
 
     func receive(_ frame: PiRpcRelayFrame) throws {
@@ -162,10 +213,34 @@ actor PiRpcClient {
             // Relay may already be gone during backgrounding.
         }
         isClosed = true
+        failPending(ClientError.closed)
         snapshot.phase = .closed
         snapshot.liveMessage = nil
         emitSnapshot()
         continuation.finish()
+    }
+
+    private func sendRequest(
+        _ object: [String: JSONValue]
+    ) async throws -> JSONValue {
+        let requestId = UUID().uuidString
+        var command = object
+        command["id"] = .string(requestId)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingResponses[requestId] = continuation
+
+            Task {
+                do {
+                    try await sendCommand(command)
+                } catch {
+                    failPendingResponse(
+                        requestId: requestId,
+                        error: error
+                    )
+                }
+            }
+        }
     }
 
     private func sendCommand(_ object: [String: JSONValue]) async throws {
@@ -201,6 +276,7 @@ actor PiRpcClient {
         case "response":
             let command = object["command"]?.stringValue
             let success = object["success"]?.boolValue ?? false
+
             if success,
                command == "get_state",
                let data = object["data"] {
@@ -214,9 +290,30 @@ actor PiRpcClient {
                 snapshot.messages = messages
                 snapshot.messageRevision += 1
                 snapshot.phase = .live
+            } else if success,
+                      command == "get_available_models",
+                      let models = object["data"]?
+                        .objectValue?["models"]?
+                        .arrayValue {
+                snapshot.availableModels = models
+                    .compactMap(PiModelOption.parse)
+                    .sorted {
+                        if $0.provider == $1.provider {
+                            return $0.displayName
+                                .localizedCaseInsensitiveCompare(
+                                    $1.displayName
+                                ) == .orderedAscending
+                        }
+                        return $0.provider
+                            .localizedCaseInsensitiveCompare(
+                                $1.provider
+                            ) == .orderedAscending
+                    }
             } else {
                 snapshot.lastEvent = value
             }
+
+            completePendingResponse(object)
 
         case "message_start":
             if let message = object["message"] {
@@ -254,6 +351,7 @@ actor PiRpcClient {
 
         case "piremote.channel_closed":
             isClosed = true
+            failPending(ClientError.closed)
             snapshot.phase = .closed
             snapshot.liveMessage = nil
             snapshot.lastEvent = value
@@ -267,6 +365,48 @@ actor PiRpcClient {
         }
 
         emitSnapshot()
+    }
+
+    private func completePendingResponse(
+        _ object: [String: JSONValue]
+    ) {
+        guard let requestId = object["id"]?.stringValue,
+              let continuation = pendingResponses.removeValue(
+                forKey: requestId
+              )
+        else {
+            return
+        }
+
+        let success = object["success"]?.boolValue ?? false
+        if success {
+            continuation.resume(
+                returning: object["data"] ?? .null
+            )
+        } else {
+            continuation.resume(
+                throwing: ClientError.remote(
+                    object["error"]?.stringValue
+                        ?? "Pi rejected the RPC request."
+                )
+            )
+        }
+    }
+
+    private func failPendingResponse(
+        requestId: String,
+        error: Error
+    ) {
+        pendingResponses.removeValue(forKey: requestId)?
+            .resume(throwing: error)
+    }
+
+    private func failPending(_ error: Error) {
+        let pending = pendingResponses
+        pendingResponses.removeAll()
+        for continuation in pending.values {
+            continuation.resume(throwing: error)
+        }
     }
 
     private func applyMessageUpdate(_ object: [String: JSONValue]) {
