@@ -1,20 +1,24 @@
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import {
+  createRelayAuthChallenge,
+  isRelayAuthResponse,
+  type RelayAuthPrincipal,
+  verifyRelayAuthResponse,
+} from "./auth.js";
+import {
+  isClientAuthorizations,
   isClientHello,
   isControlRequest,
   isControlResponse,
+  isHostAuthorizationSnapshot,
   isHostHello,
   parseJsonObject,
 } from "./protocol.js";
 import { RelayRouter, type RelayPeer } from "./router.js";
 
 const port = Number(process.env.PORT ?? "8780");
-const bootstrapToken = process.env.PI_REMOTE_RELAY_TOKEN;
 
-if (!bootstrapToken) {
-  throw new Error("PI_REMOTE_RELAY_TOKEN is required for the development relay");
-}
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
 }
@@ -30,11 +34,6 @@ function peer(ws: WebSocket): RelayPeer {
       ws.close(code, reason);
     },
   };
-}
-
-function bearerToken(header: string | undefined): string | null {
-  if (!header?.startsWith("Bearer ")) return null;
-  return header.slice("Bearer ".length);
 }
 
 const server = createServer((req, res) => {
@@ -57,15 +56,26 @@ server.on("upgrade", (req, socket, head) => {
       ? "client"
       : null;
 
-  if (!role || bearerToken(req.headers.authorization) !== bootstrapToken) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+  if (!role) {
+    socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
     socket.destroy();
     return;
   }
 
   wss.handleUpgrade(req, socket, head, ws => {
     const relayPeer = peer(ws);
+    const challenge = createRelayAuthChallenge(role);
+    let principal: RelayAuthPrincipal | null = null;
     let helloAccepted = false;
+
+    const authTimer = setTimeout(() => {
+      if (!principal && ws.readyState === WebSocket.OPEN) {
+        ws.close(4003, "authentication timeout");
+      }
+    }, 31_000);
+    authTimer.unref();
+
+    ws.send(JSON.stringify(challenge));
 
     ws.on("message", raw => {
       const value = parseJsonObject(raw.toString("utf8"));
@@ -74,18 +84,68 @@ server.on("upgrade", (req, socket, head) => {
         return;
       }
 
+      if (!principal) {
+        if (!isRelayAuthResponse(value)
+          || !verifyRelayAuthResponse(challenge, value)) {
+          ws.close(4003, "authentication failed");
+          return;
+        }
+
+        principal = value.principal;
+        clearTimeout(authTimer);
+        ws.send(JSON.stringify({
+          protocolVersion: 0,
+          type: "auth.accepted",
+          principal,
+        }));
+        return;
+      }
+
       if (!helloAccepted) {
-        if (role === "host" && isHostHello(value)) {
+        if (role === "host"
+          && principal.kind === "machine"
+          && isHostHello(value)
+          && value.machine.id === principal.id
+          && value.machine.signingPublicKey === principal.signingPublicKey) {
           helloAccepted = true;
           router.registerHost(relayPeer, value.machine);
           return;
         }
-        if (role === "client" && isClientHello(value)) {
+
+        if (role === "client"
+          && principal.kind === "device"
+          && isClientHello(value)
+          && value.device.id === principal.id
+          && value.device.signingPublicKey === principal.signingPublicKey) {
           helloAccepted = true;
-          router.registerClient(relayPeer);
+          router.registerClient(relayPeer, principal, value.device);
           return;
         }
-        ws.close(1008, "hello required");
+
+        ws.close(1008, "authenticated hello required");
+        return;
+      }
+
+      if (role === "host"
+        && principal.kind === "machine"
+        && isHostAuthorizationSnapshot(value)) {
+        if (value.machineId !== principal.id
+          || !router.setHostAuthorizationSnapshot(
+            relayPeer,
+            value.machineId,
+            value.devices,
+          )) {
+          ws.close(1008, "invalid host authorization snapshot");
+        }
+        return;
+      }
+
+      if (role === "client"
+        && principal.kind === "device"
+        && isClientAuthorizations(value)) {
+        if (!router.setClientAuthorizations(relayPeer, value.grants)) {
+          ws.close(1008, "invalid client authorizations");
+        }
         return;
       }
 
@@ -103,6 +163,7 @@ server.on("upgrade", (req, socket, head) => {
     });
 
     ws.on("close", () => {
+      clearTimeout(authTimer);
       if (role === "host") router.removeHost(relayPeer);
       else router.removeClient(relayPeer);
     });
