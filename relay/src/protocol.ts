@@ -1,3 +1,5 @@
+import type { MachineGrant, HostAuthorizationDevice } from "./authorization.js";
+
 export const PROTOCOL_VERSION = 0;
 
 export interface MachineDescriptor {
@@ -5,6 +7,9 @@ export interface MachineDescriptor {
   name: string;
   platform: string;
   capabilities: string[];
+  signingPublicKey: string;
+  keyAgreementPublicKey: string;
+  fingerprint: string;
 }
 
 export interface HostHello {
@@ -19,7 +24,22 @@ export interface ClientHello {
   device: {
     id: string;
     name: string;
+    signingPublicKey: string;
+    keyAgreementPublicKey: string;
   };
+}
+
+export interface HostAuthorizationSnapshot {
+  protocolVersion: 0;
+  type: "host.authorization_snapshot";
+  machineId: string;
+  devices: HostAuthorizationDevice[];
+}
+
+export interface ClientAuthorizations {
+  protocolVersion: 0;
+  type: "client.authorizations";
+  grants: MachineGrant[];
 }
 
 export interface MachinesSnapshot {
@@ -55,9 +75,6 @@ export interface ControlResponse {
     message: string;
   };
 }
-
-export type HostInboundFrame = HostHello | ControlResponse;
-export type ClientInboundFrame = ClientHello | ControlRequest;
 
 export function parseJsonObject(data: string): Record<string, unknown> | null {
   try {
@@ -95,18 +112,26 @@ export function isControlResponse(value: Record<string, unknown>): value is Reco
     && typeof value.ok === "boolean";
 }
 
+function validPublicKey(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 40 && value.length <= 64;
+}
+
 export function isHostHello(value: Record<string, unknown>): value is Record<string, unknown> & HostHello {
   if (value.type !== "host.hello" || !isProtocolVersion(value.protocolVersion)) return false;
   const machine = value.machine;
   if (typeof machine !== "object" || machine === null || Array.isArray(machine)) return false;
   const record = machine as Record<string, unknown>;
   return typeof record.id === "string"
-    && record.id.length > 0
+    && record.id.startsWith("machine_")
     && typeof record.name === "string"
     && record.name.length > 0
     && typeof record.platform === "string"
     && Array.isArray(record.capabilities)
-    && record.capabilities.every(item => typeof item === "string");
+    && record.capabilities.every(item => typeof item === "string")
+    && validPublicKey(record.signingPublicKey)
+    && validPublicKey(record.keyAgreementPublicKey)
+    && typeof record.fingerprint === "string"
+    && record.fingerprint.length > 0;
 }
 
 export function isClientHello(value: Record<string, unknown>): value is Record<string, unknown> & ClientHello {
@@ -115,7 +140,38 @@ export function isClientHello(value: Record<string, unknown>): value is Record<s
   if (typeof device !== "object" || device === null || Array.isArray(device)) return false;
   const record = device as Record<string, unknown>;
   return typeof record.id === "string"
-    && record.id.length > 0
+    && record.id.startsWith("device_")
     && typeof record.name === "string"
-    && record.name.length > 0;
+    && record.name.length > 0
+    && validPublicKey(record.signingPublicKey)
+    && validPublicKey(record.keyAgreementPublicKey);
+}
+
+export function isHostAuthorizationSnapshot(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & HostAuthorizationSnapshot {
+  if (value.type !== "host.authorization_snapshot"
+    || !isProtocolVersion(value.protocolVersion)
+    || typeof value.machineId !== "string"
+    || !Array.isArray(value.devices)) {
+    return false;
+  }
+
+  return value.devices.every(item => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    return typeof record.id === "string"
+      && record.id.startsWith("device_")
+      && validPublicKey(record.signingPublicKey)
+      && validPublicKey(record.keyAgreementPublicKey)
+      && record.role === "owner";
+  });
+}
+
+export function isClientAuthorizations(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & ClientAuthorizations {
+  return value.type === "client.authorizations"
+    && isProtocolVersion(value.protocolVersion)
+    && Array.isArray(value.grants);
 }
