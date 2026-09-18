@@ -2,16 +2,58 @@ import PiRemoteCore
 import SwiftUI
 import UIKit
 
+private enum SessionRoute: Hashable {
+    case existing(RemoteSession)
+    case fresh(RemoteSession)
+}
+
 struct RootView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
+    @State private var path: [SessionRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             content
                 .navigationTitle("Pi Remote")
-                .navigationDestination(for: RemoteSession.self) { session in
-                    SessionDetailView(session: session)
+                .navigationDestination(for: SessionRoute.self) { route in
+                    switch route {
+                    case let .existing(session):
+                        SessionDetailView(
+                            session: session,
+                            startFresh: false
+                        )
+
+                    case let .fresh(session):
+                        SessionDetailView(
+                            session: session,
+                            startFresh: true
+                        )
+                    }
+                }
+                .toolbar {
+                    if case .connected = store.connectionState,
+                       !projectSessions.isEmpty {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Menu {
+                                Section("New session in") {
+                                    ForEach(projectSessions) { session in
+                                        Button {
+                                            path.append(.fresh(session))
+                                        } label: {
+                                            Label(
+                                                projectName(session.cwd),
+                                                systemImage: "folder"
+                                            )
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "square.and.pencil")
+                            }
+                            .accessibilityLabel("New Pi session")
+                        }
+                    }
                 }
         }
         .task {
@@ -69,7 +111,9 @@ struct RootView: View {
                 List {
                     Section {
                         ForEach(store.sessions) { session in
-                            NavigationLink(value: session) {
+                            NavigationLink(
+                                value: SessionRoute.existing(session)
+                            ) {
                                 SessionRow(session: session)
                             }
                         }
@@ -120,6 +164,19 @@ struct RootView: View {
                 }
             }
         }
+    }
+
+    private var projectSessions: [RemoteSession] {
+        var seen = Set<String>()
+        return store.sessions.filter { session in
+            seen.insert(session.cwd).inserted
+        }
+    }
+
+    private func projectName(_ cwd: String) -> String {
+        let name = URL(fileURLWithPath: cwd)
+            .lastPathComponent
+        return name.isEmpty ? cwd : name
     }
 }
 
@@ -231,8 +288,10 @@ private struct SessionRow: View {
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
     let session: RemoteSession
+    let startFresh: Bool
 
     @State private var editorResponse = ""
+    @State private var showingModelPicker = false
 
     var body: some View {
         @Bindable var store = store
@@ -327,11 +386,66 @@ private struct SessionDetailView: View {
             .padding(.vertical, 10)
             .background(.bar)
         }
-        .navigationTitle(session.name ?? "Pi Session")
+        .navigationTitle(conversationTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: session.instanceId) {
-            await store.openSession(session)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingModelPicker = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "cpu")
+                        Text(currentModelLabel)
+                            .lineLimit(1)
+                    }
+                }
+                .disabled(
+                    store.rpcSnapshot?.availableModels.isEmpty
+                        ?? true
+                )
+            }
         }
+        .sheet(isPresented: $showingModelPicker) {
+            ModelPickerView()
+        }
+        .task(
+            id: session.instanceId
+                + (startFresh ? "-fresh" : "-existing")
+        ) {
+            if startFresh {
+                await store.createNewSession(from: session)
+            } else {
+                await store.openSession(session)
+            }
+        }
+    }
+
+    private var conversationTitle: String {
+        if let name = store.rpcSnapshot?
+            .state?
+            .objectValue?["sessionName"]?
+            .stringValue,
+           !name.isEmpty {
+            return name
+        }
+
+        return startFresh
+            ? "New Session"
+            : (session.name ?? "Pi Session")
+    }
+
+    private var currentModelLabel: String {
+        guard let model = store.rpcSnapshot?
+            .state?
+            .objectValue?["model"]?
+            .objectValue
+        else {
+            return "Model"
+        }
+
+        return model["name"]?.stringValue
+            ?? model["id"]?.stringValue
+            ?? "Model"
     }
 
     private var isStreaming: Bool {
@@ -410,6 +524,125 @@ private struct SessionDetailView: View {
         }
 
         return object["type"]?.stringValue ?? "Message"
+    }
+}
+
+private struct ModelPickerView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(providers, id: \.self) { provider in
+                    Section(provider) {
+                        ForEach(
+                            modelsByProvider[provider] ?? []
+                        ) { model in
+                            Button {
+                                Task {
+                                    await store.selectModel(model)
+                                    dismiss()
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(
+                                        alignment: .leading,
+                                        spacing: 3
+                                    ) {
+                                        Text(model.displayName)
+                                            .foregroundStyle(.primary)
+
+                                        Text(model.modelId)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer()
+
+                                    if isSelected(model) {
+                                        Image(
+                                            systemName: "checkmark"
+                                        )
+                                        .foregroundStyle(.tint)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if filteredModels.isEmpty {
+                    ContentUnavailableView.search(
+                        text: query
+                    )
+                }
+            }
+            .navigationTitle("Model")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(
+                text: $query,
+                prompt: "Search models"
+            )
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredModels: [PiModelOption] {
+        let models = store.rpcSnapshot?.availableModels ?? []
+        let trimmed = query.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !trimmed.isEmpty else {
+            return models
+        }
+
+        return models.filter { model in
+            model.displayName.localizedCaseInsensitiveContains(
+                trimmed
+            )
+                || model.modelId.localizedCaseInsensitiveContains(
+                    trimmed
+                )
+                || model.provider.localizedCaseInsensitiveContains(
+                    trimmed
+                )
+        }
+    }
+
+    private var modelsByProvider: [String: [PiModelOption]] {
+        Dictionary(
+            grouping: filteredModels,
+            by: \.provider
+        )
+    }
+
+    private var providers: [String] {
+        modelsByProvider.keys.sorted {
+            $0.localizedCaseInsensitiveCompare($1)
+                == .orderedAscending
+        }
+    }
+
+    private func isSelected(_ model: PiModelOption) -> Bool {
+        guard let current = store.rpcSnapshot?
+            .state?
+            .objectValue?["model"]?
+            .objectValue
+        else {
+            return false
+        }
+
+        return current["provider"]?.stringValue == model.provider
+            && current["id"]?.stringValue == model.modelId
     }
 }
 
