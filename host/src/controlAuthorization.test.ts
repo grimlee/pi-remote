@@ -88,8 +88,8 @@ test("host authorizes a valid signed request once and rejects replay", async () 
     () => 1_800_000_000_000,
   );
 
-  assert.equal(await authorizer.authorize(request), true);
-  assert.equal(await authorizer.authorize(request), false);
+  assert.equal((await authorizer.authorize(request))?.id, "device_testvector");
+  assert.equal(await authorizer.authorize(request), null);
 });
 
 test("host rejects expired and revoked device requests", async () => {
@@ -125,7 +125,7 @@ test("host rejects expired and revoked device requests", async () => {
       ).toString("base64url"),
     },
   };
-  assert.equal(await authorizer.authorize(expired), false);
+  assert.equal(await authorizer.authorize(expired), null);
 
   const currentUnsigned = unsignedList();
   const current: SignedControlRequest = {
@@ -143,5 +143,5 @@ test("host rejects expired and revoked device requests", async () => {
     "device_testvector",
     "2026-09-18T00:01:00.000Z",
   );
-  assert.equal(await authorizer.authorize(current), false);
+  assert.equal(await authorizer.authorize(current), null);
 });
