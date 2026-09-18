@@ -113,11 +113,61 @@ public enum CollabCapabilityCrypto {
         let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(
             with: publicKey
         )
-        let aad = contextMessage(envelope: envelope)
-        let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
+        let sharedSecretRaw = sharedSecret.withUnsafeBytes { Data($0) }
+
+        return try decryptWithSharedSecret(
+            envelope,
+            sharedSecretRaw: sharedSecretRaw,
             salt: salt,
-            sharedInfo: aad,
+            nonceData: nonceData,
+            ciphertext: ciphertext,
+            tag: tag
+        )
+    }
+
+    static func decryptWithSharedSecretForTest(
+        _ envelope: EncryptedCollabCapability,
+        sharedSecretRaw: Data
+    ) throws -> String {
+        guard let salt = Data(base64URLEncoded: envelope.salt),
+              let nonceData = Data(base64URLEncoded: envelope.nonce),
+              let ciphertext = Data(base64URLEncoded: envelope.ciphertext),
+              let tag = Data(base64URLEncoded: envelope.tag)
+        else {
+            throw CollabCapabilityCryptoError.invalidEncoding
+        }
+
+        return try decryptWithSharedSecret(
+            envelope,
+            sharedSecretRaw: sharedSecretRaw,
+            salt: salt,
+            nonceData: nonceData,
+            ciphertext: ciphertext,
+            tag: tag
+        )
+    }
+
+    private static func decryptWithSharedSecret(
+        _ envelope: EncryptedCollabCapability,
+        sharedSecretRaw: Data,
+        salt: Data,
+        nonceData: Data,
+        ciphertext: Data,
+        tag: Data
+    ) throws -> String {
+        guard sharedSecretRaw.count == 32,
+              salt.count == 32,
+              nonceData.count == 12,
+              tag.count == 16
+        else {
+            throw CollabCapabilityCryptoError.invalidEncoding
+        }
+
+        let aad = contextMessage(envelope: envelope)
+        let symmetricKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: sharedSecretRaw),
+            salt: salt,
+            info: aad,
             outputByteCount: 32
         )
 
