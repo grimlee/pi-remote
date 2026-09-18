@@ -54,7 +54,10 @@ struct RootView: View {
                         systemImage: "desktopcomputer"
                     )
                 } description: {
-                    Text("Connected, but no Pi sessions were found.")
+                    Text(
+                        store.sessionError
+                            ?? "Connected, but no Pi sessions were found."
+                    )
                 } actions: {
                     Button("Refresh Sessions") {
                         Task {
