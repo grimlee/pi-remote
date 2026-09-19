@@ -134,7 +134,7 @@ async function collectSessionFiles(root: string, output: string[]): Promise<void
   }));
 }
 
-async function parseSessionFile(file: string, generation: number): Promise<SessionRecord | null> {
+async function parseSessionFile(file: string): Promise<SessionRecord | null> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
@@ -192,6 +192,14 @@ async function parseSessionFile(file: string, generation: number): Promise<Sessi
     || typeof header.timestamp !== "string") {
     return null;
   }
+
+  // generation identifies the persisted session incarnation, not its
+  // mutable contents. Pi appends every user/assistant turn to the JSONL file,
+  // so using file mtime here makes an ordinary conversation look stale.
+  const startedAtMs = Date.parse(header.timestamp);
+  const generation = Number.isSafeInteger(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : 1;
 
   return {
     instanceId: header.id,
@@ -257,7 +265,7 @@ export class PiRegistry {
       .slice(0, this.#maxSessions);
 
     const parsed = await Promise.all(recent.map(item =>
-      parseSessionFile(item.file, Math.max(1, Math.floor(item.info.mtimeMs))),
+      parseSessionFile(item.file),
     ));
 
     this.#sessions.clear();
