@@ -306,7 +306,8 @@ private struct SessionDetailView: View {
                     alignment: .leading,
                     spacing: 12
                 ) {
-                    if store.isOpeningSession {
+                    if store.isOpeningSession,
+                       store.rpcSnapshot?.messages.isEmpty ?? true {
                         ProgressView("Opening Pi Agent…")
                             .frame(maxWidth: .infinity)
                             .padding()
@@ -401,6 +402,7 @@ private struct SessionDetailView: View {
                 }
                 .disabled(
                     isStreaming
+                        || store.isResumingSession
                         || (store.rpcSnapshot?
                             .availableModels.isEmpty ?? true)
                 )
@@ -460,7 +462,9 @@ private struct SessionDetailView: View {
         guard let snapshot = store.rpcSnapshot else {
             return false
         }
-        return snapshot.phase == .live && !snapshot.readOnly
+        return snapshot.phase == .live
+            && !snapshot.readOnly
+            && !store.isResumingSession
     }
 
     private var canSend: Bool {
@@ -479,11 +483,20 @@ private struct SessionDetailView: View {
                 Circle()
                     .frame(width: 8, height: 8)
                     .foregroundStyle(
-                        snapshot.phase == .live
-                            ? .green
-                            : .orange
+                        store.isResumingSession
+                            ? .orange
+                            : (snapshot.phase == .live
+                                ? .green
+                                : .orange)
                     )
-                Text(snapshot.phase.rawValue.capitalized)
+
+                if store.isResumingSession {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Reconnecting…")
+                } else {
+                    Text(snapshot.phase.rawValue.capitalized)
+                }
 
                 if snapshot.readOnly {
                     Text("Read only")
