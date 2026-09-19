@@ -46,6 +46,7 @@ if (transportMode === "tailcat") {
     ...(process.env.PI_REMOTE_TAILCAT_KEY
       ? { key: process.env.PI_REMOTE_TAILCAT_KEY }
       : {}),
+    verbose: process.env.PI_REMOTE_TRACE === "1",
   });
   const address = await tailcat.start();
   pairingTransport = {
