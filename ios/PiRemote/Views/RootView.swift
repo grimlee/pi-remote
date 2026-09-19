@@ -154,6 +154,22 @@ struct RootView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
+                if store.hasRelayFallback {
+                    Button(
+                        store.isUsingRelayFallback
+                            ? "Try Quick Connect"
+                            : "Use Backup Connection"
+                    ) {
+                        Task {
+                            if store.isUsingRelayFallback {
+                                await store.usePreferredConnection()
+                            } else {
+                                await store.useBackupConnection()
+                            }
+                        }
+                    }
+                }
+
                 Button(
                     "Forget Host",
                     role: .destructive
