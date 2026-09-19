@@ -35,7 +35,6 @@ final class AppStore {
     var selectedSessionID: String?
     var rpcSnapshot: PiRpcSnapshot?
     var pairingPayload = ""
-    var composerText = ""
     var pairingError: String?
     var sessionError: String?
     var isPairing = false
