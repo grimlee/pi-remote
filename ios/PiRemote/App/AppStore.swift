@@ -107,9 +107,26 @@ final class AppStore {
             try await client.connect()
 
             let acceptance = try await client.pair(using: bootstrap)
+
+            var fallbackRelayURL: String?
+            if bootstrap.transport?.kind == .tailcat,
+               let existing = profile,
+               existing.machine.id == acceptance.machine.id {
+                if existing.transport?.kind == .tailcat {
+                    fallbackRelayURL = existing.fallbackRelayURL
+                } else if let existingURL = URL(
+                    string: existing.relayURL
+                ), existingURL.scheme?.lowercased() == "wss" {
+                    // Migrating an existing Relay/CF pairing to Tailcat should
+                    // not discard the mature fallback endpoint.
+                    fallbackRelayURL = existing.relayURL
+                }
+            }
+
             let pairedProfile = PairedHostProfile(
                 relayURL: bootstrap.relayUrl,
                 transport: bootstrap.transport,
+                fallbackRelayURL: fallbackRelayURL,
                 machine: acceptance.machine
             )
             try await profileStore.save(pairedProfile)
