@@ -72,6 +72,8 @@ final class AppStore {
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
     private var shouldRefreshAfterNewSession = false
+    private var sessionListReconciliationTask: Task<Void, Never>?
+    private var sessionListReconciliationID: String?
     private var backgroundedAt: Date?
     private let backgroundGraceInterval: TimeInterval = 3 * 60
 
@@ -172,6 +174,13 @@ final class AppStore {
                 .sorted { $0.startedAt > $1.startedAt }
             sessionError = nil
 
+            if let activeRpcSessionID,
+               sessions.contains(where: {
+                   $0.instanceId == activeRpcSessionID
+               }) {
+                shouldRefreshAfterNewSession = false
+            }
+
             if let selectedSessionID,
                let session = sessions.first(
                 where: { $0.instanceId == selectedSessionID }
@@ -186,6 +195,20 @@ final class AppStore {
         } catch {
             sessionError = error.localizedDescription
         }
+    }
+
+    func refreshSessionsForList() async {
+        await refreshSessions()
+
+        guard let sessionId = activeRpcSessionID,
+              !sessions.contains(where: {
+                  $0.instanceId == sessionId
+              })
+        else {
+            return
+        }
+
+        scheduleSessionListReconciliation(sessionId: sessionId)
     }
 
     func openSession(_ session: RemoteSession) async {
@@ -432,6 +455,7 @@ final class AppStore {
         do {
             try await rpcClient.sendPrompt(trimmed)
             sessionError = nil
+            scheduleActiveSessionListReconciliation()
             return true
         } catch let error as PiRpcClient.ClientError {
             sessionError = error.localizedDescription
@@ -440,6 +464,7 @@ final class AppStore {
                 // Host sequence state proves this prompt was accepted for
                 // delivery. Treat it as accepted so the UI never restores a
                 // draft that could be accidentally sent twice.
+                scheduleActiveSessionListReconciliation()
                 return true
             }
             return false
@@ -859,21 +884,30 @@ final class AppStore {
                 activeRpcSessionID = sessionId
                 activeCacheSessionId = sessionId
 
-                if shouldRefreshAfterNewSession {
-                    // A new Pi session is authoritative as soon as get_state
-                    // exposes its sessionId. Do not wait for an assistant
-                    // message to finish before refreshing the session list:
-                    // users may navigate back while the first response is
-                    // still streaming.
-                    shouldRefreshAfterNewSession = false
+                if shouldRefreshAfterNewSession
+                    || selectedSessionID == nil {
                     selectedSessionID = sessionId
-                    Task { [weak self] in
-                        await self?.refreshSessionsUntilVisible(
-                            sessionId: sessionId
-                        )
-                    }
-                } else if selectedSessionID == nil {
-                    selectedSessionID = sessionId
+                }
+
+                let hasPersistableActivity =
+                    !snapshot.messages.isEmpty
+                    || snapshot.liveMessage != nil
+                    || snapshot.state?
+                        .objectValue?["isStreaming"]?
+                        .boolValue == true
+
+                if hasPersistableActivity,
+                   !sessions.contains(where: {
+                       $0.instanceId == sessionId
+                   }) {
+                    // A fresh Pi session can expose its sessionId before its
+                    // JSONL file exists. Reconcile once prompt/stream activity
+                    // can actually be persisted. This also repairs sessions
+                    // resumed after an app restart, when the in-memory fresh
+                    // session flag no longer exists.
+                    scheduleSessionListReconciliation(
+                        sessionId: sessionId
+                    )
                 }
             }
 
@@ -896,24 +930,66 @@ final class AppStore {
         }
     }
 
+    private func scheduleActiveSessionListReconciliation() {
+        guard let sessionId = activeRpcSessionID,
+              !sessions.contains(where: {
+                  $0.instanceId == sessionId
+              })
+        else {
+            return
+        }
+
+        scheduleSessionListReconciliation(sessionId: sessionId)
+    }
+
+    private func scheduleSessionListReconciliation(
+        sessionId: String
+    ) {
+        if sessionListReconciliationID == sessionId,
+           sessionListReconciliationTask != nil {
+            return
+        }
+
+        sessionListReconciliationTask?.cancel()
+        sessionListReconciliationID = sessionId
+        sessionListReconciliationTask = Task { [weak self] in
+            await self?.refreshSessionsUntilVisible(
+                sessionId: sessionId
+            )
+        }
+    }
+
     private func refreshSessionsUntilVisible(
         sessionId: String
     ) async {
-        for attempt in 0..<8 {
+        defer {
+            if sessionListReconciliationID == sessionId {
+                sessionListReconciliationID = nil
+                sessionListReconciliationTask = nil
+            }
+        }
+
+        for attempt in 0..<24 {
+            guard !Task.isCancelled else { return }
+
             await refreshSessions()
 
             if sessions.contains(where: {
                 $0.instanceId == sessionId
             }) {
+                shouldRefreshAfterNewSession = false
                 return
             }
 
-            guard attempt < 7 else { return }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard attempt < 23 else { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
     private func closeRpc() async {
+        sessionListReconciliationTask?.cancel()
+        sessionListReconciliationTask = nil
+        sessionListReconciliationID = nil
         rpcEventsTask?.cancel()
         rpcEventsTask = nil
 
