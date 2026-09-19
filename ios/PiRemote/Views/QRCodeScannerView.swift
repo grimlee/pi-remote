@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import SwiftUI
+import PiRemoteCore
 import UIKit
 
 struct QRCodeScannerView: UIViewControllerRepresentable {
@@ -163,7 +164,12 @@ final class QRCodeScannerViewController:
                     .trimmingCharacters(
                         in: .whitespacesAndNewlines
                     ),
-                  value.hasPrefix("piremote-pair-v1.")
+                  (
+                    value.hasPrefix(PairingBootstrap.prefix)
+                        || value.hasPrefix(
+                            PairingBootstrap.compressedPrefix
+                        )
+                  )
             else {
                 continue
             }
