@@ -41,3 +41,8 @@ run/
 # Experimental Tailcat native build outputs
 native/tailcat-ios/build/
 ios/Vendor/PiRemoteTailcat.xcframework/
+
+# Local Tailcat experiment state
+.tools/
+.runtime/
+.config/
