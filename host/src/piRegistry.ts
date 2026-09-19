@@ -551,9 +551,41 @@ export class PiRegistry {
       return;
     }
 
-    if (!channel.process.stdin.destroyed) {
-      channel.process.stdin.write(JSON.stringify(record) + "\n");
+    if (channel.process.stdin.destroyed
+      || !channel.process.stdin.writable) {
+      this.#sendHostPayload(channel, {
+        type: "piremote.channel_closed",
+        error: "Pi RPC stdin is not writable",
+      });
+      this.#terminateChannel(channel.channelId);
+      return;
     }
+
+    const commandId = typeof record.id === "string"
+      ? record.id
+      : undefined;
+    channel.process.stdin.write(
+      JSON.stringify(record) + "\n",
+      error => {
+        if (this.#channels.get(channel.channelId) !== channel) {
+          return;
+        }
+        if (error) {
+          this.#sendHostPayload(channel, {
+            type: "piremote.channel_closed",
+            error: "Pi RPC command write failed",
+          });
+          this.#terminateChannel(channel.channelId);
+          return;
+        }
+
+        this.#sendHostPayload(channel, {
+          type: "piremote.client_ack",
+          clientSeq: frame.seq,
+          ...(commandId ? { commandId } : {}),
+        });
+      },
+    );
   }
 
   stop(): void {
