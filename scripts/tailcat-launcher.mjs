@@ -447,5 +447,6 @@ if (showInitialQr) {
   console.log("Keys: [p] pairing QR   [q] stop   (no Enter required)");
 }
 
+process.on("exit", restoreTerminalInput);
 process.on("SIGINT", () => void shutdown(0));
 process.on("SIGTERM", () => void shutdown(0));
