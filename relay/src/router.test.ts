@@ -21,6 +21,8 @@ class FakePeer implements RelayPeer {
   readonly sent: string[] = [];
   closed: { code: number | undefined; reason: string | undefined } | null = null;
 
+  constructor(readonly id: string = "fake-peer") {}
+
   send(text: string): void {
     this.sent.push(text);
   }
@@ -283,4 +285,62 @@ test("routes opaque Pi RPC frames only between the authorized device and host", 
   };
   router.routeRpcFrame(host, hostFrame);
   assert.deepEqual(JSON.parse(client.sent.at(-1) ?? "{}"), hostFrame);
+});
+
+
+test("new connection replaces an older connection for the same device identity", () => {
+  const router = new RelayRouter();
+  const host = new FakePeer("host");
+  const oldClient = new FakePeer("client-old");
+  const newClient = new FakePeer("client-new");
+  const fx = fixture();
+
+  router.registerHost(host, fx.machine);
+  router.setHostAuthorizationSnapshot(
+    host,
+    fx.machine.id,
+    [fx.authorizedDevice],
+  );
+
+  router.registerClient(oldClient, fx.principal, fx.device);
+  assert.equal(router.setClientAuthorizations(oldClient, [fx.grant]), true);
+
+  router.registerClient(newClient, fx.principal, fx.device);
+  assert.deepEqual(oldClient.closed, {
+    code: 4001,
+    reason: "device connection replaced",
+  });
+  assert.equal(router.setClientAuthorizations(newClient, [fx.grant]), true);
+
+  const hostFrame: RpcFrame = {
+    protocolVersion: 0,
+    type: "rpc.frame",
+    machineId: fx.machine.id,
+    deviceId: fx.device.id,
+    channelId: "rpc_test",
+    direction: "host",
+    seq: 7,
+    nonce: "opaque-nonce",
+    ciphertext: "opaque-ciphertext",
+    tag: "opaque-tag",
+  };
+
+  const oldRpcCountBefore = oldClient.sent
+    .map(text => JSON.parse(text) as Record<string, unknown>)
+    .filter(value => value.type === "rpc.frame")
+    .length;
+
+  router.routeRpcFrame(host, hostFrame);
+
+  const oldRpcCountAfter = oldClient.sent
+    .map(text => JSON.parse(text) as Record<string, unknown>)
+    .filter(value => value.type === "rpc.frame")
+    .length;
+  const newRpcFrames = newClient.sent
+    .map(text => JSON.parse(text) as Record<string, unknown>)
+    .filter(value => value.type === "rpc.frame");
+
+  assert.equal(oldRpcCountAfter, oldRpcCountBefore);
+  assert.equal(newRpcFrames.length, 1);
+  assert.deepEqual(newRpcFrames[0], hostFrame);
 });
