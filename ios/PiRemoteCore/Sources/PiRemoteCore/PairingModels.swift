@@ -137,10 +137,15 @@ public struct PairingBootstrap: Codable, Hashable, Sendable {
             throw PairingBootstrapError.invalidEncoding
         }
 
-        let value = try JSONDecoder().decode(
-            PairingBootstrap.self,
-            from: data
-        )
+        let value: PairingBootstrap
+        do {
+            value = try JSONDecoder().decode(
+                PairingBootstrap.self,
+                from: data
+            )
+        } catch {
+            throw PairingBootstrapError.invalidPayload
+        }
         guard value.version == 1,
               value.invitation.version == 1,
               value.invitation.pairingId.hasPrefix("pair_"),
@@ -233,7 +238,7 @@ public enum PairingBootstrapError: LocalizedError {
         case .invalidPrefix:
             return "This is not a Pi Remote pairing payload."
         case .invalidEncoding:
-            return "The Pi Remote pairing payload is not valid base64url."
+            return "The Pi Remote pairing payload could not be decoded."
         case .invalidPayload:
             return "The Pi Remote pairing payload is malformed."
         }
