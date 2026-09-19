@@ -5,15 +5,18 @@ import Security
 struct PairedHostProfile: Codable, Hashable, Sendable {
     let version: Int
     let relayURL: String
+    let transport: PairingTransport?
     let machine: PairingMachineIdentity
 
     init(
         version: Int = 1,
         relayURL: String,
+        transport: PairingTransport? = nil,
         machine: PairingMachineIdentity
     ) {
         self.version = version
         self.relayURL = relayURL
+        self.transport = transport
         self.machine = machine
     }
 }
