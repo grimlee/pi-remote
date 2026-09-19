@@ -311,6 +311,65 @@ final class AppStore {
         }
     }
 
+    func setThinkingLevel(_ level: String) async {
+        guard let rpcClient else { return }
+        do {
+            try await rpcClient.setThinkingLevel(level)
+            sessionError = nil
+        } catch {
+            sessionError = error.localizedDescription
+        }
+    }
+
+    func compactContext(_ instructions: String?) async -> JSONValue? {
+        guard let rpcClient else { return nil }
+        do {
+            let result = try await rpcClient.compact(instructions)
+            sessionError = nil
+            return result
+        } catch {
+            sessionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func setSessionName(_ name: String) async -> Bool {
+        guard let rpcClient else { return false }
+        do {
+            try await rpcClient.setSessionName(name)
+            sessionError = nil
+            await refreshSessions()
+            return true
+        } catch {
+            sessionError = error.localizedDescription
+            return false
+        }
+    }
+
+    func fetchSessionStats() async -> JSONValue? {
+        guard let rpcClient else { return nil }
+        do {
+            let value = try await rpcClient.sessionStats()
+            sessionError = nil
+            return value
+        } catch {
+            sessionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func fetchLastAssistantText() async -> String? {
+        guard let rpcClient else { return nil }
+        do {
+            let value = try await rpcClient.lastAssistantText()
+            sessionError = nil
+            return value
+        } catch {
+            sessionError = error.localizedDescription
+            return nil
+        }
+    }
+
     func sendPrompt() async {
         let text = composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
