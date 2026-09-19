@@ -484,7 +484,10 @@ private struct MarkdownMessageText: View {
         } else {
             Group {
                 if let attributed = try? AttributedString(
-                    markdown: text
+                    markdown: text,
+                    options: AttributedString.MarkdownParsingOptions(
+                        interpretedSyntax: .inlineOnlyPreservingWhitespace
+                    )
                 ) {
                     Text(attributed)
                 } else {
