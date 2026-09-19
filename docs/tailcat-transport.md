@@ -95,22 +95,50 @@ normal application logs.
 
 ## iOS status
 
-PiRemoteCore can parse and validate Tailcat pairing metadata on this branch.
+The experimental iOS data plane is implemented on this branch.
 
-The native Tailcat data-plane adapter is not implemented yet. Tailcat currently
-does not expose a stable native iOS package in the same form as a normal Swift
-dependency, so the next phase is a thin native bridge that:
+`native/tailcat-ios` pins Tailcat `v0.6.0` and builds a small Go/C bridge as a
+static `PiRemoteTailcat.xcframework`. The bridge intentionally exposes only a
+minimal API: start a Tailcat TCP forwarder, return its loopback port, stop it,
+and report the latest native startup error.
 
-1. accepts the paired Tailcat address;
-2. establishes the Tailcat client in-process;
-3. forwards the remote Relay port to an app-local loopback endpoint or exposes an
-   equivalent byte-stream adapter;
-4. hands that endpoint to the existing RelayClient;
-5. survives app background/foreground reconnects without changing Pi session
-   identity.
+`TailcatTransport.swift` presents that bridge to the existing app as a local
+WebSocket endpoint:
 
-Until that bridge exists, scanning a Tailcat bootstrap proves the pairing schema
-but does not provide a complete iPhone-to-Host data path.
+```text
+RelayClient
+    |
+ws://127.0.0.1:<ephemeral>/v0/client
+    |
+PiRemoteTailcat.xcframework
+    |
+tailcat.Client.DialTCPPort
+    |
+Tailcat direct UDP / DERP
+    |
+Host local Relay
+```
+
+The paired Tailcat address is stored with the host profile in the iOS Keychain.
+Cold start and foreground resume recreate or reuse the native bridge without
+changing Pi RPC identity. A failed pairing tears the bridge down.
+
+Build the full device+simulator XCFramework with:
+
+```bash
+sh native/tailcat-ios/build-xcframework.sh
+```
+
+For the real-device PoC path only:
+
+```bash
+PI_REMOTE_TAILCAT_DEVICE_ONLY=1 \
+  sh native/tailcat-ios/build-xcframework.sh
+```
+
+The dedicated `Tailcat iOS Experiment` GitHub Actions workflow verifies the
+native framework, PiRemoteCore tests, Xcode project generation, unsigned
+`iphoneos` build, and sideload IPA packaging.
 
 ## Compatibility
 
