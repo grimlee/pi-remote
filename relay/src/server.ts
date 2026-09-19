@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   createRelayAuthChallenge,
@@ -22,7 +27,18 @@ import {
 import { RelayRouter, type RelayPeer } from "./router.js";
 
 const port = Number(process.env.PORT ?? "8780");
-const bindHost = process.env.PI_REMOTE_RELAY_BIND ?? "127.0.0.1";
+const bindHosts = (process.env.PI_REMOTE_RELAY_BIND ?? "127.0.0.1")
+  .split(",")
+  .map(value => value.trim())
+  .filter(Boolean);
+
+if (bindHosts.length === 0) {
+  throw new Error("PI_REMOTE_RELAY_BIND must contain at least one bind address");
+}
+
+if (new Set(bindHosts).size !== bindHosts.length) {
+  throw new Error("PI_REMOTE_RELAY_BIND contains duplicate bind addresses");
+}
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
@@ -53,7 +69,10 @@ function peer(ws: WebSocket, id: string): RelayPeer {
   };
 }
 
-const server = createServer((req, res) => {
+function handleHttp(
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
   if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, protocolVersion: 0 }));
@@ -61,11 +80,15 @@ const server = createServer((req, res) => {
   }
   res.writeHead(404);
   res.end();
-});
+}
 
 const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
+function handleUpgrade(
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+): void {
   const url = new URL(req.url ?? "/", "http://localhost");
   const role = url.pathname === "/v0/host"
     ? "host"
@@ -228,6 +251,12 @@ server.on("upgrade", (req, socket, head) => {
       else router.removeClient(relayPeer);
     });
   });
+}
+
+const servers = bindHosts.map(bindHost => {
+  const server = createServer(handleHttp);
+  server.on("upgrade", handleUpgrade);
+  return { bindHost, server };
 });
 
 const heartbeat = setInterval(() => {
@@ -237,6 +266,13 @@ const heartbeat = setInterval(() => {
 }, 25_000);
 heartbeat.unref();
 
-server.listen(port, bindHost, () => {
-  console.log(`Pi Remote Relay listening on ${bindHost}:${port}`);
-});
+for (const { bindHost, server } of servers) {
+  server.listen(port, bindHost, () => {
+    const displayHost = bindHost.includes(":")
+      ? `[${bindHost}]`
+      : bindHost;
+    console.log(
+      `Pi Remote Relay listening on ${displayHost}:${port}`,
+    );
+  });
+}
