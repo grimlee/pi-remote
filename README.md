@@ -12,7 +12,8 @@ The goal is a ChatGPT Remote-style experience: Pi and its tools stay on the host
 - **Outbound-only host connectivity** — the host initiates the Relay connection; no inbound host port is required.
 - **Native Pi RPC backend** — remote sessions run through `pi --session <path> --mode rpc`.
 - **End-to-end encrypted agent traffic** — prompt, transcript, tool, state, and extension-UI payloads are encrypted between the paired iPhone and Host. Relay routes opaque frames.
-- **Host-authoritative state** — mobile disconnects are routine; reconnecting re-discovers persisted Pi sessions and resumes the selected session.
+- **Host-authoritative state** — mobile disconnects are routine; a live Pi RPC process survives transport loss, short gaps replay by sequence, and longer gaps reconcile from authoritative Pi state.
+- **Local cache is an accelerator, not authority** — cached completed messages render instantly on cold open, then Host/Pi state reconciles them.
 - **Provider credentials stay on Host** — Antigravity and other provider credentials are never moved to the phone or Relay.
 
 ## Architecture
@@ -42,7 +43,7 @@ Pi Remote lists persisted Pi session files from the Host's native Pi session sto
 pi --session <session-path> --mode rpc
 ~~~
 
-The iPhone then requests authoritative state and history with Pi's native RPC commands and receives live Pi events.
+The iPhone then requests authoritative state and history with Pi's native RPC commands and receives live Pi events. A live RPC channel is independent from the mobile WebSocket lifetime: the Host keeps a bounded encrypted replay ring, so reconnecting clients can resume from their last applied Host sequence without spawning another Pi process.
 
 Current limitation: the RPC backend resumes persisted sessions; it does not attach to an already-running interactive Pi TUI process. Live attachment can be added later with a Pi extension.
 
@@ -58,7 +59,8 @@ Current limitation: the RPC backend resumes persisted sessions; it does not atta
 8. Load Pi state and message history.
 9. Stream agent/tool/extension events.
 10. Send prompt / abort / extension UI responses.
-11. Reconnect after backgrounding and restore authoritative Host/session state.
+11. Reconnect after backgrounding without recreating a healthy Pi RPC process.
+12. Replay short encrypted event gaps by sequence and fall back to authoritative Pi reconciliation when the replay window is unavailable.
 
 Later phases add new-session creation, workspace/model controls, file and diff viewers, push notifications, Live Activities, multiple hosts, richer subagent controls, and live attachment to an existing Pi TUI process.
 

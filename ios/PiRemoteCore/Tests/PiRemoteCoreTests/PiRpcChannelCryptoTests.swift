@@ -28,10 +28,30 @@ func piRpcCapabilityValidatesProtocolAndKey() throws {
         .replacingOccurrences(of: "/", with: "_")
         .replacingOccurrences(of: "=", with: "")
     let raw = """
-    {"version":1,"protocol":"piremote-pi-rpc-v1","channelId":"rpc_test","key":"\(key)","nextClientSeq":7,"lastHostSeq":11}
+    {"version":1,"protocol":"piremote-pi-rpc-v1","channelId":"rpc_test","key":"\(key)","nextClientSeq":7,"lastHostSeq":11,"resumeToken":"resume_test","resumeFromHostSeq":8,"resumeTargetHostSeq":11,"replayAvailable":true}
     """
     let capability = try PiRpcCapability.parse(raw)
     #expect(capability.channelId == "rpc_test")
     #expect(capability.nextClientSeq == 7)
     #expect(capability.lastHostSeq == 11)
+    #expect(capability.resumeToken == "resume_test")
+    #expect(capability.resumeFromHostSeq == 8)
+    #expect(capability.resumeTargetHostSeq == 11)
+    #expect(capability.replayAvailable == true)
+}
+
+@Test
+func piRpcCapabilityRejectsPartialReplayMetadata() {
+    let key = Data(repeating: 0x44, count: 32)
+        .base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    let raw = """
+    {"version":1,"protocol":"piremote-pi-rpc-v1","channelId":"rpc_test","key":"\(key)","resumeToken":"resume_test"}
+    """
+
+    #expect(throws: (any Error).self) {
+        try PiRpcCapability.parse(raw)
+    }
 }

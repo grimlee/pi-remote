@@ -40,6 +40,18 @@ interface SessionRecord {
   startedAt: string;
 }
 
+interface ReplayEntry {
+  frame: RpcRelayFrame;
+  bytes: number;
+}
+
+interface ResumeBarrier {
+  token: string;
+  targetHostSeq: number;
+  pendingFrames: RpcRelayFrame[];
+  timer: NodeJS.Timeout | null;
+}
+
 interface RpcChannel {
   channelId: string;
   instanceId: string;
@@ -49,8 +61,15 @@ interface RpcChannel {
   process: ChildProcessWithoutNullStreams;
   lastClientSeq: number;
   nextHostSeq: number;
+  replayEntries: ReplayEntry[];
+  replayBytes: number;
+  resumeBarrier: ResumeBarrier | null;
   stdoutBuffer: string;
   stdoutDecoder: StringDecoder;
+}
+
+export interface SessionLinkDelivery extends SessionLink {
+  replayFrames: RpcRelayFrame[];
 }
 
 export interface PiRegistryOptions {
@@ -58,6 +77,9 @@ export interface PiRegistryOptions {
   sessionDir?: string;
   maxSessions?: number;
   idleTimeoutMs?: number;
+  maxReplayFrames?: number;
+  maxReplayBytes?: number;
+  resumeBarrierTimeoutMs?: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -178,6 +200,9 @@ export class PiRegistry {
   readonly #sessionDir: string;
   readonly #maxSessions: number;
   readonly #idleTimeoutMs: number;
+  readonly #maxReplayFrames: number;
+  readonly #maxReplayBytes: number;
+  readonly #resumeBarrierTimeoutMs: number;
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #channels = new Map<string, RpcChannel>();
   readonly #idleTimers = new Map<string, NodeJS.Timeout>();
@@ -190,6 +215,9 @@ export class PiRegistry {
       ?? path.join(os.homedir(), ".pi", "agent", "sessions");
     this.#maxSessions = options.maxSessions ?? 100;
     this.#idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000;
+    this.#maxReplayFrames = options.maxReplayFrames ?? 2_048;
+    this.#maxReplayBytes = options.maxReplayBytes ?? 8 * 1024 * 1024;
+    this.#resumeBarrierTimeoutMs = options.resumeBarrierTimeoutMs ?? 15_000;
   }
 
   setOutboundFrameHandler(handler: ((frame: RpcRelayFrame) => void) | null): void {
@@ -243,8 +271,12 @@ export class PiRegistry {
     instanceId: string,
     generation: number,
     accessLevel: SessionAccess,
-    context?: { machineId: string; deviceId: string },
-  ): Promise<SessionLink> {
+    context?: {
+      machineId: string;
+      deviceId: string;
+      resumeFromHostSeq?: number;
+    },
+  ): Promise<SessionLinkDelivery> {
     if (!instanceId) throw new TypeError("instanceId is required");
     if (!Number.isSafeInteger(generation) || generation < 1) {
       throw new TypeError("generation must be a positive integer");
@@ -254,6 +286,11 @@ export class PiRegistry {
     }
     if (!context) {
       throw new TypeError("Pi RPC channel context is required");
+    }
+    if (context.resumeFromHostSeq !== undefined
+      && (!Number.isSafeInteger(context.resumeFromHostSeq)
+        || context.resumeFromHostSeq < 0)) {
+      throw new TypeError("Pi RPC resume cursor must be a non-negative integer");
     }
 
     await this.listSessions();
@@ -275,6 +312,15 @@ export class PiRegistry {
     );
     if (existing) {
       this.#armIdleTimer(existing);
+      if (context.resumeFromHostSeq !== undefined) {
+        return this.#resumeLinkForChannel(
+          existing,
+          instanceId,
+          generation,
+          accessLevel,
+          context.resumeFromHostSeq,
+        );
+      }
       return this.#linkForChannel(
         existing,
         instanceId,
@@ -319,11 +365,20 @@ export class PiRegistry {
       process: child,
       lastClientSeq: 0,
       nextHostSeq: 1,
+      replayEntries: [],
+      replayBytes: 0,
+      resumeBarrier: null,
       stdoutBuffer: "",
       stdoutDecoder: new StringDecoder("utf8"),
     };
     this.#channels.set(channelId, channel);
     this.#armIdleTimer(channel);
+
+    // Install the initial delivery barrier before Pi stdout is observed.
+    // A fast Pi process may emit "ready" immediately after spawn; without
+    // this barrier that frame could reach the phone before sessions.link
+    // returns and before PiRpcClient exists to consume it.
+    this.#beginResumeBarrier(channel, 0);
 
     child.stdout.on("data", chunk => this.#consumeStdout(channel, chunk));
     child.stderr.setEncoding("utf8");
@@ -364,14 +419,24 @@ export class PiRegistry {
     instanceId: string,
     generation: number,
     accessLevel: SessionAccess,
-  ): SessionLink {
+  ): SessionLinkDelivery {
+    const barrier = channel.resumeBarrier
+      ?? this.#beginResumeBarrier(
+        channel,
+        channel.nextHostSeq - 1,
+      );
+    const targetHostSeq = barrier.targetHostSeq;
     const capability = JSON.stringify({
       version: 1,
       protocol: "piremote-pi-rpc-v1",
       channelId: channel.channelId,
       key: channel.key.toString("base64url"),
       nextClientSeq: channel.lastClientSeq + 1,
-      lastHostSeq: channel.nextHostSeq - 1,
+      lastHostSeq: targetHostSeq,
+      resumeToken: barrier.token,
+      resumeFromHostSeq: targetHostSeq,
+      resumeTargetHostSeq: targetHostSeq,
+      replayAvailable: false,
     });
 
     return {
@@ -379,6 +444,64 @@ export class PiRegistry {
       generation,
       access: accessLevel,
       collabUrl: capability,
+      replayFrames: [],
+    };
+  }
+
+  #resumeLinkForChannel(
+    channel: RpcChannel,
+    instanceId: string,
+    generation: number,
+    accessLevel: SessionAccess,
+    resumeFromHostSeq: number,
+  ): SessionLinkDelivery {
+    const targetHostSeq = channel.nextHostSeq - 1;
+    if (resumeFromHostSeq > targetHostSeq) {
+      throw new PiRegistryError(
+        "invalid_rpc_frame",
+        "The Pi RPC resume cursor is ahead of the Host sequence",
+      );
+    }
+
+    const earliestHostSeq = channel.replayEntries[0]?.frame.seq
+      ?? channel.nextHostSeq;
+    const replayAvailable = resumeFromHostSeq >= earliestHostSeq - 1;
+    const barrier = this.#beginResumeBarrier(channel, targetHostSeq);
+    const replayFrames = replayAvailable
+      ? channel.replayEntries
+        .map(entry => entry.frame)
+        .filter(frame =>
+          frame.seq > resumeFromHostSeq
+          && frame.seq <= targetHostSeq
+        )
+      : [];
+
+    console.log(
+      `Pi RPC resume [${channel.channelId}]: cursor=${resumeFromHostSeq} target=${targetHostSeq} `
+      + (replayAvailable
+        ? `replay=${replayFrames.length} frame(s)`
+        : "replay=unavailable; authoritative reconciliation required"),
+    );
+
+    const capability = JSON.stringify({
+      version: 1,
+      protocol: "piremote-pi-rpc-v1",
+      channelId: channel.channelId,
+      key: channel.key.toString("base64url"),
+      nextClientSeq: channel.lastClientSeq + 1,
+      lastHostSeq: targetHostSeq,
+      resumeToken: barrier.token,
+      resumeFromHostSeq,
+      resumeTargetHostSeq: targetHostSeq,
+      replayAvailable,
+    });
+
+    return {
+      instanceId,
+      generation,
+      access: accessLevel,
+      collabUrl: capability,
+      replayFrames,
     };
   }
 
@@ -413,6 +536,18 @@ export class PiRegistry {
 
     if (record.type === "piremote.close") {
       this.#terminateChannel(channel.channelId);
+      return;
+    }
+
+    if (record.type === "piremote.resume_ack") {
+      const token = record.resumeToken;
+      const hostSeq = record.hostSeq;
+      if (typeof token === "string"
+        && typeof hostSeq === "number"
+        && Number.isSafeInteger(hostSeq)
+        && hostSeq >= 0) {
+        this.#ackResumeBarrier(channel, token, hostSeq);
+      }
       return;
     }
 
@@ -461,9 +596,6 @@ export class PiRegistry {
   }
 
   #sendHostPayload(channel: RpcChannel, value: Record<string, unknown>): void {
-    const outbound = this.#outbound;
-    if (!outbound) return;
-
     const frame = encryptRpcPayload(
       {
         machineId: channel.machineId,
@@ -475,8 +607,85 @@ export class PiRegistry {
       Buffer.from(JSON.stringify(value), "utf8"),
       channel.key,
     );
-    outbound(frame);
+
+    this.#recordReplayFrame(channel, frame);
+
+    if (channel.resumeBarrier) {
+      channel.resumeBarrier.pendingFrames.push(frame);
+    } else {
+      this.#outbound?.(frame);
+    }
+
     this.#armIdleTimer(channel);
+  }
+
+  #recordReplayFrame(channel: RpcChannel, frame: RpcRelayFrame): void {
+    const bytes = Buffer.byteLength(JSON.stringify(frame), "utf8");
+    channel.replayEntries.push({ frame, bytes });
+    channel.replayBytes += bytes;
+
+    while (channel.replayEntries.length > this.#maxReplayFrames
+      || channel.replayBytes > this.#maxReplayBytes) {
+      const removed = channel.replayEntries.shift();
+      if (!removed) break;
+      channel.replayBytes -= removed.bytes;
+    }
+  }
+
+  #beginResumeBarrier(
+    channel: RpcChannel,
+    targetHostSeq: number,
+  ): ResumeBarrier {
+    if (channel.resumeBarrier?.timer) {
+      clearTimeout(channel.resumeBarrier.timer);
+    }
+
+    const barrier: ResumeBarrier = {
+      token: "resume_" + randomUUID().replaceAll("-", ""),
+      targetHostSeq,
+      pendingFrames: [],
+      timer: null,
+    };
+
+    const timer = setTimeout(() => {
+      if (channel.resumeBarrier?.token !== barrier.token) return;
+      this.#releaseResumeBarrier(channel);
+    }, this.#resumeBarrierTimeoutMs);
+    timer.unref();
+    barrier.timer = timer;
+    channel.resumeBarrier = barrier;
+    return barrier;
+  }
+
+  #ackResumeBarrier(
+    channel: RpcChannel,
+    token: string,
+    hostSeq: number,
+  ): void {
+    const barrier = channel.resumeBarrier;
+    if (!barrier
+      || barrier.token !== token
+      || hostSeq !== barrier.targetHostSeq) {
+      return;
+    }
+    console.log(
+      `Pi RPC resume ACK [${channel.channelId}]: target=${hostSeq} queued=${barrier.pendingFrames.length}`,
+    );
+    this.#releaseResumeBarrier(channel);
+  }
+
+  #releaseResumeBarrier(channel: RpcChannel): void {
+    const barrier = channel.resumeBarrier;
+    if (!barrier) return;
+
+    if (barrier.timer) clearTimeout(barrier.timer);
+    channel.resumeBarrier = null;
+
+    const outbound = this.#outbound;
+    if (!outbound) return;
+    for (const frame of barrier.pendingFrames) {
+      outbound(frame);
+    }
   }
 
   #armIdleTimer(channel: RpcChannel): void {
@@ -504,6 +713,10 @@ export class PiRegistry {
   }
 
   #deleteChannel(channelId: string): void {
+    const channel = this.#channels.get(channelId);
+    if (channel?.resumeBarrier?.timer) {
+      clearTimeout(channel.resumeBarrier.timer);
+    }
     this.#channels.delete(channelId);
     const timer = this.#idleTimers.get(channelId);
     if (timer) clearTimeout(timer);

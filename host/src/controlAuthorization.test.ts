@@ -52,6 +52,18 @@ test("control request canonical bytes match Swift vector", () => {
     controlRequestMessage(link).toString("base64url"),
     "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2w",
   );
+
+  const resumedLink = {
+    ...link,
+    payload: {
+      ...link.payload,
+      resumeFromHostSeq: 42,
+    },
+  };
+  assert.equal(
+    controlRequestMessage(resumedLink).toString("base64url"),
+    "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2wANDI",
+  );
 });
 
 test("host authorizes a valid signed request once and rejects replay", async () => {

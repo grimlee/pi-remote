@@ -1,6 +1,6 @@
 # Pi Remote Relay / Control Plane v0
 
-Pi Remote Relay is a narrow authenticated router for trusted machines and devices. It does **not** carry normal Pi transcript/tool streaming.
+Pi Remote Relay is a narrow authenticated router for trusted machines and devices. It routes authenticated control-plane messages and opaque end-to-end encrypted Pi RPC frames. The Relay does not interpret Pi transcript, tool, reasoning, or extension-UI payloads.
 
 ## Transport
 
@@ -249,6 +249,9 @@ For `sessions.link`, the signed arguments include:
 - instance ID
 - generation
 - requested access
+- optional `resumeFromHostSeq` cursor
+
+The resume cursor is therefore authenticated by the paired device signature and cannot be changed by the Relay without invalidating the request.
 
 The Relay binds `authorization.deviceId` to the authenticated connection.
 
@@ -279,11 +282,14 @@ Therefore compromise of the Relay alone does not allow it to invent Host control
   "op": "sessions.link",
   "instanceId": "...",
   "generation": 3,
-  "access": "control"
+  "access": "control",
+  "resumeFromHostSeq": 1845
 }
 ```
 
-The generation is mandatory. A changed Pi Collab room must fail with `stale_generation`.
+`resumeFromHostSeq` is omitted for a normal first open and included when an existing mobile RPC client resumes a live Host channel.
+
+The generation is mandatory. A changed Pi session must fail with `stale_generation`.
 
 A successful link response contains only an encrypted capability envelope:
 
@@ -363,20 +369,62 @@ Errors include:
 - `timeout`
 - `internal_error`
 
-## Heartbeat and reconnect
+## RPC sequence, replay, and reconnect
 
-WebSocket ping/pong maintains connection liveness. Pi work continues independently of Relay or mobile connectivity.
+Each encrypted Host-to-device `rpc.frame` has a monotonically increasing per-channel sequence number authenticated as AES-GCM AAD.
 
-After reconnect, both Host and iPhone must re-authenticate using fresh challenges and resubmit their current authorization state.
+The iPhone applies Host frames only when they are contiguous:
+
+```text
+expected = lastHostSeq + 1
+frame.seq == expected
+```
+
+Older/duplicate frames are ignored. A forward gap triggers transport recovery rather than silently skipping an event.
+
+The Host retains a bounded in-memory ring of already-encrypted Host frames for each live Pi RPC channel. Current defaults are:
+
+- at most 2,048 frames;
+- at most 8 MiB;
+- no persistence to Relay or disk.
+
+On resume the iPhone sends its signed `resumeFromHostSeq`. If the ring still covers that cursor, the Host returns the existing channel capability with replay metadata and sends exactly the missing encrypted frames.
+
+A **resume barrier** prevents new Pi output from overtaking replay:
+
+```text
+iPhone lastHostSeq=N
+        |
+        | signed sessions.link(resumeFromHostSeq=N)
+        v
+Host freezes live delivery at target=T
+        |
+        +-- control.response(capability, target=T)
+        +-- replay N+1 ... T
+        |
+iPhone verifies contiguous replay
+        |
+        | E2EE piremote.resume_ack(target=T)
+        v
+Host releases frames generated after T
+```
+
+The barrier also protects initial links so a fast Pi process cannot emit `ready` before the phone has created its `PiRpcClient`.
+
+If the requested cursor is older than the retained ring, the capability reports `replayAvailable=false`. The phone advances to the barrier baseline, clears transient partial-message assembly, ACKs the barrier, and repairs durable state from Pi with `get_state`, `get_messages`, and `get_available_models`.
+
+Replay is therefore an optimization for lossless short disconnects, while Pi/Host authoritative state remains the correctness fallback for longer disconnects.
+
+WebSocket ping/pong maintains connection liveness. Pi work continues independently of Relay or mobile connectivity. After reconnect, both Host and iPhone re-authenticate using fresh challenges and resubmit current authorization state.
 
 ## Non-goals
 
-This protocol does not define:
+This protocol does not define the semantic schema of:
 
-- transcript/token streaming
-- Pi tool-call/result frames
-- subagent frames
-- arbitrary shell execution
-- generic filesystem access
+- transcript/token content;
+- Pi tool-call/result payloads;
+- subagent payloads;
+- arbitrary shell execution;
+- generic filesystem access.
 
-Those belong to Pi Collab or future narrowly scoped Host operations.
+Pi's native RPC protocol defines agent semantics. Pi Remote only wraps those payloads in an authenticated, sequenced, replayable E2EE transport.

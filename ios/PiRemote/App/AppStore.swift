@@ -477,6 +477,19 @@ final class AppStore {
             guard let rpcClient else { return }
             do {
                 try await rpcClient.receive(frame)
+            } catch let error as PiRpcClient.ClientError {
+                switch error {
+                case .sequenceGap(_, _):
+                    if !needsRpcTransportResume {
+                        needsRpcTransportResume = true
+                        needsSessionRestore = false
+                        Task { [weak self] in
+                            await self?.refreshSessions()
+                        }
+                    }
+                default:
+                    sessionError = error.localizedDescription
+                }
             } catch {
                 sessionError = error.localizedDescription
             }
@@ -515,11 +528,13 @@ final class AppStore {
         var shouldReopen = false
 
         do {
+            let resumeFromHostSeq = await rpcClient.hostSequenceCursor()
             let link = try await relayClient.requestSessionLink(
                 machine: machine,
                 instanceId: session.instanceId,
                 generation: session.generation,
-                access: session.access
+                access: session.access,
+                resumeFromHostSeq: resumeFromHostSeq
             )
             let resumed = try await rpcClient.resumeTransport(
                 capabilityString: link.collabUrl

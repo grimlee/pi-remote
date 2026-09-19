@@ -156,12 +156,18 @@ function parseRequest(value: Record<string, unknown>): SignedControlRequest | nu
   }
 
   const access = parseAccess(payload.access);
+  const resumeFromHostSeq = payload.resumeFromHostSeq;
+  const validResumeCursor = resumeFromHostSeq === undefined
+    || (typeof resumeFromHostSeq === "number"
+      && Number.isSafeInteger(resumeFromHostSeq)
+      && resumeFromHostSeq >= 0);
   if (payload.op === "sessions.link"
     && typeof payload.instanceId === "string"
     && typeof payload.generation === "number"
     && Number.isInteger(payload.generation)
     && payload.generation >= 1
-    && access) {
+    && access
+    && validResumeCursor) {
     return {
       protocolVersion: 0,
       type: "control.request",
@@ -172,6 +178,9 @@ function parseRequest(value: Record<string, unknown>): SignedControlRequest | nu
         instanceId: payload.instanceId,
         generation: payload.generation,
         access,
+        ...(typeof resumeFromHostSeq === "number"
+          ? { resumeFromHostSeq }
+          : {}),
       },
       authorization: {
         deviceId: authorization.deviceId,
@@ -484,7 +493,9 @@ export class RelayHostClient {
           message: "Control request signature is invalid, expired, revoked, or replayed.",
         },
       };
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(response));
+      }
       return;
     }
 
@@ -497,6 +508,7 @@ export class RelayHostClient {
     authorizedDevice: AuthorizedDevice,
   ): Promise<void> {
     let response: ControlResponse;
+    let replayFrames: RpcRelayFrame[] = [];
 
     try {
       const op = request.payload.op;
@@ -530,8 +542,12 @@ export class RelayHostClient {
           {
             machineId: this.options.machine.id,
             deviceId: currentDevice.id,
+            ...(request.payload.resumeFromHostSeq !== undefined
+              ? { resumeFromHostSeq: request.payload.resumeFromHostSeq }
+              : {}),
           },
         );
+        replayFrames = link.replayFrames;
 
         const capability = encryptCollabCapability(
           this.options.machine,
@@ -570,6 +586,13 @@ export class RelayHostClient {
       };
     }
 
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response));
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(response));
+      if (response.ok) {
+        for (const frame of replayFrames) {
+          this.#sendRpcFrame(frame);
+        }
+      }
+    }
   }
 }

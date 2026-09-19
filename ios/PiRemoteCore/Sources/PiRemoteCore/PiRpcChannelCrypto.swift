@@ -50,6 +50,10 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
     public let key: String
     public let nextClientSeq: Int64?
     public let lastHostSeq: Int64?
+    public let resumeToken: String?
+    public let resumeFromHostSeq: Int64?
+    public let resumeTargetHostSeq: Int64?
+    public let replayAvailable: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -58,6 +62,10 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
         case key
         case nextClientSeq
         case lastHostSeq
+        case resumeToken
+        case resumeFromHostSeq
+        case resumeTargetHostSeq
+        case replayAvailable
     }
 
     public init(
@@ -66,7 +74,11 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
         channelId: String,
         key: String,
         nextClientSeq: Int64? = nil,
-        lastHostSeq: Int64? = nil
+        lastHostSeq: Int64? = nil,
+        resumeToken: String? = nil,
+        resumeFromHostSeq: Int64? = nil,
+        resumeTargetHostSeq: Int64? = nil,
+        replayAvailable: Bool? = nil
     ) {
         self.version = version
         self.wireProtocol = wireProtocol
@@ -74,6 +86,10 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
         self.key = key
         self.nextClientSeq = nextClientSeq
         self.lastHostSeq = lastHostSeq
+        self.resumeToken = resumeToken
+        self.resumeFromHostSeq = resumeFromHostSeq
+        self.resumeTargetHostSeq = resumeTargetHostSeq
+        self.replayAvailable = replayAvailable
     }
 
     public static func parse(_ value: String) throws -> PiRpcCapability {
@@ -87,9 +103,34 @@ public struct PiRpcCapability: Codable, Hashable, Sendable {
               let key = Data(piRpcBase64URL: capability.key),
               key.count == 32,
               capability.nextClientSeq.map({ $0 >= 1 }) ?? true,
-              capability.lastHostSeq.map({ $0 >= 0 }) ?? true
+              capability.lastHostSeq.map({ $0 >= 0 }) ?? true,
+              capability.resumeFromHostSeq.map({ $0 >= 0 }) ?? true,
+              capability.resumeTargetHostSeq.map({ $0 >= 0 }) ?? true
         else {
             throw PiRpcCryptoError.invalidCapability
+        }
+        let resumeFields = [
+            capability.resumeToken != nil,
+            capability.resumeFromHostSeq != nil,
+            capability.resumeTargetHostSeq != nil,
+            capability.replayAvailable != nil
+        ]
+        if resumeFields.contains(true)
+            && !resumeFields.allSatisfy({ $0 }) {
+            throw PiRpcCryptoError.invalidCapability
+        }
+        if let token = capability.resumeToken,
+           !token.hasPrefix("resume_") {
+            throw PiRpcCryptoError.invalidCapability
+        }
+        if let from = capability.resumeFromHostSeq,
+           let target = capability.resumeTargetHostSeq {
+            guard from <= target,
+                  capability.lastHostSeq == target,
+                  capability.nextClientSeq != nil
+            else {
+                throw PiRpcCryptoError.invalidCapability
+            }
         }
         return capability
     }

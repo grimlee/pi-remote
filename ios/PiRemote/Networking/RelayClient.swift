@@ -156,6 +156,7 @@ actor RelayClient {
         let instanceId: String
         let generation: Int
         let access: RemoteSession.Access
+        let resumeFromHostSeq: Int64?
     }
 
     private struct SessionsListResponsePayload: Decodable {
@@ -445,7 +446,8 @@ actor RelayClient {
         machine: RemoteMachine,
         instanceId: String,
         generation: Int,
-        access: RemoteSession.Access
+        access: RemoteSession.Access,
+        resumeFromHostSeq: Int64? = nil
     ) async throws -> SessionLink {
         guard let device = authenticatedDevice else {
             throw RelayError.authenticationFailed
@@ -469,7 +471,8 @@ actor RelayClient {
             issuedAtMs: issuedAtMs,
             instanceId: instanceId,
             generation: generation,
-            access: access.rawValue
+            access: access.rawValue,
+            resumeFromHostSeq: resumeFromHostSeq
         )
         let signature = try await identityStore.signature(for: message)
             .base64URLEncodedString()
@@ -480,7 +483,8 @@ actor RelayClient {
             payload: SessionsLinkPayload(
                 instanceId: instanceId,
                 generation: generation,
-                access: access
+                access: access,
+                resumeFromHostSeq: resumeFromHostSeq
             ),
             authorization: ControlAuthorization(
                 deviceId: device.id,
