@@ -26,7 +26,7 @@ test("lists persisted Pi sessions from the native session store", async () => {
       version: 3,
       id: "01TESTSESSION",
       timestamp: "2026-09-16T14:27:16.927Z",
-      cwd: "/home/grimlee/pi-workspace",
+      cwd: "/home/testuser/pi-workspace",
     },
     {
       type: "message",
@@ -66,7 +66,7 @@ test("lists persisted Pi sessions from the native session store", async () => {
   assert.equal(sessions[0]?.instanceId, "01TESTSESSION");
   assert.equal(sessions[0]?.sessionId, "01TESTSESSION");
   assert.equal(sessions[0]?.name, "Router work");
-  assert.equal(sessions[0]?.cwd, "/home/grimlee/pi-workspace");
+  assert.equal(sessions[0]?.cwd, "/home/testuser/pi-workspace");
   assert.equal(sessions[0]?.model, "antigravity/gemini-3.8-flash");
   assert.equal(sessions[0]?.startedAt, "2026-09-16T14:27:16.927Z");
   assert.equal(sessions[0]?.access, "control");
