@@ -49,7 +49,7 @@ actor TailcatTransport {
         var errorDescription: String? {
             switch self {
             case .nativeLibraryUnavailable:
-                return "The experimental Tailcat iOS library is not available in this build."
+                return "Quick Connect is not available in this build."
             case .invalidConfiguration:
                 return "The Tailcat pairing transport is invalid."
             case let .startFailed(message):
