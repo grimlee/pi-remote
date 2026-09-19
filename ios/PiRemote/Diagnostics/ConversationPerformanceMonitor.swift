@@ -17,10 +17,10 @@ final class ConversationPerformanceMonitor: NSObject {
     private var liveCharacters = 0
     private var isStreaming = false
     private var isDragging = false
-    private var reporter: (@Sendable (ConversationPerformanceReport) async -> Void)?
+    private var reporter: ((ConversationPerformanceReport) async -> Void)?
 
     func start(
-        reporter: @escaping @Sendable (ConversationPerformanceReport) async -> Void
+        reporter: @escaping (ConversationPerformanceReport) async -> Void
     ) {
         guard displayLink == nil else { return }
         self.reporter = reporter
