@@ -24,7 +24,8 @@ public enum ControlRequestCrypto {
         issuedAtMs: Int64,
         instanceId: String,
         generation: Int,
-        access: String
+        access: String,
+        resumeFromHostSeq: Int64? = nil
     ) -> Data {
         var message = baseMessage(
             requestId: requestId,
@@ -36,6 +37,12 @@ public enum ControlRequestCrypto {
         append(instanceId, to: &message)
         append(String(generation), to: &message)
         message.append(Data(access.utf8))
+        if let resumeFromHostSeq {
+            message.append(0)
+            message.append(
+                Data(String(resumeFromHostSeq).utf8)
+            )
+        }
         return message
     }
 

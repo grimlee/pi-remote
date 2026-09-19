@@ -15,6 +15,7 @@ export type SignedControlPayload =
       instanceId: string;
       generation: number;
       access: SessionAccess;
+      resumeFromHostSeq?: number;
     };
 
 export interface SignedControlRequest {
@@ -48,13 +49,22 @@ export function controlRequestMessage(
     return Buffer.concat(base);
   }
 
-  return Buffer.concat([
+  const link = [
     ...base,
     Buffer.from([0]),
     field(request.payload.instanceId), Buffer.from([0]),
     field(String(request.payload.generation)), Buffer.from([0]),
     field(request.payload.access),
-  ]);
+  ];
+
+  if (request.payload.resumeFromHostSeq !== undefined) {
+    link.push(
+      Buffer.from([0]),
+      field(String(request.payload.resumeFromHostSeq)),
+    );
+  }
+
+  return Buffer.concat(link);
 }
 
 export class ControlRequestAuthorizer {

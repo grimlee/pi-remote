@@ -215,6 +215,8 @@ process.stdin.on("data", chunk => {
     key: string;
     nextClientSeq: number;
     lastHostSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
   };
   assert.equal(capability.nextClientSeq, 1);
   assert.ok(capability.lastHostSeq >= 0);
@@ -227,6 +229,22 @@ process.stdin.on("data", chunk => {
       channelId: capability.channelId,
       direction: "client",
       seq: 1,
+    },
+    Buffer.from(JSON.stringify({
+      type: "piremote.resume_ack",
+      resumeToken: capability.resumeToken,
+      hostSeq: capability.resumeTargetHostSeq,
+    })),
+    capabilityKey,
+  ));
+
+  registry.handleRpcFrame(encryptRpcPayload(
+    {
+      machineId: "machine_test",
+      deviceId: "device_test",
+      channelId: capability.channelId,
+      direction: "client",
+      seq: 2,
     },
     Buffer.from(JSON.stringify({ id: "req-state", type: "get_state" })),
     capabilityKey,
@@ -255,8 +273,321 @@ process.stdin.on("data", chunk => {
 
   assert.equal(resumedCapability.channelId, capability.channelId);
   assert.equal(resumedCapability.key, capability.key);
-  assert.equal(resumedCapability.nextClientSeq, 2);
+  assert.equal(resumedCapability.nextClientSeq, 3);
   assert.ok(resumedCapability.lastHostSeq >= capability.lastHostSeq);
+
+  registry.stop();
+});
+
+
+test("replays missed RPC frames before releasing post-resume live output", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-replay-"));
+  await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01REPLAY",
+      timestamp: "2026-09-19T00:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({type:"ready",protocolVersion:1})+"\\n");
+let buffer="";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0,index);
+    buffer = buffer.slice(index+1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    if (command.type === "emit_test") {
+      process.stdout.write(JSON.stringify({
+        type: "test_event",
+        label: command.label
+      })+"\\n");
+    }
+  }
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+    resumeBarrierTimeoutMs: 5_000,
+  });
+  const [session] = await registry.listSessions();
+  assert.ok(session);
+
+  const rawOutbound: ReturnType<typeof encryptRpcPayload>[] = [];
+  const outbound: Array<{
+    frame: ReturnType<typeof encryptRpcPayload>;
+    value: Record<string, unknown>;
+  }> = [];
+  let key: Buffer | null = null;
+
+  registry.setOutboundFrameHandler(frame => {
+    rawOutbound.push(frame);
+    if (!key) return;
+    outbound.push({
+      frame,
+      value: JSON.parse(
+        decryptRpcPayload(frame, key).toString("utf8"),
+      ) as Record<string, unknown>,
+    });
+  });
+
+  const link = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const capability = JSON.parse(link.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+  };
+  key = Buffer.from(capability.key, "base64url");
+
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(
+    rawOutbound.length,
+    0,
+    "initial Pi frames must remain behind the link barrier",
+  );
+
+  let clientSeq = capability.nextClientSeq;
+  const send = (value: Record<string, unknown>) => {
+    registry.handleRpcFrame(encryptRpcPayload(
+      {
+        machineId: "machine_test",
+        deviceId: "device_test",
+        channelId: capability.channelId,
+        direction: "client",
+        seq: clientSeq++,
+      },
+      Buffer.from(JSON.stringify(value)),
+      key!,
+    ));
+  };
+
+  const waitForLabel = async (label: string) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const match = outbound.find(item => item.value.label === label);
+      if (match) return match;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+
+  send({
+    type: "piremote.resume_ack",
+    resumeToken: capability.resumeToken,
+    hostSeq: capability.resumeTargetHostSeq,
+  });
+  send({ type: "emit_test", label: "A" });
+  const eventA = await waitForLabel("A");
+  send({ type: "emit_test", label: "B" });
+  const eventB = await waitForLabel("B");
+  assert.equal(eventB.frame.seq, eventA.frame.seq + 1);
+
+  const resumedLink = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    {
+      machineId: "machine_test",
+      deviceId: "device_test",
+      resumeFromHostSeq: eventA.frame.seq,
+    },
+  );
+  const resumed = JSON.parse(resumedLink.collabUrl) as {
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+    replayAvailable: boolean;
+  };
+
+  assert.equal(resumed.replayAvailable, true);
+  assert.equal(resumed.resumeTargetHostSeq, eventB.frame.seq);
+  assert.deepEqual(
+    resumedLink.replayFrames.map(frame => frame.seq),
+    [eventB.frame.seq],
+  );
+
+  clientSeq = resumed.nextClientSeq;
+  send({ type: "emit_test", label: "C" });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(
+    outbound.some(item => item.value.label === "C"),
+    false,
+  );
+
+  send({
+    type: "piremote.resume_ack",
+    resumeToken: resumed.resumeToken,
+    hostSeq: resumed.resumeTargetHostSeq,
+  });
+  const eventC = await waitForLabel("C");
+  assert.equal(eventC.frame.seq, eventB.frame.seq + 1);
+
+  registry.stop();
+});
+
+test("falls back to snapshot reconciliation when replay cursor is outside the ring", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-replay-gap-"));
+  await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01REPLAYGAP",
+      timestamp: "2026-09-19T00:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node
+let buffer="";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0,index);
+    buffer = buffer.slice(index+1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    if (command.type === "emit_test") {
+      process.stdout.write(JSON.stringify({
+        type: "test_event",
+        label: command.label
+      })+"\\n");
+    }
+  }
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+    maxReplayFrames: 1,
+    maxReplayBytes: 1024 * 1024,
+    resumeBarrierTimeoutMs: 5_000,
+  });
+  const [session] = await registry.listSessions();
+  assert.ok(session);
+
+  const outbound: ReturnType<typeof encryptRpcPayload>[] = [];
+  let key: Buffer | null = null;
+  registry.setOutboundFrameHandler(frame => {
+    if (key) outbound.push(frame);
+  });
+
+  const link = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const capability = JSON.parse(link.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+  };
+  key = Buffer.from(capability.key, "base64url");
+
+  let clientSeq = capability.nextClientSeq;
+  const send = (label: string) => {
+    registry.handleRpcFrame(encryptRpcPayload(
+      {
+        machineId: "machine_test",
+        deviceId: "device_test",
+        channelId: capability.channelId,
+        direction: "client",
+        seq: clientSeq++,
+      },
+      Buffer.from(JSON.stringify({
+        type: "emit_test",
+        label,
+      })),
+      key!,
+    ));
+  };
+
+  registry.handleRpcFrame(encryptRpcPayload(
+    {
+      machineId: "machine_test",
+      deviceId: "device_test",
+      channelId: capability.channelId,
+      direction: "client",
+      seq: clientSeq++,
+    },
+    Buffer.from(JSON.stringify({
+      type: "piremote.resume_ack",
+      resumeToken: capability.resumeToken,
+      hostSeq: capability.resumeTargetHostSeq,
+    })),
+    key,
+  ));
+
+  send("A");
+  send("B");
+  for (let attempt = 0; attempt < 200 && outbound.length < 2; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(outbound.length >= 2);
+
+  const firstEventSeq = outbound.at(-2)!.seq;
+  const resumedLink = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    {
+      machineId: "machine_test",
+      deviceId: "device_test",
+      resumeFromHostSeq: firstEventSeq - 1,
+    },
+  );
+  const resumed = JSON.parse(resumedLink.collabUrl) as {
+    replayAvailable: boolean;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+    nextClientSeq: number;
+  };
+
+  assert.equal(resumed.replayAvailable, false);
+  assert.deepEqual(resumedLink.replayFrames, []);
+
+  clientSeq = resumed.nextClientSeq;
+  registry.handleRpcFrame(encryptRpcPayload(
+    {
+      machineId: "machine_test",
+      deviceId: "device_test",
+      channelId: capability.channelId,
+      direction: "client",
+      seq: clientSeq,
+    },
+    Buffer.from(JSON.stringify({
+      type: "piremote.resume_ack",
+      resumeToken: resumed.resumeToken,
+      hostSeq: resumed.resumeTargetHostSeq,
+    })),
+    key,
+  ));
 
   registry.stop();
 });

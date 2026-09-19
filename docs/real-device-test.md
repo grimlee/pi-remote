@@ -165,9 +165,66 @@ Start a long turn, then tap Stop. Confirm Pi receives the native RPC `abort` com
 
 Trigger a Pi extension `select`, `confirm`, `input`, or `editor` request. Confirm the iPhone renders it and sends the matching `extension_ui_response`.
 
-### Background reconciliation
+### Background / transport resume
 
-Background and foreground Pi Remote. The mobile Relay/RPC sockets are discarded; on foreground the app re-authenticates, refreshes Host sessions, and re-opens the selected persisted session.
+Start a Pi turn that takes long enough to keep producing output. While it is running, background Pi Remote or temporarily interrupt the iPhone network, then return to the app.
+
+For a short interruption the expected path is:
+
+~~~text
+existing Pi RPC process keeps running
+  ->
+iPhone reconnects/authenticates to Relay
+  ->
+signed sessions.link(resumeFromHostSeq=last applied seq)
+  ->
+Host reuses the same RPC channel
+  ->
+missing encrypted frames replay in sequence
+  ->
+iPhone sends piremote.resume_ack
+  ->
+live delivery continues
+~~~
+
+The conversation already visible on screen should remain in memory. The app should not show a full session re-join or create another Pi RPC process.
+
+To force a deterministic transport interruption without stopping the Host/Pi process, restart only the Relay service while a turn is running:
+
+~~~bash
+systemctl --user restart pi-remote-relay.service
+~~~
+
+Do **not** restart `pi-remote-host.service` for this test, because the live replay ring and Pi RPC subprocess intentionally live in the Host process.
+
+After the Relay is back, reconnect from the iPhone if needed. In Host logs, a replay hit should look like:
+
+~~~text
+Pi RPC resume [rpc_...]: cursor=... target=... replay=N frame(s)
+Pi RPC resume ACK [rpc_...]: target=... queued=N
+~~~
+
+Confirm:
+
+- the same conversation remains visible;
+- events that occurred during the outage appear after reconnect;
+- no duplicate assistant/tool events appear;
+- the current turn reaches the same final state as Pi on the Host;
+- sending a new prompt still works after recovery.
+
+### Replay-window fallback
+
+The replay ring is intentionally bounded. If the mobile cursor is older than the retained ring, the Host reports replay unavailable and the iPhone repairs state from Pi rather than attempting partial replay.
+
+Expected Host log:
+
+~~~text
+Pi RPC resume [rpc_...]: cursor=... target=... replay=unavailable; authoritative reconciliation required
+~~~
+
+For normal usage the default ring is 2,048 encrypted frames or 8 MiB per live RPC channel. Unit tests exercise the small-ring overflow path; production real-device testing does not need to deliberately generate thousands of events.
+
+After fallback, confirm completed history and model/state match Pi. A partially streaming message may visually jump to authoritative state rather than replaying every missed delta; it must not create duplicated completed messages.
 
 ## 9. Diagnostics
 
@@ -197,6 +254,8 @@ One real iPhone can:
 - receive live agent/tool events;
 - abort a turn;
 - answer extension UI requests;
-- background and foreground without losing the persisted Pi session.
+- background and foreground without losing the live Pi RPC session;
+- replay short transport gaps without duplicate or missing completed events;
+- fall back to authoritative Pi state when the replay window is unavailable.
 
 UI polish remains outside this milestone.

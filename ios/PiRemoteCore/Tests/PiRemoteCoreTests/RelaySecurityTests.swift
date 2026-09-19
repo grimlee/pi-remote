@@ -88,6 +88,20 @@ func controlRequestCanonicalBytesMatchHost() {
         ).base64URLEncodedString()
         == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2w"
     )
+
+    #expect(
+        ControlRequestCrypto.sessionsLinkMessage(
+            requestId: "req_testvector",
+            machineId: "machine_testvector",
+            deviceId: "device_testvector",
+            issuedAtMs: 1_800_000_000_000,
+            instanceId: "instance_test",
+            generation: 7,
+            access: "control",
+            resumeFromHostSeq: 42
+        ).base64URLEncodedString()
+        == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2wANDI"
+    )
 }
 
 

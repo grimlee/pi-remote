@@ -28,6 +28,7 @@ actor PiRpcClient {
     enum ClientError: LocalizedError {
         case invalidCapability
         case invalidFrame
+        case sequenceGap(expected: Int64, received: Int64)
         case closed
         case remote(String)
 
@@ -37,6 +38,8 @@ actor PiRpcClient {
                 return "The host returned an invalid Pi RPC channel."
             case .invalidFrame:
                 return "The Pi RPC channel returned an invalid encrypted frame."
+            case let .sequenceGap(expected, received):
+                return "Pi RPC event gap detected: expected seq \(expected), received \(received)."
             case .closed:
                 return "The Pi RPC channel is closed."
             case let .remote(message):
@@ -58,6 +61,7 @@ actor PiRpcClient {
     private var snapshot: PiRpcSnapshot
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
+    private var didAcknowledgeInitialBarrier = false
     private var isClosed = false
     private var pendingResponses:
         [String: CheckedContinuation<JSONValue, Error>] = [:]
@@ -87,6 +91,7 @@ actor PiRpcClient {
         snapshot.phase = .connecting
         emitSnapshot()
 
+        try await acknowledgeInitialBarrierIfNeeded()
         try await refreshAuthoritativeState(prefix: "bootstrap")
     }
 
@@ -110,17 +115,43 @@ actor PiRpcClient {
         if let nextClientSeq = resumedCapability.nextClientSeq {
             self.nextClientSequence = nextClientSeq
         }
-        if let lastHostSeq = resumedCapability.lastHostSeq {
-            self.lastHostSequence = max(
-                self.lastHostSequence,
+
+        if let resumeToken = resumedCapability.resumeToken,
+           let resumeFromHostSeq = resumedCapability.resumeFromHostSeq,
+           let targetHostSeq = resumedCapability.resumeTargetHostSeq,
+           let replayAvailable = resumedCapability.replayAvailable {
+            guard resumeFromHostSeq <= lastHostSequence else {
+                return false
+            }
+
+            if replayAvailable {
+                try await waitForHostSequence(targetHostSeq)
+            } else {
+                // The Host ring buffer no longer reaches our cursor.
+                // Advance to the barrier snapshot and repair durable state
+                // from Pi before accepting post-barrier live frames.
+                lastHostSequence = max(
+                    lastHostSequence,
+                    targetHostSeq
+                )
+                snapshot.liveMessage = nil
+            }
+
+            try await sendCommand([
+                "type": .string("piremote.resume_ack"),
+                "resumeToken": .string(resumeToken),
+                "hostSeq": .integer(targetHostSeq)
+            ])
+        } else if let lastHostSeq = resumedCapability.lastHostSeq {
+            // Compatibility path for a reused channel that predates replay
+            // metadata. Reconcile from Pi rather than treating old deltas as
+            // authoritative.
+            lastHostSequence = max(
+                lastHostSequence,
                 lastHostSeq
             )
+            snapshot.liveMessage = nil
         }
-
-        // Any partial assistant message may have missed deltas while the
-        // transport was unavailable. Discard only that transient assembly;
-        // completed history stays visible until the Host/Pi snapshot arrives.
-        snapshot.liveMessage = nil
 
         try await refreshAuthoritativeState(prefix: "resume")
         return true
@@ -129,6 +160,7 @@ actor PiRpcClient {
     func startFreshSession() async throws {
         guard !isClosed else { throw ClientError.closed }
 
+        try await acknowledgeInitialBarrierIfNeeded()
         snapshot.phase = .connecting
         snapshot.messages = []
         snapshot.liveMessage = nil
@@ -166,10 +198,20 @@ actor PiRpcClient {
         guard frame.machineId == machineId,
               frame.deviceId == deviceId,
               frame.channelId == capability.channelId,
-              frame.direction == .host,
-              frame.seq > lastHostSequence
+              frame.direction == .host
         else {
             throw ClientError.invalidFrame
+        }
+
+        if frame.seq <= lastHostSequence {
+            return
+        }
+        let expected = lastHostSequence + 1
+        guard frame.seq == expected else {
+            throw ClientError.sequenceGap(
+                expected: expected,
+                received: frame.seq
+            )
         }
 
         let plaintext = try PiRpcChannelCrypto.open(
@@ -179,6 +221,10 @@ actor PiRpcClient {
         let value = try decoder.decode(JSONValue.self, from: plaintext)
         lastHostSequence = frame.seq
         handle(value)
+    }
+
+    func hostSequenceCursor() -> Int64 {
+        lastHostSequence
     }
 
     func sendPrompt(_ text: String) async throws {
@@ -240,6 +286,39 @@ actor PiRpcClient {
         snapshot.liveMessage = nil
         emitSnapshot()
         continuation.finish()
+    }
+
+    private func acknowledgeInitialBarrierIfNeeded() async throws {
+        guard !didAcknowledgeInitialBarrier,
+              let resumeToken = capability.resumeToken,
+              let targetHostSeq = capability.resumeTargetHostSeq
+        else {
+            return
+        }
+
+        try await sendCommand([
+            "type": .string("piremote.resume_ack"),
+            "resumeToken": .string(resumeToken),
+            "hostSeq": .integer(targetHostSeq)
+        ])
+        didAcknowledgeInitialBarrier = true
+    }
+
+    private func waitForHostSequence(
+        _ target: Int64
+    ) async throws {
+        guard target >= lastHostSequence else { return }
+
+        for _ in 0..<250 {
+            if lastHostSequence >= target {
+                return
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        throw ClientError.remote(
+            "Timed out while replaying missed Pi RPC events."
+        )
     }
 
     private func refreshAuthoritativeState(
