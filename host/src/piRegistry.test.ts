@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -99,6 +99,62 @@ test("uses the first user message as a fallback session title", async () => {
   const [session] = await new PiRegistry({ sessionDir: root }).listSessions();
   assert.equal(session?.name, "Fix the native Pi RPC bridge");
 });
+
+test("keeps generation stable when Pi appends messages to a session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-live-generation-"));
+  const file = await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01LIVEGENERATION",
+      timestamp: "2026-09-19T13:00:00.000Z",
+      cwd: "/tmp/project",
+    },
+  ]);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: "/definitely/not/used/pi",
+  });
+  const [before] = await registry.listSessions();
+  assert.ok(before);
+
+  await appendFile(file, JSON.stringify({
+    type: "message",
+    id: "m1",
+    parentId: null,
+    timestamp: "2026-09-19T13:00:01.000Z",
+    message: {
+      role: "user",
+      content: "hello",
+      timestamp: 1,
+    },
+  }) + "\n");
+
+  // Force a clearly different mtime so this test fails if generation ever
+  // regresses to using mutable file metadata.
+  const future = new Date(Date.now() + 10_000);
+  await utimes(file, future, future);
+
+  const [after] = await registry.listSessions();
+  assert.ok(after);
+  assert.equal(after.instanceId, before.instanceId);
+  assert.equal(after.generation, before.generation);
+
+  await assert.rejects(
+    registry.createLink(
+      before.instanceId,
+      before.generation,
+      "control",
+      { machineId: "machine_test", deviceId: "device_test" },
+    ),
+    (error: unknown) =>
+      error instanceof PiRegistryError && error.code === "pi_command_failed",
+  );
+
+  registry.stop();
+});
+
 
 test("rejects a stale generation before spawning Pi", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-stale-"));
