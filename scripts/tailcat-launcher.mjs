@@ -219,7 +219,10 @@ function ensurePersistentKey(tailcatBin) {
     "keys",
     `${keyName}.private.json`,
   );
-  if (existsSync(keyPath)) return;
+  if (existsSync(keyPath)) {
+    chmodSync(keyPath, 0o600);
+    return;
+  }
 
   console.log(`[setup] creating persistent Tailcat key "${keyName}"...`);
   const result = spawnSync(
@@ -240,6 +243,7 @@ function ensurePersistentKey(tailcatBin) {
   if (!existsSync(keyPath)) {
     throw new Error("Tailcat reported success but the persistent key was not saved");
   }
+  chmodSync(keyPath, 0o600);
 }
 
 function pipeProcess(child, label, logPath) {
