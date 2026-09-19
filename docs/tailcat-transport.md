@@ -42,56 +42,49 @@ authorization, and replay logic.
 
 ## Host experiment
 
-Prerequisites:
-
-- `tailcat` is installed and on `PATH`;
-- the Pi Remote Relay is running on loopback;
-- the Host uses the same local Relay port.
-
-Example:
+The experimental branch now has a one-command launcher:
 
 ```bash
-# terminal 1
-cd relay
-npm install
-npm run dev
-
-# terminal 2
-cd host
-npm install
-PI_REMOTE_TRANSPORT=tailcat \
-PI_REMOTE_RELAY_URL=ws://127.0.0.1:8780/v0/host \
-npm run dev
+cd pi-remote
+npm run tailcat
 ```
 
-Optional environment variables:
+The launcher:
 
-- `PI_REMOTE_TAILCAT_BIN`: Tailcat executable path; defaults to `tailcat`.
-- `PI_REMOTE_TAILCAT_KEY`: existing Tailcat saved key name. If omitted, Tailcat
-  uses its normal key-selection behavior.
+- installs missing Host/Relay Node dependencies;
+- uses a repo-local pinned Tailcat v0.6.0 binary, downloading and SHA-256
+  verifying it when Tailcat is not already available;
+- creates or reuses the persistent `piremote-test` Tailcat key;
+- starts the Relay on both IPv4 and IPv6 loopback at port 8791;
+- starts the Host against that local Relay;
+- enables PC-side transport/RPC tracing by default;
+- writes Relay and Host logs to `.runtime/relay-trace.log` and
+  `.runtime/host-trace.log`;
+- waits until the Relay and Host pairing socket are ready;
+- renders a 10-minute pairing QR code in the terminal.
 
-Create a pairing payload normally:
+The QR payload is intentionally not copied into the trace log files. The Tailcat
+address remains redacted from routine Host logs.
 
-```bash
-cd host
-npm run pair:dev
+While the launcher is running:
+
+```text
+p + Enter   create a fresh pairing QR code
+q + Enter   stop Host and Relay
+Ctrl+C      stop Host and Relay
 ```
 
-In Tailcat mode the bootstrap contains an additional transport descriptor:
+Advanced overrides remain available through environment variables:
 
-```json
-{
-  "transport": {
-    "kind": "tailcat",
-    "address": "tc...",
-    "remotePort": 8780
-  }
-}
-```
+- `PI_REMOTE_TAILCAT_RELAY_PORT`: local Relay/Tailcat port; defaults to 8791.
+- `PI_REMOTE_TAILCAT_KEY`: saved Tailcat key name; defaults to
+  `piremote-test` on this experimental branch.
+- `PI_REMOTE_PAIR_TTL_SECONDS`: QR pairing lifetime; defaults to 600.
+- `PI_REMOTE_TRACE`: defaults to `1`; set to `0` to disable verbose PC
+  tracing.
 
-The `address` value is intentionally carried only inside the pairing bootstrap.
-The Host sidecar captures Tailcat startup output instead of echoing the address to
-normal application logs.
+The underlying architecture is unchanged: the Host still uses a local WebSocket
+Relay, while Tailcat is only the userspace transport underlay.
 
 ## iOS status
 
@@ -122,6 +115,14 @@ Host local Relay
 The paired Tailcat address is stored with the host profile in the iOS Keychain.
 Cold start and foreground resume recreate or reuse the native bridge without
 changing Pi RPC identity. A failed pairing tears the bridge down.
+
+Pairing is camera-first on iOS. The PC launcher renders a QR code containing the
+existing `piremote-pair-v1` bootstrap; Pi Remote scans it with AVFoundation and
+starts pairing immediately. Manual paste remains available as a fallback.
+
+Tailcat diagnostics are intentionally no longer shown in the normal iOS UI.
+Experiment diagnostics stay on the PC in the Relay/Host trace logs so transport
+debugging does not complicate the mobile experience.
 
 Build the full device+simulator XCFramework with:
 
