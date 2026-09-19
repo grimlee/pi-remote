@@ -7,11 +7,13 @@ import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/tailscale/tailcat"
@@ -23,6 +25,51 @@ type tunnel struct {
 	cancel     context.CancelFunc
 	remotePort uint16
 	localPort  int
+
+	acceptedConnections atomic.Int64
+	activeConnections   atomic.Int64
+	dialSuccesses       atomic.Int64
+	dialFailures        atomic.Int64
+	bytesToHost         atomic.Int64
+	bytesToPhone        atomic.Int64
+
+	lastErrorMu sync.Mutex
+	lastError   string
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	counter *atomic.Int64
+}
+
+func (w countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		w.counter.Add(int64(n))
+	}
+	return n, err
+}
+
+type diagnosticsProbe struct {
+	OK         bool    `json:"ok"`
+	Path       string  `json:"path,omitempty"`
+	LatencyMS  float64 `json:"latencyMs,omitempty"`
+	DERPRegion string  `json:"derpRegion,omitempty"`
+	Error      string  `json:"error,omitempty"`
+}
+
+type diagnosticsSnapshot struct {
+	Version             int               `json:"version"`
+	LocalPort           int               `json:"localPort"`
+	RemotePort          int               `json:"remotePort"`
+	AcceptedConnections int64             `json:"acceptedConnections"`
+	ActiveConnections   int64             `json:"activeConnections"`
+	DialSuccesses       int64             `json:"dialSuccesses"`
+	DialFailures        int64             `json:"dialFailures"`
+	BytesToHost         int64             `json:"bytesToHost"`
+	BytesToPhone        int64             `json:"bytesToPhone"`
+	LastError           string            `json:"lastError,omitempty"`
+	Probe               *diagnosticsProbe `json:"probe,omitempty"`
 }
 
 var (
@@ -43,29 +90,60 @@ func setLastError(err error) {
 	lastErrorMsg = err.Error()
 }
 
+func (t *tunnel) setError(err error) {
+	t.lastErrorMu.Lock()
+	defer t.lastErrorMu.Unlock()
+	if err == nil {
+		t.lastError = ""
+		return
+	}
+	t.lastError = err.Error()
+}
+
+func (t *tunnel) errorString() string {
+	t.lastErrorMu.Lock()
+	defer t.lastErrorMu.Unlock()
+	return t.lastError
+}
+
 func proxyConnection(ctx context.Context, t *tunnel, local net.Conn) {
 	defer local.Close()
 
 	remote, err := t.client.DialTCPPort(ctx, t.remotePort)
 	if err != nil {
+		t.dialFailures.Add(1)
+		t.setError(fmt.Errorf("tailcat dial failed: %w", err))
 		setLastError(fmt.Errorf("tailcat dial failed: %w", err))
 		return
 	}
+	t.dialSuccesses.Add(1)
+	t.activeConnections.Add(1)
+	t.setError(nil)
+	defer t.activeConnections.Add(-1)
 	defer remote.Close()
 
 	errc := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(remote, local)
+		_, err := io.Copy(
+			countingWriter{writer: remote, counter: &t.bytesToHost},
+			local,
+		)
 		errc <- err
 	}()
 	go func() {
-		_, err := io.Copy(local, remote)
+		_, err := io.Copy(
+			countingWriter{writer: local, counter: &t.bytesToPhone},
+			remote,
+		)
 		errc <- err
 	}()
 
 	select {
 	case <-ctx.Done():
-	case <-errc:
+	case err := <-errc:
+		if err != nil {
+			t.setError(fmt.Errorf("tailcat proxy failed: %w", err))
+		}
 	}
 }
 
@@ -77,12 +155,63 @@ func acceptLoop(ctx context.Context, t *tunnel) {
 			case <-ctx.Done():
 				return
 			default:
-				setLastError(fmt.Errorf("local Tailcat bridge accept failed: %w", err))
+				wrapped := fmt.Errorf("local Tailcat bridge accept failed: %w", err)
+				t.setError(wrapped)
+				setLastError(wrapped)
 				return
 			}
 		}
+		t.acceptedConnections.Add(1)
 		go proxyConnection(ctx, t, local)
 	}
+}
+
+func probeTunnel(t *tunnel) *diagnosticsProbe {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	res, err := t.client.DiscoPing(ctx)
+	if err != nil {
+		return &diagnosticsProbe{
+			OK:    false,
+			Error: err.Error(),
+		}
+	}
+
+	probe := &diagnosticsProbe{
+		OK:        true,
+		LatencyMS: res.LatencySeconds * 1000,
+	}
+	if res.Endpoint != "" {
+		probe.Path = "direct"
+		return probe
+	}
+
+	probe.Path = "derp"
+	probe.DERPRegion = res.DERPRegionCode
+	if probe.DERPRegion == "" {
+		probe.DERPRegion = res.DERPRegionID.String()
+	}
+	return probe
+}
+
+func snapshot(t *tunnel, withProbe bool) diagnosticsSnapshot {
+	value := diagnosticsSnapshot{
+		Version:             1,
+		LocalPort:           t.localPort,
+		RemotePort:          int(t.remotePort),
+		AcceptedConnections: t.acceptedConnections.Load(),
+		ActiveConnections:   t.activeConnections.Load(),
+		DialSuccesses:       t.dialSuccesses.Load(),
+		DialFailures:        t.dialFailures.Load(),
+		BytesToHost:         t.bytesToHost.Load(),
+		BytesToPhone:        t.bytesToPhone.Load(),
+		LastError:           t.errorString(),
+	}
+	if withProbe {
+		value.Probe = probeTunnel(t)
+	}
+	return value
 }
 
 //export piremote_tailcat_start
@@ -152,6 +281,24 @@ func piremote_tailcat_local_port(handle C.longlong) C.int {
 		return -1
 	}
 	return C.int(t.localPort)
+}
+
+//export piremote_tailcat_diagnostics
+func piremote_tailcat_diagnostics(handle C.longlong, withProbe C.int) *C.char {
+	tunnelsMu.Lock()
+	t := tunnels[int64(handle)]
+	tunnelsMu.Unlock()
+	if t == nil {
+		setLastError(fmt.Errorf("unknown Tailcat tunnel handle"))
+		return nil
+	}
+
+	data, err := json.Marshal(snapshot(t, withProbe != 0))
+	if err != nil {
+		setLastError(fmt.Errorf("could not encode Tailcat diagnostics: %w", err))
+		return nil
+	}
+	return C.CString(string(data))
 }
 
 //export piremote_tailcat_stop
