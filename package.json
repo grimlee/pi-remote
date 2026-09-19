@@ -1,0 +1,8 @@
+{
+  "name": "pi-remote-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tailcat": "node scripts/tailcat-launcher.mjs"
+  }
+}
