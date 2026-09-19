@@ -5,12 +5,35 @@ import PiRemoteCore
 import PiRemoteTailcat
 #endif
 
+struct TailcatDiagnostics: Codable, Equatable, Sendable {
+    struct Probe: Codable, Equatable, Sendable {
+        let ok: Bool
+        let path: String?
+        let latencyMs: Double?
+        let derpRegion: String?
+        let error: String?
+    }
+
+    let version: Int
+    let localPort: Int
+    let remotePort: Int
+    let acceptedConnections: Int64
+    let activeConnections: Int64
+    let dialSuccesses: Int64
+    let dialFailures: Int64
+    let bytesToHost: Int64
+    let bytesToPhone: Int64
+    let lastError: String?
+    let probe: Probe?
+}
+
 actor TailcatTransport {
     enum TransportError: LocalizedError {
         case nativeLibraryUnavailable
         case invalidConfiguration
         case startFailed(String)
         case invalidLocalPort
+        case diagnosticsUnavailable(String)
 
         var errorDescription: String? {
             switch self {
@@ -22,6 +45,8 @@ actor TailcatTransport {
                 return "Tailcat could not start: \(message)"
             case .invalidLocalPort:
                 return "Tailcat returned an invalid local bridge port."
+            case let .diagnosticsUnavailable(message):
+                return "Tailcat diagnostics are unavailable: \(message)"
             }
         }
     }
@@ -86,6 +111,49 @@ actor TailcatTransport {
         activeConfiguration = requested
         localPort = port
         return url
+        #else
+        throw TransportError.nativeLibraryUnavailable
+        #endif
+    }
+
+    func diagnostics(
+        probe: Bool = true
+    ) throws -> TailcatDiagnostics {
+        #if canImport(PiRemoteTailcat)
+        guard let handle else {
+            throw TransportError.diagnosticsUnavailable(
+                "the native bridge is not running"
+            )
+        }
+
+        guard let pointer = piremote_tailcat_diagnostics(
+            handle,
+            probe ? 1 : 0
+        ) else {
+            throw TransportError.diagnosticsUnavailable(
+                Self.nativeError()
+            )
+        }
+        defer {
+            piremote_tailcat_free_string(pointer)
+        }
+
+        guard let data = String(cString: pointer).data(using: .utf8) else {
+            throw TransportError.diagnosticsUnavailable(
+                "native diagnostics are not valid UTF-8"
+            )
+        }
+
+        do {
+            return try JSONDecoder().decode(
+                TailcatDiagnostics.self,
+                from: data
+            )
+        } catch {
+            throw TransportError.diagnosticsUnavailable(
+                "could not decode native diagnostics"
+            )
+        }
         #else
         throw TransportError.nativeLibraryUnavailable
         #endif
