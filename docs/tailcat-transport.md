@@ -61,8 +61,10 @@ The launcher:
 - writes Relay and Host logs to `.runtime/relay-trace.log` and
   `.runtime/host-trace.log`;
 - waits until the Relay and Host pairing socket are ready;
-- renders a 10-minute pairing QR code in the terminal using a compressed
-  bootstrap so the QR is materially smaller than the manual pairing payload;
+- renders a 10-minute pairing QR using a compressed bootstrap;
+- on a graphical Linux desktop, opens a private ~240 px SVG QR in the default
+  viewer instead of filling the terminal with a large character QR;
+- falls back to the terminal QR automatically for headless/SSH sessions;
 - keeps verbose Host/Relay/Tailcat output in the trace files instead of
   continuously scrolling the interactive terminal.
 
@@ -89,6 +91,11 @@ Advanced overrides remain available through environment variables:
 - `PI_REMOTE_PAIR_TTL_SECONDS`: QR pairing lifetime; defaults to 600.
 - `PI_REMOTE_TRACE`: defaults to `1`; set to `0` to disable verbose PC
   tracing.
+- `PI_REMOTE_PAIR_UI`: `auto` (default), `window`, or `terminal`.
+  `auto` uses a desktop QR when a graphical Linux session and `xdg-open`
+  are available, otherwise it falls back to the terminal renderer.
+- `PI_REMOTE_PAIR_QR_SIZE`: desktop SVG width/height in pixels; defaults to
+  240 and accepts 160–512.
 
 The underlying architecture is unchanged: the Host still uses a local WebSocket
 Relay, while Tailcat is only the userspace transport underlay.
