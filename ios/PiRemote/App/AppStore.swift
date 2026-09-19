@@ -68,6 +68,7 @@ final class AppStore {
     private var resumeInFlight = false
     private var relayConnectInFlight = false
     private var activeMachine: RemoteMachine?
+    private var activeRpcSessionID: String?
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
     private var shouldRefreshAfterNewSession = false
@@ -189,6 +190,27 @@ final class AppStore {
 
     func openSession(_ session: RemoteSession) async {
         guard !isOpeningSession else { return }
+
+        // Navigation is presentation state, not Pi process ownership. If the
+        // user leaves a conversation view and re-enters the same session, keep
+        // the existing RPC channel alive instead of sending piremote.close and
+        // spawning a replacement Pi process. This is especially important
+        // while the agent is streaming a response.
+        if activeRpcSessionID == session.instanceId,
+           rpcClient != nil,
+           let phase = rpcSnapshot?.phase {
+            switch phase {
+            case .connecting, .live:
+                selectedSessionID = session.instanceId
+                isResumingSession = false
+                sessionError = nil
+                needsSessionRestore = false
+                return
+            case .closed:
+                break
+            }
+        }
+
         guard let machine = activeMachine,
               let relayClient
         else {
@@ -204,6 +226,7 @@ final class AppStore {
         needsRpcTransportResume = false
 
         await closeRpc()
+        activeRpcSessionID = session.instanceId
         activeCacheSessionId = session.sessionId
         lastCachedMessageRevision = 0
 
@@ -248,6 +271,7 @@ final class AppStore {
         } catch {
             sessionError = error.localizedDescription
             rpcClient = nil
+            activeRpcSessionID = nil
 
             if cachedMessages.isEmpty {
                 rpcSnapshot = nil
@@ -279,6 +303,7 @@ final class AppStore {
         needsRpcTransportResume = false
 
         await closeRpc()
+        activeRpcSessionID = nil
         activeCacheSessionId = nil
         lastCachedMessageRevision = 0
         shouldRefreshAfterNewSession = true
@@ -833,6 +858,7 @@ final class AppStore {
             if let sessionId = snapshot.state?
                 .objectValue?["sessionId"]?
                 .stringValue {
+                activeRpcSessionID = sessionId
                 activeCacheSessionId = sessionId
                 if selectedSessionID == nil,
                    !shouldRefreshAfterNewSession {
@@ -880,6 +906,7 @@ final class AppStore {
         }
         self.rpcClient = nil
         rpcSnapshot = nil
+        activeRpcSessionID = nil
         activeCacheSessionId = nil
         lastCachedMessageRevision = 0
         shouldRefreshAfterNewSession = false
