@@ -47,6 +47,7 @@ final class AppStore {
     private let grantStore = MachineGrantStore()
     private let profileStore = PairedHostProfileStore()
     private let conversationCache = ConversationCacheStore()
+    private let tailcatTransport = TailcatTransport()
 
     private var profile: PairedHostProfile?
     private var relayClient: RelayClient?
@@ -93,11 +94,12 @@ final class AppStore {
             ), expiresAt > Date() else {
                 throw StoreError.expiredPairingPayload
             }
-            guard let relayURL = URL(string: bootstrap.relayUrl) else {
-                throw StoreError.invalidRelayURL
-            }
-
             await disconnectRelayAndRpc()
+
+            let relayURL = try await resolveRelayURL(
+                relayURL: bootstrap.relayUrl,
+                transport: bootstrap.transport
+            )
 
             let client = makeRelayClient(url: relayURL)
             relayClient = client
@@ -107,6 +109,7 @@ final class AppStore {
             let acceptance = try await client.pair(using: bootstrap)
             let pairedProfile = PairedHostProfile(
                 relayURL: bootstrap.relayUrl,
+                transport: bootstrap.transport,
                 machine: acceptance.machine
             )
             try await profileStore.save(pairedProfile)
@@ -431,9 +434,10 @@ final class AppStore {
     private func connectRelay(
         profile: PairedHostProfile
     ) async throws {
-        guard let url = URL(string: profile.relayURL) else {
-            throw StoreError.invalidRelayURL
-        }
+        let url = try await resolveRelayURL(
+            relayURL: profile.relayURL,
+            transport: profile.transport
+        )
 
         connectionState = .connecting
         let client = makeRelayClient(url: url)
@@ -445,6 +449,20 @@ final class AppStore {
             relayClient = nil
             throw error
         }
+    }
+
+    private func resolveRelayURL(
+        relayURL: String,
+        transport: PairingTransport?
+    ) async throws -> URL {
+        if let transport, transport.kind == .tailcat {
+            return try await tailcatTransport.endpoint(for: transport)
+        }
+
+        guard let url = URL(string: relayURL) else {
+            throw StoreError.invalidRelayURL
+        }
+        return url
     }
 
     private func makeRelayClient(url: URL) -> RelayClient {
@@ -681,6 +699,7 @@ final class AppStore {
             await relayClient.disconnect()
         }
         self.relayClient = nil
+        await tailcatTransport.stop()
         activeMachine = nil
         machines = []
         sessions = []
