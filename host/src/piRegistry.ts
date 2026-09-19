@@ -78,6 +78,8 @@ interface RpcChannel {
   resumeBarrier: ResumeBarrier | null;
   stdoutBuffer: string;
   stdoutDecoder: StringDecoder;
+  deliveredCommandIds: Set<string>;
+  deliveredCommandOrder: string[];
 }
 
 export interface SessionLinkDelivery extends SessionLink {
@@ -382,6 +384,8 @@ export class PiRegistry {
       resumeBarrier: null,
       stdoutBuffer: "",
       stdoutDecoder: new StringDecoder("utf8"),
+      deliveredCommandIds: new Set(),
+      deliveredCommandOrder: [],
     };
     this.#channels.set(channelId, channel);
     this.#armIdleTimer(channel);
@@ -619,6 +623,31 @@ export class PiRegistry {
     const commandType = typeof record.type === "string"
       ? record.type
       : "unknown";
+
+    if (commandId && channel.deliveredCommandIds.has(commandId)) {
+      trace("rpc.command.duplicate", {
+        channelId: channel.channelId,
+        clientSeq: frame.seq,
+        commandId,
+        commandType,
+      });
+      this.#sendHostPayload(channel, {
+        type: "piremote.client_ack",
+        clientSeq: frame.seq,
+        commandId,
+        duplicate: true,
+      });
+      return;
+    }
+
+    if (commandId) {
+      channel.deliveredCommandIds.add(commandId);
+      channel.deliveredCommandOrder.push(commandId);
+      while (channel.deliveredCommandOrder.length > 512) {
+        const removed = channel.deliveredCommandOrder.shift();
+        if (removed) channel.deliveredCommandIds.delete(removed);
+      }
+    }
 
     trace("rpc.stdin.write", {
       channelId: channel.channelId,
