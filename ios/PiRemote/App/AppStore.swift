@@ -48,6 +48,11 @@ final class AppStore {
         profile?.fallbackRelayURL != nil
     }
 
+    var canSetUpQuickConnect: Bool {
+        guard let profile else { return false }
+        return profile.transport?.kind != .tailcat
+    }
+
     private let identityStore = DeviceIdentityStore()
     private let grantStore = MachineGrantStore()
     private let profileStore = PairedHostProfileStore()
