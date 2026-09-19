@@ -102,6 +102,31 @@ func controlRequestCanonicalBytesMatchHost() {
         ).base64URLEncodedString()
         == "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2wANDI"
     )
+
+    #expect(
+        String(
+            data: ControlRequestCrypto.diagnosticsReportMessage(
+                requestId: "req_diag",
+                machineId: "machine_testvector",
+                deviceId: "device_testvector",
+                issuedAtMs: 1_800_000_000_000,
+                sessionId: "session_test",
+                windowStartedAtMs: 1_800_000_000_100,
+                windowDurationMs: 5_000,
+                displayFrames: 300,
+                slowFrames25Ms: 4,
+                slowFrames50Ms: 1,
+                dragFrames: 120,
+                dragSlowFrames25Ms: 3,
+                maxFrameGapMs: 67,
+                snapshotCount: 51,
+                liveCharacters: 8_192,
+                isStreaming: true
+            ),
+            encoding: .utf8
+        )
+        == "piremote-control-request-v1\0req_diag\0machine_testvector\0device_testvector\01800000000000\0diagnostics.report\0session_test\01800000000100\05000\0300\04\01\0120\03\067\051\08192\01"
+    )
 }
 
 
