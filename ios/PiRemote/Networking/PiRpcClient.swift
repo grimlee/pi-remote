@@ -315,13 +315,19 @@ actor PiRpcClient {
         guard !trimmed.isEmpty else { return }
 
         var command: [String: JSONValue] = [
+            "id": .string(UUID().uuidString),
             "type": .string("prompt"),
             "message": .string(trimmed)
         ]
         if snapshot.state?.objectValue?["isStreaming"]?.boolValue == true {
             command["streamingBehavior"] = .string("followUp")
         }
-        _ = try await sendRequest(command)
+
+        // Prompt completion is delivered by the agent/message event stream.
+        // Waiting for a terminal Pi response keeps the composer occupied even
+        // after the assistant has finished. The reliable-command journal plus
+        // Host client ACK still guarantees retry-safe delivery.
+        try await sendReliableCommand(command)
     }
 
     func abort() async throws {
