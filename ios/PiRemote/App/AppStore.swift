@@ -57,6 +57,7 @@ final class AppStore {
     private var needsSessionRestore = false
     private var needsRpcTransportResume = false
     private var resumeInFlight = false
+    private var relayConnectInFlight = false
     private var activeMachine: RemoteMachine?
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
@@ -401,6 +402,15 @@ final class AppStore {
             return
         }
 
+        // SwiftUI can deliver an initial .active scenePhase transition while
+        // start() is still authenticating the first Relay connection. Treat
+        // that as the same connection attempt instead of cancelling it and
+        // starting a competing resume path.
+        if relayConnectInFlight {
+            backgroundedAt = nil
+            return
+        }
+
         let elapsed = backgroundedAt.map {
             Date().timeIntervalSince($0)
         }
@@ -435,6 +445,11 @@ final class AppStore {
     private func connectRelay(
         profile: PairedHostProfile
     ) async throws {
+        relayConnectInFlight = true
+        defer {
+            relayConnectInFlight = false
+        }
+
         let url = try await resolveRelayURL(
             relayURL: profile.relayURL,
             transport: profile.transport
@@ -447,7 +462,9 @@ final class AppStore {
         do {
             try await client.connect()
         } catch {
-            relayClient = nil
+            if relayClient === client {
+                relayClient = nil
+            }
             throw error
         }
     }
