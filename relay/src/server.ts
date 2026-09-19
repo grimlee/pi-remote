@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import {
@@ -28,9 +29,21 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const router = new RelayRouter();
+const TRACE = process.env.PI_REMOTE_TRACE === "1";
 
-function peer(ws: WebSocket): RelayPeer {
+function trace(event: string, fields: Record<string, unknown> = {}): void {
+  if (!TRACE) return;
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    component: "relay-server",
+    event,
+    ...fields,
+  }));
+}
+
+function peer(ws: WebSocket, id: string): RelayPeer {
   return {
+    id,
     send(text) {
       if (ws.readyState === WebSocket.OPEN) ws.send(text);
     },
@@ -67,8 +80,14 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   wss.handleUpgrade(req, socket, head, ws => {
-    const relayPeer = peer(ws);
+    const connectionId = "relay_" + randomUUID().replaceAll("-", "").slice(0, 12);
+    const relayPeer = peer(ws, connectionId);
     const challenge = createRelayAuthChallenge(role);
+    trace("connection.open", {
+      connectionId,
+      role,
+      path: url.pathname,
+    });
     let principal: RelayAuthPrincipal | null = null;
     let helloAccepted = false;
 
@@ -97,6 +116,12 @@ server.on("upgrade", (req, socket, head) => {
 
         principal = value.principal;
         clearTimeout(authTimer);
+        trace("auth.accepted", {
+          connectionId,
+          role,
+          principalKind: principal.kind,
+          principalId: principal.id,
+        });
         ws.send(JSON.stringify({
           protocolVersion: 0,
           type: "auth.accepted",
@@ -112,6 +137,10 @@ server.on("upgrade", (req, socket, head) => {
           && value.machine.id === principal.id
           && value.machine.signingPublicKey === principal.signingPublicKey) {
           helloAccepted = true;
+          trace("hello.host", {
+            connectionId,
+            machineId: value.machine.id,
+          });
           router.registerHost(relayPeer, value.machine);
           return;
         }
@@ -122,6 +151,10 @@ server.on("upgrade", (req, socket, head) => {
           && value.device.id === principal.id
           && value.device.signingPublicKey === principal.signingPublicKey) {
           helloAccepted = true;
+          trace("hello.client", {
+            connectionId,
+            deviceId: value.device.id,
+          });
           router.registerClient(relayPeer, principal, value.device);
           return;
         }
@@ -183,8 +216,14 @@ server.on("upgrade", (req, socket, head) => {
       ws.close(1008, "unsupported frame");
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
       clearTimeout(authTimer);
+      trace("connection.close", {
+        connectionId,
+        role,
+        code,
+        reason: reason.toString("utf8"),
+      });
       if (role === "host") router.removeHost(relayPeer);
       else router.removeClient(relayPeer);
     });
