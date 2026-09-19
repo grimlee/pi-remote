@@ -6,6 +6,16 @@ import PiRemoteTailcat
 #endif
 
 struct TailcatDiagnostics: Codable, Equatable, Sendable {
+    struct Event: Codable, Equatable, Sendable, Identifiable {
+        let at: String
+        let event: String
+        let detail: String?
+
+        var id: String {
+            at + "|" + event + "|" + (detail ?? "")
+        }
+    }
+
     struct Probe: Codable, Equatable, Sendable {
         let ok: Bool
         let path: String?
@@ -25,6 +35,7 @@ struct TailcatDiagnostics: Codable, Equatable, Sendable {
     let bytesToPhone: Int64
     let lastError: String?
     let probe: Probe?
+    let events: [Event]?
 }
 
 actor TailcatTransport {
