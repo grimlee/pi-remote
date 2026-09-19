@@ -67,7 +67,7 @@ actor PiRpcClient {
     private let decoder = JSONDecoder()
 
     private var snapshot: PiRpcSnapshot
-    private var liveMutableCharacterCount = 0
+    private let liveSnapshotInterval: TimeInterval = 1.0 / 20.0
     private var lastLiveSnapshotEmissionAt: TimeInterval = 0
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
@@ -657,7 +657,6 @@ actor PiRpcClient {
             completePendingResponse(object)
 
         case "message_start":
-            liveMutableCharacterCount = 0
             if let message = object["message"] {
                 snapshot.liveMessage = message
             }
@@ -673,7 +672,6 @@ actor PiRpcClient {
                 snapshot.messageRevision += 1
             }
             snapshot.liveMessage = nil
-            liveMutableCharacterCount = 0
             snapshot.lastEvent = value
 
         case "agent_start":
@@ -783,10 +781,8 @@ actor PiRpcClient {
             ])
 
         case "text_delta":
-            let delta = update["delta"]?.stringValue ?? ""
-            liveMutableCharacterCount += delta.count
             appendDelta(
-                delta,
+                update["delta"]?.stringValue ?? "",
                 key: "text",
                 type: "text",
                 index: index,
@@ -812,10 +808,8 @@ actor PiRpcClient {
             ])
 
         case "thinking_delta":
-            let delta = update["delta"]?.stringValue ?? ""
-            liveMutableCharacterCount += delta.count
             appendDelta(
-                delta,
+                update["delta"]?.stringValue ?? "",
                 key: "thinking",
                 type: "thinking",
                 index: index,
@@ -894,25 +888,11 @@ actor PiRpcClient {
         let now = ProcessInfo.processInfo.systemUptime
 
         if coalescingLiveUpdate,
-           now - lastLiveSnapshotEmissionAt
-                < liveSnapshotIntervalForCurrentLength() {
+           now - lastLiveSnapshotEmissionAt < liveSnapshotInterval {
             return
         }
 
         lastLiveSnapshotEmissionAt = now
         continuation.yield(.snapshot(snapshot))
-    }
-
-    private func liveSnapshotIntervalForCurrentLength() -> TimeInterval {
-        switch liveMutableCharacterCount {
-        case ..<2_000:
-            return 1.0 / 20.0
-        case ..<6_000:
-            return 1.0 / 15.0
-        case ..<12_000:
-            return 1.0 / 10.0
-        default:
-            return 1.0 / 8.0
-        }
     }
 }
