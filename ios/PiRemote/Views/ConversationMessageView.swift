@@ -605,15 +605,11 @@ private struct CompletedMarkdownText: View {
     }
 
     var body: some View {
-        Group {
-            if let attributed {
-                Text(attributed)
-            } else {
-                Text(text)
-            }
-        }
-        .foregroundStyle(foreground)
-        .textSelection(.enabled)
+        CompletedTextKitView(
+            text: text,
+            attributed: attributed,
+            foreground: foreground
+        )
         .onAppear {
             let appearDurationMs = max(
                 0,
@@ -641,6 +637,120 @@ private struct CompletedMarkdownText: View {
                 detail: "parse=\(parseDurationMs)|chars=\(characterCount)"
             )
         }
+    }
+}
+
+private struct CompletedTextKitView: UIViewRepresentable {
+    let text: String
+    let attributed: AttributedString?
+    let foreground: Color
+
+    final class Coordinator {
+        var renderedText = ""
+        var renderedForeground: UIColor?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.isUserInteractionEnabled = true
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.adjustsFontForContentSizeCategory = true
+        view.setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        view.setContentHuggingPriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: UITextView,
+        context: Context
+    ) {
+        let resolvedForeground = UIColor(foreground)
+        let coordinator = context.coordinator
+
+        guard coordinator.renderedText != text
+            || coordinator.renderedForeground != resolvedForeground
+        else {
+            return
+        }
+
+        let rendered: NSMutableAttributedString
+        if let attributed {
+            rendered = NSMutableAttributedString(
+                attributedString: NSAttributedString(attributed)
+            )
+        } else {
+            rendered = NSMutableAttributedString(string: text)
+        }
+
+        let fullRange = NSRange(
+            location: 0,
+            length: rendered.length
+        )
+        if fullRange.length > 0 {
+            rendered.addAttribute(
+                .foregroundColor,
+                value: resolvedForeground,
+                range: fullRange
+            )
+            rendered.enumerateAttribute(
+                .font,
+                in: fullRange
+            ) { value, range, _ in
+                if value == nil {
+                    rendered.addAttribute(
+                        .font,
+                        value: UIFont.preferredFont(
+                            forTextStyle: .body
+                        ),
+                        range: range
+                    )
+                }
+            }
+        }
+
+        uiView.attributedText = rendered
+        coordinator.renderedText = text
+        coordinator.renderedForeground = resolvedForeground
+        uiView.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: UITextView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width,
+              width.isFinite,
+              width > 0
+        else {
+            return nil
+        }
+
+        let measured = uiView.sizeThatFits(
+            CGSize(
+                width: width,
+                height: .greatestFiniteMagnitude
+            )
+        )
+        return CGSize(
+            width: width,
+            height: ceil(measured.height)
+        )
     }
 }
 
