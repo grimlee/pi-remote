@@ -53,6 +53,7 @@ final class AppStore {
     private var rpcEventsTask: Task<Void, Never>?
     private var started = false
     private var needsSessionRestore = false
+    private var needsRpcTransportResume = false
     private var activeMachine: RemoteMachine?
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
@@ -137,13 +138,16 @@ final class AppStore {
                 .sorted { $0.startedAt > $1.startedAt }
             sessionError = nil
 
-            if needsSessionRestore,
-               let selectedSessionID,
+            if let selectedSessionID,
                let session = sessions.first(
                 where: { $0.instanceId == selectedSessionID }
                ) {
-                needsSessionRestore = false
-                await openSession(session)
+                if needsRpcTransportResume {
+                    await resumeSessionTransport(session)
+                } else if needsSessionRestore {
+                    needsSessionRestore = false
+                    await openSession(session)
+                }
             }
         } catch {
             sessionError = error.localizedDescription
@@ -162,6 +166,8 @@ final class AppStore {
         isOpeningSession = true
         sessionError = nil
         selectedSessionID = session.instanceId
+        needsSessionRestore = false
+        needsRpcTransportResume = false
 
         await closeRpc()
         activeCacheSessionId = session.sessionId
@@ -235,6 +241,7 @@ final class AppStore {
         sessionError = nil
         selectedSessionID = nil
         needsSessionRestore = false
+        needsRpcTransportResume = false
 
         await closeRpc()
         activeCacheSessionId = nil
@@ -344,6 +351,7 @@ final class AppStore {
             pairingError = nil
             sessionError = nil
             needsSessionRestore = false
+            needsRpcTransportResume = false
             connectionState = .unpaired
         } catch {
             sessionError = error.localizedDescription
@@ -375,8 +383,13 @@ final class AppStore {
                 return
             }
 
-            needsSessionRestore = selectedSessionID != nil
-            await disconnectRelayAndRpc()
+            if rpcClient != nil, selectedSessionID != nil {
+                needsRpcTransportResume = true
+                needsSessionRestore = false
+            } else {
+                needsSessionRestore = selectedSessionID != nil
+            }
+            await disconnectRelayPreservingRpc()
         }
 
         do {
@@ -470,12 +483,68 @@ final class AppStore {
 
         case let .transportClosed(reason):
             relayClient = nil
-            needsSessionRestore = selectedSessionID != nil
+            if rpcClient != nil, selectedSessionID != nil {
+                needsRpcTransportResume = true
+                needsSessionRestore = false
+            } else {
+                needsSessionRestore = selectedSessionID != nil
+            }
 
             if backgroundedAt == nil {
                 connectionState = .disconnected
                 sessionError = reason
             }
+        }
+    }
+
+    private func resumeSessionTransport(
+        _ session: RemoteSession
+    ) async {
+        guard !isOpeningSession else { return }
+        guard let machine = activeMachine,
+              let relayClient,
+              let rpcClient
+        else {
+            needsRpcTransportResume = false
+            needsSessionRestore = false
+            await openSession(session)
+            return
+        }
+
+        isOpeningSession = true
+        var shouldReopen = false
+
+        do {
+            let link = try await relayClient.requestSessionLink(
+                machine: machine,
+                instanceId: session.instanceId,
+                generation: session.generation,
+                access: session.access
+            )
+            let resumed = try await rpcClient.resumeTransport(
+                capabilityString: link.collabUrl
+            ) { frame in
+                try await relayClient.sendRpcFrame(frame)
+            }
+
+            if resumed {
+                needsRpcTransportResume = false
+                needsSessionRestore = false
+                sessionError = nil
+            } else {
+                shouldReopen = true
+            }
+        } catch {
+            sessionError = error.localizedDescription
+            shouldReopen = true
+        }
+
+        isOpeningSession = false
+
+        if shouldReopen {
+            needsRpcTransportResume = false
+            needsSessionRestore = false
+            await openSession(session)
         }
     }
 
@@ -539,6 +608,17 @@ final class AppStore {
         activeCacheSessionId = nil
         lastCachedMessageRevision = 0
         shouldRefreshAfterNewSession = false
+        needsRpcTransportResume = false
+    }
+
+    private func disconnectRelayPreservingRpc() async {
+        if let relayClient {
+            await relayClient.disconnect()
+        }
+        self.relayClient = nil
+        activeMachine = nil
+        machines = []
+        sessions = []
     }
 
     private func disconnectRelayAndRpc() async {

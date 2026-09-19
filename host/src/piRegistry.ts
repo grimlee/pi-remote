@@ -42,6 +42,7 @@ interface SessionRecord {
 
 interface RpcChannel {
   channelId: string;
+  instanceId: string;
   machineId: string;
   deviceId: string;
   key: Buffer;
@@ -267,6 +268,21 @@ export class PiRegistry {
       );
     }
 
+    const existing = [...this.#channels.values()].find(channel =>
+      channel.instanceId === session.instanceId
+      && channel.machineId === context.machineId
+      && channel.deviceId === context.deviceId
+    );
+    if (existing) {
+      this.#armIdleTimer(existing);
+      return this.#linkForChannel(
+        existing,
+        instanceId,
+        generation,
+        accessLevel,
+      );
+    }
+
     if (this.#executable.includes(path.sep)) {
       try {
         await access(this.#executable, fsConstants.X_OK);
@@ -296,6 +312,7 @@ export class PiRegistry {
 
     const channel: RpcChannel = {
       channelId,
+      instanceId: session.instanceId,
       machineId: context.machineId,
       deviceId: context.deviceId,
       key,
@@ -334,11 +351,27 @@ export class PiRegistry {
       this.#deleteChannel(channelId);
     });
 
+    return this.#linkForChannel(
+      channel,
+      instanceId,
+      generation,
+      accessLevel,
+    );
+  }
+
+  #linkForChannel(
+    channel: RpcChannel,
+    instanceId: string,
+    generation: number,
+    accessLevel: SessionAccess,
+  ): SessionLink {
     const capability = JSON.stringify({
       version: 1,
       protocol: "piremote-pi-rpc-v1",
-      channelId,
-      key: key.toString("base64url"),
+      channelId: channel.channelId,
+      key: channel.key.toString("base64url"),
+      nextClientSeq: channel.lastClientSeq + 1,
+      lastHostSeq: channel.nextHostSeq - 1,
     });
 
     return {

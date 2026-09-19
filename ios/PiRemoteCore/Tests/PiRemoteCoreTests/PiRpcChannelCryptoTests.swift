@@ -28,8 +28,10 @@ func piRpcCapabilityValidatesProtocolAndKey() throws {
         .replacingOccurrences(of: "/", with: "_")
         .replacingOccurrences(of: "=", with: "")
     let raw = """
-    {"version":1,"protocol":"piremote-pi-rpc-v1","channelId":"rpc_test","key":"\(key)"}
+    {"version":1,"protocol":"piremote-pi-rpc-v1","channelId":"rpc_test","key":"\(key)","nextClientSeq":7,"lastHostSeq":11}
     """
     let capability = try PiRpcCapability.parse(raw)
     #expect(capability.channelId == "rpc_test")
+    #expect(capability.nextClientSeq == 7)
+    #expect(capability.lastHostSeq == 11)
 }

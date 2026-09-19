@@ -51,7 +51,7 @@ actor PiRpcClient {
     private let capability: PiRpcCapability
     private let machineId: String
     private let deviceId: String
-    private let sendFrame: @Sendable (PiRpcRelayFrame) async throws -> Void
+    private var sendFrame: @Sendable (PiRpcRelayFrame) async throws -> Void
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -72,11 +72,14 @@ actor PiRpcClient {
         let stream = AsyncStream<PiRpcClientEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
-        self.capability = try PiRpcCapability.parse(capabilityString)
+        let parsedCapability = try PiRpcCapability.parse(capabilityString)
+        self.capability = parsedCapability
         self.machineId = machineId
         self.deviceId = deviceId
         self.snapshot = PiRpcSnapshot(messages: initialMessages)
         self.sendFrame = sendFrame
+        self.nextClientSequence = parsedCapability.nextClientSeq ?? 1
+        self.lastHostSequence = parsedCapability.lastHostSeq ?? 0
     }
 
     func start() async throws {
@@ -84,18 +87,43 @@ actor PiRpcClient {
         snapshot.phase = .connecting
         emitSnapshot()
 
-        try await sendCommand([
-            "id": .string("bootstrap-state"),
-            "type": .string("get_state")
-        ])
-        try await sendCommand([
-            "id": .string("bootstrap-messages"),
-            "type": .string("get_messages")
-        ])
-        try await sendCommand([
-            "id": .string("bootstrap-models"),
-            "type": .string("get_available_models")
-        ])
+        try await refreshAuthoritativeState(prefix: "bootstrap")
+    }
+
+    func resumeTransport(
+        capabilityString: String,
+        sendFrame: @escaping @Sendable (PiRpcRelayFrame) async throws -> Void
+    ) async throws -> Bool {
+        guard !isClosed else { return false }
+
+        let resumedCapability = try PiRpcCapability.parse(
+            capabilityString
+        )
+        guard resumedCapability.channelId == capability.channelId,
+              resumedCapability.key == capability.key,
+              resumedCapability.wireProtocol == capability.wireProtocol
+        else {
+            return false
+        }
+
+        self.sendFrame = sendFrame
+        if let nextClientSeq = resumedCapability.nextClientSeq {
+            self.nextClientSequence = nextClientSeq
+        }
+        if let lastHostSeq = resumedCapability.lastHostSeq {
+            self.lastHostSequence = max(
+                self.lastHostSequence,
+                lastHostSeq
+            )
+        }
+
+        // Any partial assistant message may have missed deltas while the
+        // transport was unavailable. Discard only that transient assembly;
+        // completed history stays visible until the Host/Pi snapshot arrives.
+        snapshot.liveMessage = nil
+
+        try await refreshAuthoritativeState(prefix: "resume")
+        return true
     }
 
     func startFreshSession() async throws {
@@ -117,18 +145,7 @@ actor PiRpcClient {
             )
         }
 
-        try await sendCommand([
-            "id": .string("fresh-state-" + UUID().uuidString),
-            "type": .string("get_state")
-        ])
-        try await sendCommand([
-            "id": .string("fresh-messages-" + UUID().uuidString),
-            "type": .string("get_messages")
-        ])
-        try await sendCommand([
-            "id": .string("fresh-models-" + UUID().uuidString),
-            "type": .string("get_available_models")
-        ])
+        try await refreshAuthoritativeState(prefix: "fresh")
     }
 
     func selectModel(_ model: PiModelOption) async throws {
@@ -223,6 +240,25 @@ actor PiRpcClient {
         snapshot.liveMessage = nil
         emitSnapshot()
         continuation.finish()
+    }
+
+    private func refreshAuthoritativeState(
+        prefix: String
+    ) async throws {
+        let suffix = UUID().uuidString
+
+        try await sendCommand([
+            "id": .string("\(prefix)-state-\(suffix)"),
+            "type": .string("get_state")
+        ])
+        try await sendCommand([
+            "id": .string("\(prefix)-messages-\(suffix)"),
+            "type": .string("get_messages")
+        ])
+        try await sendCommand([
+            "id": .string("\(prefix)-models-\(suffix)"),
+            "type": .string("get_available_models")
+        ])
     }
 
     private func sendRequest(
