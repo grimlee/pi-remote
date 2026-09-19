@@ -205,18 +205,16 @@ function pipeProcess(child, label, logPath) {
     `\n=== ${new Date().toISOString()} ${label} start pid=${child.pid} ===\n`,
   );
 
-  const attach = (input, level) => {
+  const attach = input => {
     if (!input) return;
     const lines = createInterface({ input });
     lines.on("line", line => {
       stream.write(line + "\n");
-      const prefix = level === "stderr" ? "!" : " ";
-      console.log(`[${label}${prefix}] ${line}`);
     });
   };
 
-  attach(child.stdout, "stdout");
-  attach(child.stderr, "stderr");
+  attach(child.stdout);
+  attach(child.stderr);
   child.once("exit", (code, signal) => {
     stream.write(
       `=== ${new Date().toISOString()} ${label} exit code=${code} signal=${signal} ===\n`,
@@ -270,10 +268,37 @@ let stopping = false;
 let qrInFlight = false;
 let relay;
 let host;
+let rawInputEnabled = false;
+let lineInput = null;
+
+function clearScreen() {
+  if (process.stdout.isTTY) {
+    process.stdout.write("\x1b[2J\x1b[H");
+  }
+}
+
+function printDashboard() {
+  console.log("Pi Remote Tailcat");
+  console.log("=================");
+  console.log("Status: Relay + Host ready");
+  console.log(`Relay:  127.0.0.1:${port} + [::1]:${port}`);
+  console.log(`Logs:   ${runtimeDir}`);
+  console.log("");
+}
+
+function restoreTerminalInput() {
+  if (rawInputEnabled && process.stdin.isTTY) {
+    process.stdin.setRawMode(false);
+    rawInputEnabled = false;
+  }
+  lineInput?.close();
+  lineInput = null;
+}
 
 async function shutdown(exitCode = 0) {
   if (stopping) return;
   stopping = true;
+  restoreTerminalInput();
   console.log("\n[launcher] stopping Pi Remote Tailcat...");
 
   for (const child of [host, relay]) {
@@ -344,7 +369,9 @@ async function showPairingQr() {
   if (qrInFlight || stopping) return;
   qrInFlight = true;
   try {
-    console.log("");
+    clearScreen();
+    printDashboard();
+
     const executable = path.join(hostDir, "node_modules", ".bin", "tsx");
     const child = spawn(
       executable,
@@ -366,34 +393,59 @@ async function showPairingQr() {
     if (status !== 0) {
       console.error("[launcher] could not create pairing QR");
     }
+    console.log("");
+    console.log("Keys: [p] new QR   [q] stop   (no Enter required)");
   } finally {
     qrInFlight = false;
   }
 }
 
-console.log("[launcher] Relay and Host are ready.");
-console.log(`[launcher] Relay log: ${relayLogPath}`);
-console.log(`[launcher] Host log:  ${hostLogPath}`);
+function startControls() {
+  if (process.stdin.isTTY
+      && typeof process.stdin.setRawMode === "function") {
+    process.stdin.setRawMode(true);
+    process.stdin.setEncoding("utf8");
+    process.stdin.resume();
+    rawInputEnabled = true;
 
-if (showInitialQr) await showPairingQr();
-
-console.log("");
-console.log("Controls: p + Enter = new pairing QR, q + Enter = stop");
-
-const input = createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  terminal: Boolean(process.stdin.isTTY),
-});
-
-input.on("line", line => {
-  const command = line.trim().toLowerCase();
-  if (command === "p") {
-    void showPairingQr();
-  } else if (command === "q") {
-    void shutdown(0);
+    process.stdin.on("data", key => {
+      if (key === "p" || key === "P") {
+        void showPairingQr();
+      } else if (
+        key === "q"
+        || key === "Q"
+        || key === "\u0003"
+      ) {
+        void shutdown(0);
+      }
+    });
+    return;
   }
-});
+
+  lineInput = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false,
+  });
+  lineInput.on("line", line => {
+    const command = line.trim().toLowerCase();
+    if (command === "p") {
+      void showPairingQr();
+    } else if (command === "q") {
+      void shutdown(0);
+    }
+  });
+}
+
+startControls();
+
+if (showInitialQr) {
+  await showPairingQr();
+} else {
+  clearScreen();
+  printDashboard();
+  console.log("Keys: [p] pairing QR   [q] stop   (no Enter required)");
+}
 
 process.on("SIGINT", () => void shutdown(0));
 process.on("SIGTERM", () => void shutdown(0));
