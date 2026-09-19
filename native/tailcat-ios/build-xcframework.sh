@@ -11,23 +11,30 @@ fi
 
 cd "$HERE"
 
-chmod +x   "$HERE/scripts/clangwrap-ios.sh"   "$HERE/scripts/clangwrap-ios-sim-arm64.sh"   "$HERE/scripts/clangwrap-ios-sim-x86_64.sh"
+chmod +x \
+  "$HERE/scripts/clangwrap-ios.sh" \
+  "$HERE/scripts/clangwrap-ios-sim-arm64.sh" \
+  "$HERE/scripts/clangwrap-ios-sim-x86_64.sh"
 
 rm -rf "$BUILD" "$OUTPUT"
-mkdir -p   "$BUILD/device"   "$BUILD/sim-arm64"   "$BUILD/sim-x86_64"   "$BUILD/simulator"   "$BUILD/headers"   "$(dirname "$OUTPUT")"
+mkdir -p \
+  "$BUILD/device" \
+  "$BUILD/sim-arm64" \
+  "$BUILD/sim-x86_64" \
+  "$BUILD/simulator" \
+  "$BUILD/headers" \
+  "$(dirname "$OUTPUT")"
 
 export CGO_ENABLED=1
 export GOFLAGS="-mod=mod"
 
-GOOS=ios GOARCH=arm64   CC="$HERE/scripts/clangwrap-ios.sh"   go build -trimpath -tags ios -buildmode=c-archive     -o "$BUILD/device/libPiRemoteTailcat.a" .
+GOOS=ios GOARCH=arm64 \
+  CC="$HERE/scripts/clangwrap-ios.sh" \
+  go build -trimpath -tags ios -buildmode=c-archive \
+    -o "$BUILD/device/libPiRemoteTailcat.a" .
 
-GOOS=ios GOARCH=arm64   CC="$HERE/scripts/clangwrap-ios-sim-arm64.sh"   go build -trimpath -tags ios -buildmode=c-archive     -o "$BUILD/sim-arm64/libPiRemoteTailcat.a" .
-
-GOOS=ios GOARCH=amd64   CC="$HERE/scripts/clangwrap-ios-sim-x86_64.sh"   go build -trimpath -tags ios -buildmode=c-archive     -o "$BUILD/sim-x86_64/libPiRemoteTailcat.a" .
-
-lipo -create   "$BUILD/sim-arm64/libPiRemoteTailcat.a"   "$BUILD/sim-x86_64/libPiRemoteTailcat.a"   -output "$BUILD/simulator/libPiRemoteTailcat.a"
-
-cp "$BUILD/device/libPiRemoteTailcat.h"   "$BUILD/headers/PiRemoteTailcat.h"
+cp "$BUILD/device/libPiRemoteTailcat.h" \
+  "$BUILD/headers/PiRemoteTailcat.h"
 
 cat > "$BUILD/headers/module.modulemap" <<'EOF'
 module PiRemoteTailcat {
@@ -36,6 +43,34 @@ module PiRemoteTailcat {
 }
 EOF
 
-xcodebuild -create-xcframework   -library "$BUILD/device/libPiRemoteTailcat.a"   -headers "$BUILD/headers"   -library "$BUILD/simulator/libPiRemoteTailcat.a"   -headers "$BUILD/headers"   -output "$OUTPUT"
+DEVICE_ONLY="${PI_REMOTE_TAILCAT_DEVICE_ONLY:-0}"
+if [ "$DEVICE_ONLY" = "1" ]; then
+  xcodebuild -create-xcframework \
+    -library "$BUILD/device/libPiRemoteTailcat.a" \
+    -headers "$BUILD/headers" \
+    -output "$OUTPUT"
+else
+  GOOS=ios GOARCH=arm64 \
+    CC="$HERE/scripts/clangwrap-ios-sim-arm64.sh" \
+    go build -trimpath -tags ios -buildmode=c-archive \
+      -o "$BUILD/sim-arm64/libPiRemoteTailcat.a" .
+
+  GOOS=ios GOARCH=amd64 \
+    CC="$HERE/scripts/clangwrap-ios-sim-x86_64.sh" \
+    go build -trimpath -tags ios -buildmode=c-archive \
+      -o "$BUILD/sim-x86_64/libPiRemoteTailcat.a" .
+
+  lipo -create \
+    "$BUILD/sim-arm64/libPiRemoteTailcat.a" \
+    "$BUILD/sim-x86_64/libPiRemoteTailcat.a" \
+    -output "$BUILD/simulator/libPiRemoteTailcat.a"
+
+  xcodebuild -create-xcframework \
+    -library "$BUILD/device/libPiRemoteTailcat.a" \
+    -headers "$BUILD/headers" \
+    -library "$BUILD/simulator/libPiRemoteTailcat.a" \
+    -headers "$BUILD/headers" \
+    -output "$OUTPUT"
+fi
 
 echo "Created $OUTPUT"
