@@ -16,6 +16,8 @@ struct PiRpcSnapshot: Sendable {
     var availableModels: [PiModelOption] = []
     var availableThinkingLevels: [String] = []
     var availableCommands: [PiSlashCommandOption] = []
+    var presentationRevision: Int = 0
+    var liveCharacterCount: Int = 0
     var lastEvent: JSONValue?
     var uiRequest: JSONValue?
     var readOnly: Bool { false }
@@ -658,6 +660,7 @@ actor PiRpcClient {
 
         case "message_start":
             liveMutableCharacterCount = 0
+            snapshot.liveCharacterCount = 0
             if let message = object["message"] {
                 snapshot.liveMessage = message
             }
@@ -674,6 +677,7 @@ actor PiRpcClient {
             }
             snapshot.liveMessage = nil
             liveMutableCharacterCount = 0
+            snapshot.liveCharacterCount = 0
             snapshot.lastEvent = value
 
         case "agent_start":
@@ -785,6 +789,7 @@ actor PiRpcClient {
         case "text_delta":
             let delta = update["delta"]?.stringValue ?? ""
             liveMutableCharacterCount += delta.count
+            snapshot.liveCharacterCount = liveMutableCharacterCount
             appendDelta(
                 delta,
                 key: "text",
@@ -900,6 +905,7 @@ actor PiRpcClient {
         }
 
         lastLiveSnapshotEmissionAt = now
+        snapshot.presentationRevision += 1
         continuation.yield(.snapshot(snapshot))
     }
 
