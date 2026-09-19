@@ -1,4 +1,5 @@
 name: Tailcat iOS Experiment
+# Builds the isolated Tailcat PoC app identity.
 
 on:
   push:
