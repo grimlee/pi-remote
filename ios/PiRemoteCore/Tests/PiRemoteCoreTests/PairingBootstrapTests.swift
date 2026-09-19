@@ -64,7 +64,8 @@ func compressedPairingBootstrapParsesRoundTripPayload() throws {
 }
 
 private func zlibCompress(_ data: Data) throws -> Data {
-    var output = Data(count: data.count + 256)
+    let capacity = data.count + 256
+    var output = Data(count: capacity)
     let encodedSize = output.withUnsafeMutableBytes { destination in
         data.withUnsafeBytes { source in
             guard let destinationBase = destination
@@ -79,7 +80,7 @@ private func zlibCompress(_ data: Data) throws -> Data {
 
             return compression_encode_buffer(
                 destinationBase,
-                output.count,
+                capacity,
                 sourceBase,
                 data.count,
                 nil,
