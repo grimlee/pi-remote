@@ -42,14 +42,6 @@ final class AppStore {
     var isOpeningSession = false
     var isResumingSession = false
     var isCreatingSession = false
-    var tailcatDiagnostics: TailcatDiagnostics?
-    var tailcatDiagnosticsError: String?
-
-    var usesTailcatTransport: Bool {
-        profile?.transport?.kind == .tailcat
-            || tailcatDiagnostics != nil
-    }
-
     private let identityStore = DeviceIdentityStore()
     private let grantStore = MachineGrantStore()
     private let profileStore = PairedHostProfileStore()
@@ -114,10 +106,6 @@ final class AppStore {
             connectionState = .connecting
             try await client.connect()
 
-            if bootstrap.transport?.kind == .tailcat {
-                await refreshTailcatDiagnostics()
-            }
-
             let acceptance = try await client.pair(using: bootstrap)
             let pairedProfile = PairedHostProfile(
                 relayURL: bootstrap.relayUrl,
@@ -137,18 +125,6 @@ final class AppStore {
         }
 
         isPairing = false
-    }
-
-    func refreshTailcatDiagnostics(
-        probe: Bool = true
-    ) async {
-        do {
-            tailcatDiagnostics = try await tailcatTransport
-                .diagnostics(probe: probe)
-            tailcatDiagnosticsError = nil
-        } catch {
-            tailcatDiagnosticsError = error.localizedDescription
-        }
     }
 
     func refreshSessions() async {
@@ -527,9 +503,6 @@ final class AppStore {
 
         do {
             try await client.connect()
-            if profile.transport?.kind == .tailcat {
-                await refreshTailcatDiagnostics()
-            }
         } catch {
             if relayClient === client {
                 relayClient = nil
@@ -787,8 +760,6 @@ final class AppStore {
         }
         self.relayClient = nil
         await tailcatTransport.stop()
-        tailcatDiagnostics = nil
-        tailcatDiagnosticsError = nil
         activeMachine = nil
         machines = []
         sessions = []
