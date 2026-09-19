@@ -4,17 +4,12 @@ import UIKit
 
 struct ConversationTranscriptView: View {
     let snapshot: PiRpcSnapshot
-    let showAgentActivity: Bool
 
     @State private var parsedMessages: [ChatMessage]
     @State private var parsedRevision: Int
 
-    init(
-        snapshot: PiRpcSnapshot,
-        showAgentActivity: Bool
-    ) {
+    init(snapshot: PiRpcSnapshot) {
         self.snapshot = snapshot
-        self.showAgentActivity = showAgentActivity
         _parsedMessages = State(
             initialValue: ChatMessageParser.parseAll(
                 snapshot.messages
@@ -28,29 +23,18 @@ struct ConversationTranscriptView: View {
     var body: some View {
         Group {
             ForEach(
-                Array(parsedMessages.enumerated()),
+                Array(transcriptTurns.enumerated()),
                 id: \.offset
-            ) { _, message in
-                if let presented = presentedMessage(
-                    message,
-                    isStreaming: false
-                ) {
+            ) { _, turn in
+                if let user = turn.user {
                     ConversationMessageRow(
-                        message: presented,
+                        message: user.message,
                         isStreaming: false
                     )
                 }
-            }
 
-            if let live = snapshot.liveMessage,
-               let message = ChatMessageParser.parse(live),
-               let presented = presentedMessage(
-                    message,
-                    isStreaming: true
-               ) {
-                ConversationMessageRow(
-                    message: presented,
-                    isStreaming: true
+                TurnResponseView(
+                    responses: turn.responses
                 )
             }
         }
@@ -64,44 +48,231 @@ struct ConversationTranscriptView: View {
         }
     }
 
-    private func presentedMessage(
-        _ message: ChatMessage,
-        isStreaming: Bool
-    ) -> ChatMessage? {
-        guard !showAgentActivity else { return message }
+    private var transcriptTurns: [TranscriptTurn] {
+        var entries = parsedMessages.map {
+            TranscriptEntry(message: $0, isStreaming: false)
+        }
 
-        switch message.role {
-        case .tool:
-            return nil
+        if let live = snapshot.liveMessage,
+           let message = ChatMessageParser.parse(live) {
+            entries.append(
+                TranscriptEntry(message: message, isStreaming: true)
+            )
+        }
 
-        case .assistant:
-            let visibleBlocks = message.blocks.compactMap {
-                block -> ChatMessageBlock? in
-                switch block {
-                case let .text(text):
-                    return text.isEmpty ? nil : .text(text)
-                case let .image(label):
-                    return .image(label: label)
-                case .thinking, .toolCall, .raw:
-                    return nil
-                }
+        var turns: [TranscriptTurn] = []
+        var currentUser: TranscriptEntry?
+        var currentResponses: [TranscriptEntry] = []
+
+        func flush() {
+            guard currentUser != nil || !currentResponses.isEmpty else {
+                return
             }
+            turns.append(
+                TranscriptTurn(
+                    user: currentUser,
+                    responses: currentResponses
+                )
+            )
+            currentUser = nil
+            currentResponses = []
+        }
 
-            guard !visibleBlocks.isEmpty else {
+        for entry in entries {
+            if entry.message.role == .user {
+                flush()
+                currentUser = entry
+            } else {
+                currentResponses.append(entry)
+            }
+        }
+
+        flush()
+        return turns
+    }
+}
+
+private struct TranscriptEntry {
+    let message: ChatMessage
+    let isStreaming: Bool
+}
+
+private struct TranscriptTurn {
+    let user: TranscriptEntry?
+    let responses: [TranscriptEntry]
+}
+
+private struct TurnResponseView: View {
+    let responses: [TranscriptEntry]
+
+    var body: some View {
+        if !activityEntries.isEmpty {
+            AgentActivityGroup(
+                entries: activityEntries,
+                isStreaming: isStreaming
+            )
+        }
+
+        if let finalEntry {
+            ConversationMessageRow(
+                message: finalEntry.message,
+                isStreaming: finalEntry.isStreaming
+            )
+        }
+    }
+
+    private var finalEntry: TranscriptEntry? {
+        guard let last = responses.last,
+              last.message.role == .assistant
+        else {
+            return nil
+        }
+
+        let visible = visibleAssistantBlocks(last.message.blocks)
+        guard !visible.isEmpty else {
+            return nil
+        }
+
+        return TranscriptEntry(
+            message: ChatMessage(
+                role: .assistant,
+                timestamp: last.message.timestamp,
+                blocks: visible,
+                toolName: last.message.toolName,
+                isError: last.message.isError
+            ),
+            isStreaming: last.isStreaming
+        )
+    }
+
+    private var activityEntries: [TranscriptEntry] {
+        var activity = responses
+
+        if let last = responses.last,
+           last.message.role == .assistant,
+           !visibleAssistantBlocks(last.message.blocks).isEmpty {
+            activity.removeLast()
+
+            let hidden = activityAssistantBlocks(last.message.blocks)
+            if !hidden.isEmpty {
+                activity.append(
+                    TranscriptEntry(
+                        message: ChatMessage(
+                            role: .assistant,
+                            timestamp: last.message.timestamp,
+                            blocks: hidden,
+                            toolName: last.message.toolName,
+                            isError: last.message.isError
+                        ),
+                        isStreaming: last.isStreaming
+                    )
+                )
+            }
+        }
+
+        return activity.filter { !$0.message.blocks.isEmpty }
+    }
+
+    private var isStreaming: Bool {
+        responses.contains(where: \.isStreaming)
+    }
+
+    private func visibleAssistantBlocks(
+        _ blocks: [ChatMessageBlock]
+    ) -> [ChatMessageBlock] {
+        blocks.compactMap { block in
+            switch block {
+            case let .text(text):
+                return text.isEmpty ? nil : .text(text)
+            case let .image(label):
+                return .image(label: label)
+            case .thinking, .toolCall, .raw:
                 return nil
             }
-
-            return ChatMessage(
-                role: message.role,
-                timestamp: message.timestamp,
-                blocks: visibleBlocks,
-                toolName: message.toolName,
-                isError: message.isError
-            )
-
-        case .user, .system:
-            return message
         }
+    }
+
+    private func activityAssistantBlocks(
+        _ blocks: [ChatMessageBlock]
+    ) -> [ChatMessageBlock] {
+        blocks.compactMap { block in
+            switch block {
+            case .thinking, .toolCall, .raw:
+                return block
+            case .text, .image:
+                return nil
+            }
+        }
+    }
+}
+
+private struct AgentActivityGroup: View {
+    let entries: [TranscriptEntry]
+    let isStreaming: Bool
+
+    @State private var isExpanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(
+                    Array(entries.enumerated()),
+                    id: \.offset
+                ) { _, entry in
+                    ConversationMessageRow(
+                        message: entry.message,
+                        isStreaming: entry.isStreaming
+                    )
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                if isStreaming {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(isStreaming ? "Working…" : "Agent activity")
+                    .font(.callout.weight(.medium))
+
+                Spacer()
+
+                Text(activitySummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var activitySummary: String {
+        let toolCount = entries.reduce(into: 0) { count, entry in
+            if entry.message.role == .tool {
+                count += 1
+            }
+
+            for block in entry.message.blocks {
+                if case .toolCall = block {
+                    count += 1
+                }
+            }
+        }
+
+        if toolCount > 0 {
+            return "\(toolCount) tool step"
+                + (toolCount == 1 ? "" : "s")
+        }
+
+        return entries.count == 1
+            ? "1 step"
+            : "\(entries.count) steps"
     }
 }
 

@@ -297,8 +297,6 @@ private struct SessionDetailView: View {
     @State private var showingCommands = false
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
-    @AppStorage("showAgentActivity")
-    private var showAgentActivity = false
 
     var body: some View {
         @Bindable var store = store
@@ -328,8 +326,7 @@ private struct SessionDetailView: View {
 
                     if let snapshot = store.rpcSnapshot {
                         ConversationTranscriptView(
-                            snapshot: snapshot,
-                            showAgentActivity: showAgentActivity
+                            snapshot: snapshot
                         )
 
                         if let request = snapshot.uiRequest {
@@ -442,17 +439,6 @@ private struct SessionDetailView: View {
                 )
             }
 
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Toggle(
-                        "Show Agent Activity",
-                        isOn: $showAgentActivity
-                    )
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .accessibilityLabel("Conversation display options")
-            }
         }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
