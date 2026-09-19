@@ -521,6 +521,8 @@ private struct StreamingPlainTextView: UIViewRepresentable {
         view.isUserInteractionEnabled = false
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
+        view.textContainer.widthTracksTextView = false
+        view.textContainer.heightTracksTextView = false
         view.font = UIFont.preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
         view.textColor = .label
@@ -583,15 +585,50 @@ private struct StreamingPlainTextView: UIViewRepresentable {
             return nil
         }
 
-        let measured = uiView.sizeThatFits(
-            CGSize(
-                width: width,
+        let horizontalInsets =
+            uiView.textContainerInset.left
+            + uiView.textContainerInset.right
+        let verticalInsets =
+            uiView.textContainerInset.top
+            + uiView.textContainerInset.bottom
+        let containerWidth = max(
+            1,
+            width - horizontalInsets
+        )
+        let textContainer = uiView.textContainer
+
+        if abs(textContainer.size.width - containerWidth) > 0.5 {
+            textContainer.size = CGSize(
+                width: containerWidth,
                 height: .greatestFiniteMagnitude
             )
+            uiView.layoutManager.invalidateLayout(
+                forCharacterRange: NSRange(
+                    location: 0,
+                    length: uiView.textStorage.length
+                ),
+                actualCharacterRange: nil
+            )
+        } else if textContainer.size.height
+                    != .greatestFiniteMagnitude {
+            textContainer.size.height = .greatestFiniteMagnitude
+        }
+
+        // Text storage updates are append-only on the normal streaming path.
+        // Asking the layout manager for its used rect lets TextKit extend
+        // layout from the invalidated suffix instead of routing every snapshot
+        // through UITextView.sizeThatFits(), which re-measures the entire
+        // growing view hierarchy.
+        uiView.layoutManager.ensureLayout(
+            for: textContainer
         )
+        let used = uiView.layoutManager.usedRect(
+            for: textContainer
+        )
+
         return CGSize(
             width: width,
-            height: ceil(measured.height)
+            height: ceil(used.height + verticalInsets)
         )
     }
 
