@@ -62,9 +62,10 @@ The launcher:
   `.runtime/host-trace.log`;
 - waits until the Relay and Host pairing socket are ready;
 - renders a 10-minute pairing QR using a compressed bootstrap;
-- on a graphical Linux desktop, opens a private ~240 px SVG QR in the default
-  viewer instead of filling the terminal with a large character QR;
-- falls back to the terminal QR automatically for headless/SSH sessions;
+- renders the default QR directly in the terminal with a compact Braille
+  2x4-module renderer, reducing both width and height without opening another
+  window;
+- keeps the previous half-block terminal QR available as compatibility mode;
 - keeps verbose Host/Relay/Tailcat output in the trace files instead of
   continuously scrolling the interactive terminal.
 
@@ -74,14 +75,16 @@ address remains redacted from routine Host logs.
 While the launcher is running:
 
 ```text
-p           create a fresh pairing QR code
+p           create a fresh compact pairing QR
+s           show the larger compatibility QR
 q           stop Host and Relay
 Ctrl+C      stop Host and Relay
 ```
 
-On an interactive TTY, `p` and `q` are single-key controls and do not require
-Enter. Re-rendering a QR clears the launcher screen first, so the active QR and
-status remain visible while background logs continue to be recorded on disk.
+On an interactive TTY, `p`, `s`, and `q` are single-key controls and do
+not require Enter. Re-rendering a QR clears the launcher screen first, so the
+active QR and status remain visible while background logs continue to be
+recorded on disk.
 
 Advanced overrides remain available through environment variables:
 
@@ -91,11 +94,6 @@ Advanced overrides remain available through environment variables:
 - `PI_REMOTE_PAIR_TTL_SECONDS`: QR pairing lifetime; defaults to 600.
 - `PI_REMOTE_TRACE`: defaults to `1`; set to `0` to disable verbose PC
   tracing.
-- `PI_REMOTE_PAIR_UI`: `auto` (default), `window`, or `terminal`.
-  `auto` uses a desktop QR when a graphical Linux session and `xdg-open`
-  are available, otherwise it falls back to the terminal renderer.
-- `PI_REMOTE_PAIR_QR_SIZE`: desktop SVG width/height in pixels; defaults to
-  240 and accepts 160–512.
 
 The underlying architecture is unchanged: the Host still uses a local WebSocket
 Relay, while Tailcat is only the userspace transport underlay.
