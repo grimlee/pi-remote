@@ -1,7 +1,9 @@
-import { writeFile } from "node:fs/promises";
 import net from "node:net";
 import qrcode from "qrcode-terminal";
-import * as QRCode from "qrcode";
+import {
+  colorizeCompactQr,
+  renderCompactQr,
+} from "./compactQr.js";
 import {
   decodePairingBootstrap,
   encodeCompressedPairingBootstrap,
@@ -14,23 +16,9 @@ const ttlMs = ttlArgument
   ? Number(ttlArgument.slice("--ttl=".length)) * 1000
   : undefined;
 const renderQr = process.argv.includes("--qr");
-const svgArgument = process.argv.find(argument =>
-  argument.startsWith("--qr-svg=")
-);
-const svgPath = svgArgument
-  ? svgArgument.slice("--qr-svg=".length)
-  : undefined;
+const safeQr = process.argv.includes("--qr-safe");
 const quiet = process.argv.includes("--quiet");
-const sizeArgument = process.argv.find(argument =>
-  argument.startsWith("--qr-size=")
-);
-const requestedQrSize = sizeArgument
-  ? Number(sizeArgument.slice("--qr-size=".length))
-  : 240;
-const qrSize = Number.isFinite(requestedQrSize)
-  ? Math.min(512, Math.max(160, Math.round(requestedQrSize)))
-  : 240;
-const showPayload = (!renderQr && !svgPath)
+const showPayload = (!renderQr && !safeQr)
   || process.argv.includes("--show-payload");
 
 const response = await new Promise<string>((resolve, reject) => {
@@ -73,38 +61,32 @@ if (!quiet) {
   console.log("");
 }
 
-if (renderQr) {
-  if (!quiet) {
-    console.log("Scan this QR code with Pi Remote:");
-    console.log("");
-  }
+if (renderQr && !quiet) {
+  console.log("Scan this QR code with Pi Remote:");
+  console.log("");
+
+  const qr = renderCompactQr(compactBootstrap);
+  console.log(colorizeCompactQr(qr.text));
+  console.log("");
+  console.log(
+    `Compact QR: ${qr.widthCharacters} columns × ${qr.heightLines} lines `
+      + `(${qr.moduleCount} modules)`,
+  );
+}
+
+if (safeQr && !quiet) {
+  console.log("Scan this compatibility QR code with Pi Remote:");
+  console.log("");
   await new Promise<void>(resolve => {
     qrcode.generate(compactBootstrap, { small: true }, code => {
-      if (!quiet) console.log(code);
+      console.log(code);
       resolve();
     });
   });
 }
 
-if (svgPath) {
-  const svg = await QRCode.toString(compactBootstrap, {
-    type: "svg",
-    errorCorrectionLevel: "L",
-    margin: 4,
-    width: qrSize,
-  });
-  await writeFile(svgPath, svg, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  if (!quiet) {
-    console.log("Pairing QR saved to: " + svgPath);
-    console.log("");
-  }
-}
-
 if (showPayload && !quiet) {
-  if (renderQr || svgPath) console.log("Pairing payload:");
+  if (renderQr || safeQr) console.log("Pairing payload:");
   console.log(record.bootstrap);
   console.log("");
 }
@@ -112,8 +94,10 @@ if (showPayload && !quiet) {
 if (!quiet) {
   console.log("Expires: " + String(record.expiresAt));
   console.log(
-    renderQr || svgPath
-      ? "Keep this pairing QR private."
-      : "Paste this payload into Pi Remote on the iPhone.",
+    renderQr
+      ? "If this compact QR does not scan, press s in the launcher for compatibility mode."
+      : safeQr
+        ? "Compatibility QR mode."
+        : "Paste this payload into Pi Remote on the iPhone.",
   );
 }
