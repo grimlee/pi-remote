@@ -1,3 +1,5 @@
+import Foundation
+import PiRemoteCore
 import SwiftUI
 
 struct SlashCommandSuggestionsView: View {
