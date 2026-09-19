@@ -94,7 +94,26 @@ test("control request canonical bytes match Swift vector", () => {
   };
   assert.equal(
     controlRequestMessage(diagnostics).toString("utf8"),
-    "piremote-control-request-v1\0req_diag\0machine_testvector\0device_testvector\01800000000000\0diagnostics.report\0session_test\01800000000100\05000\0300\04\01\0120\03\067\051\08192\01",
+    [
+      "piremote-control-request-v1",
+      "req_diag",
+      "machine_testvector",
+      "device_testvector",
+      "1800000000000",
+      "diagnostics.report",
+      "session_test",
+      "1800000000100",
+      "5000",
+      "300",
+      "4",
+      "1",
+      "120",
+      "3",
+      "67",
+      "51",
+      "8192",
+      "1",
+    ].join("\\0"),
   );
 });
 
