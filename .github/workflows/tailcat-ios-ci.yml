@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tailcat-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build Tailcat XCFramework and Pi Remote
@@ -36,7 +40,9 @@ jobs:
           swift --version
           go version
 
-      - name: Build Tailcat XCFramework
+      - name: Build Tailcat device XCFramework
+        env:
+          PI_REMOTE_TAILCAT_DEVICE_ONLY: "1"
         run: sh native/tailcat-ios/build-xcframework.sh
 
       - name: Inspect Tailcat XCFramework
@@ -55,19 +61,12 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Build for iOS Simulator
-        working-directory: ios
-        run: |
-          set -o pipefail
-          rm -rf build-simulator
-          xcodebuild             -project PiRemote.xcodeproj             -scheme PiRemote             -configuration Debug             -sdk iphonesimulator             -destination 'generic/platform=iOS Simulator'             CODE_SIGNING_ALLOWED=NO             CONFIGURATION_BUILD_DIR="$PWD/build-simulator"             build | tee xcodebuild-simulator.log
-
       - name: Build unsigned device app
         working-directory: ios
         run: |
           set -o pipefail
           rm -rf build-device
-          xcodebuild             -project PiRemote.xcodeproj             -scheme PiRemote             -configuration Release             -sdk iphoneos             -destination 'generic/platform=iOS'             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=''             CONFIGURATION_BUILD_DIR="$PWD/build-device"             build | tee xcodebuild-device.log
+          xcodebuild -project PiRemote.xcodeproj -scheme PiRemote -configuration Release -sdk iphoneos -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CONFIGURATION_BUILD_DIR="$PWD/build-device" build | tee xcodebuild-device.log
 
       - name: Package sideload IPA
         working-directory: ios
@@ -101,8 +100,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tailcat-ios-build-logs
-          path: |
-            ios/xcodebuild-simulator.log
-            ios/xcodebuild-device.log
+          path: ios/xcodebuild-device.log
           if-no-files-found: ignore
           retention-days: 7
