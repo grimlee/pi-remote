@@ -322,6 +322,31 @@ private struct TailcatDiagnosticsRows: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+
+            if let events = diagnostics.events,
+               !events.isEmpty {
+                Divider()
+                Text("Recent native events")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(Array(events.suffix(10).reversed())) { event in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(event.event)
+                            .font(.caption.monospaced())
+                        if let detail = event.detail,
+                           !detail.isEmpty {
+                            Text(detail)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Text(event.at)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
         }
 
         if let error = store.tailcatDiagnosticsError {
@@ -330,7 +355,7 @@ private struct TailcatDiagnosticsRows: View {
                 .foregroundStyle(.red)
         }
 
-        Button("Probe Tailcat Path") {
+        Button("Refresh / Probe Tailcat") {
             Task {
                 await store.refreshTailcatDiagnostics()
             }
