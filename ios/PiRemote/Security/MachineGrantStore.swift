@@ -20,7 +20,7 @@ enum MachineGrantStoreError: LocalizedError {
 }
 
 actor MachineGrantStore {
-    private let service = "top.grimlee.piremote.identity"
+    private let service = "top.grimlee.piremote.tailcat.identity"
     private let account = "machine-grants-v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
