@@ -21,7 +21,7 @@ class FakePeer implements RelayPeer {
   readonly sent: string[] = [];
   closed: { code: number | undefined; reason: string | undefined } | null = null;
 
-  constructor(readonly id?: string) {}
+  constructor(readonly id: string = "fake-peer") {}
 
   send(text: string): void {
     this.sent.push(text);
