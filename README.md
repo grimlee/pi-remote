@@ -76,13 +76,20 @@ relay/      Minimal authenticated router for control and opaque E2EE RPC frames
 
 ## Connectivity policy
 
-Primary logical path:
+Pi Remote treats network transport as an underlay. Machine identity, pairing, authorization, Pi RPC, replay/resume, and E2EE semantics stay the same regardless of how the phone reaches the Relay.
+
+The preferred user path is **Quick Connect**, backed by Tailcat:
 
 ~~~text
-pi-remote-host -> Pi Remote Relay <- iPhone
+first use:  start Pi Remote -> scan one QR -> paired
+later use:  start Pi Remote -> open iPhone app -> connected
 ~~~
 
-Cloudflare Tunnel is currently a development/public-ingress transport for the Relay. The product identity model does not depend on Cloudflare, LAN addresses, or a VPN.
+Tailcat runs inside Pi Remote rather than taking ownership of the iPhone's system VPN slot. The normal path therefore does not require a public IP, domain, Cloudflare setup, or a Tailscale VPN profile.
+
+The existing public Relay / Cloudflare Tunnel path remains the backup connection. When a host is migrated from an existing Relay pairing to Quick Connect, Pi Remote preserves the existing WSS Relay endpoint so it can be offered as a backup instead of being discarded.
+
+Tailcat is only the transport underlay. It does not become a second Pi Remote protocol.
 
 ## Status
 
