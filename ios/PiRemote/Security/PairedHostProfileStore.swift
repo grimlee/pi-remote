@@ -36,7 +36,7 @@ enum PairedHostProfileStoreError: LocalizedError {
 }
 
 actor PairedHostProfileStore {
-    private let service = "top.grimlee.piremote.identity"
+    private let service = "top.grimlee.piremote.tailcat.identity"
     private let account = "paired-host-profile-v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
