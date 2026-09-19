@@ -65,6 +65,8 @@ actor PiRpcClient {
     private let decoder = JSONDecoder()
 
     private var snapshot: PiRpcSnapshot
+    private let liveSnapshotInterval: TimeInterval = 1.0 / 20.0
+    private var lastLiveSnapshotEmissionAt: TimeInterval = 0
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
     private var didAcknowledgeInitialBarrier = false
@@ -612,7 +614,9 @@ actor PiRpcClient {
             snapshot.lastEvent = value
         }
 
-        emitSnapshot()
+        emitSnapshot(
+            coalescingLiveUpdate: type == "message_update"
+        )
     }
 
     private func completePendingResponse(
@@ -787,7 +791,17 @@ actor PiRpcClient {
         snapshot.state = .object(object)
     }
 
-    private func emitSnapshot() {
+    private func emitSnapshot(
+        coalescingLiveUpdate: Bool = false
+    ) {
+        let now = ProcessInfo.processInfo.systemUptime
+
+        if coalescingLiveUpdate,
+           now - lastLiveSnapshotEmissionAt < liveSnapshotInterval {
+            return
+        }
+
+        lastLiveSnapshotEmissionAt = now
         continuation.yield(.snapshot(snapshot))
     }
 }

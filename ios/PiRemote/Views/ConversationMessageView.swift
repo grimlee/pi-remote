@@ -5,25 +5,48 @@ import UIKit
 struct ConversationTranscriptView: View {
     let snapshot: PiRpcSnapshot
 
+    @State private var parsedMessages: [ChatMessage]
+    @State private var parsedRevision: Int
+
+    init(snapshot: PiRpcSnapshot) {
+        self.snapshot = snapshot
+        _parsedMessages = State(
+            initialValue: ChatMessageParser.parseAll(
+                snapshot.messages
+            )
+        )
+        _parsedRevision = State(
+            initialValue: snapshot.messageRevision
+        )
+    }
+
     var body: some View {
-        let messages = ChatMessageParser.parseAll(snapshot.messages)
+        Group {
+            ForEach(
+                Array(parsedMessages.enumerated()),
+                id: \.offset
+            ) { _, message in
+                ConversationMessageRow(
+                    message: message,
+                    isStreaming: false
+                )
+            }
 
-        ForEach(
-            Array(messages.enumerated()),
-            id: \.offset
-        ) { _, message in
-            ConversationMessageRow(
-                message: message,
-                isStreaming: false
-            )
+            if let live = snapshot.liveMessage,
+               let message = ChatMessageParser.parse(live) {
+                ConversationMessageRow(
+                    message: message,
+                    isStreaming: true
+                )
+            }
         }
+        .onChange(of: snapshot.messageRevision) { _, revision in
+            guard parsedRevision != revision else { return }
 
-        if let live = snapshot.liveMessage,
-           let message = ChatMessageParser.parse(live) {
-            ConversationMessageRow(
-                message: message,
-                isStreaming: true
+            parsedMessages = ChatMessageParser.parseAll(
+                snapshot.messages
             )
+            parsedRevision = revision
         }
     }
 }
@@ -40,7 +63,8 @@ private struct ConversationMessageRow: View {
 
                 MessageBlocks(
                     blocks: message.blocks,
-                    foreground: .white
+                    foreground: .white,
+                    isStreaming: false
                 )
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -52,7 +76,8 @@ private struct ConversationMessageRow: View {
             VStack(alignment: .leading, spacing: 8) {
                 MessageBlocks(
                     blocks: message.blocks,
-                    foreground: .primary
+                    foreground: .primary,
+                    isStreaming: isStreaming
                 )
 
                 if isStreaming {
@@ -76,7 +101,8 @@ private struct ConversationMessageRow: View {
         case .system:
             MessageBlocks(
                 blocks: message.blocks,
-                foreground: .secondary
+                foreground: .secondary,
+                isStreaming: false
             )
             .padding(12)
             .frame(
@@ -92,6 +118,7 @@ private struct ConversationMessageRow: View {
 private struct MessageBlocks: View {
     let blocks: [ChatMessageBlock]
     let foreground: Color
+    let isStreaming: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -103,16 +130,24 @@ private struct MessageBlocks: View {
                 case let .text(text):
                     MarkdownMessageText(
                         text: text,
-                        foreground: foreground
+                        foreground: foreground,
+                        isStreaming: isStreaming
                     )
 
                 case let .thinking(thinking):
                     DisclosureGroup {
-                        Text(thinking)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .padding(.top, 4)
+                        if isStreaming {
+                            Text(thinking)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 4)
+                        } else {
+                            Text(thinking)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .padding(.top, 4)
+                        }
                     } label: {
                         Label(
                             "Reasoning",
@@ -181,7 +216,8 @@ private struct ToolResultCard: View {
         DisclosureGroup {
             MessageBlocks(
                 blocks: message.blocks,
-                foreground: .primary
+                foreground: .primary,
+                isStreaming: false
             )
             .padding(.top, 8)
         } label: {
@@ -210,18 +246,28 @@ private struct ToolResultCard: View {
 private struct MarkdownMessageText: View {
     let text: String
     let foreground: Color
+    let isStreaming: Bool
 
     var body: some View {
-        Group {
-            if let attributed = try? AttributedString(
-                markdown: text
-            ) {
-                Text(attributed)
-            } else {
-                Text(text)
+        if isStreaming {
+            // Avoid reparsing the entire growing response as Markdown on
+            // every delta. Selection is also expensive for a Text view whose
+            // storage changes continuously. The completed message switches
+            // back to the full Markdown/selectable renderer once.
+            Text(text)
+                .foregroundStyle(foreground)
+        } else {
+            Group {
+                if let attributed = try? AttributedString(
+                    markdown: text
+                ) {
+                    Text(attributed)
+                } else {
+                    Text(text)
+                }
             }
+            .foregroundStyle(foreground)
+            .textSelection(.enabled)
         }
-        .foregroundStyle(foreground)
-        .textSelection(.enabled)
     }
 }
