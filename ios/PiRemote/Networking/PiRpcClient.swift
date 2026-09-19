@@ -819,6 +819,7 @@ actor PiRpcClient {
         case "thinking_delta":
             let delta = update["delta"]?.stringValue ?? ""
             liveMutableCharacterCount += delta.count
+            snapshot.liveCharacterCount = liveMutableCharacterCount
             appendDelta(
                 delta,
                 key: "thinking",
