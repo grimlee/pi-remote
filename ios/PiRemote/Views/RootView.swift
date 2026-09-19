@@ -109,12 +109,6 @@ struct RootView: View {
                 }
             } else {
                 List {
-                    if store.usesTailcatTransport {
-                        Section("Tailcat Diagnostics") {
-                            TailcatDiagnosticsRows()
-                        }
-                    }
-
                     Section {
                         ForEach(store.sessions) { session in
                             NavigationLink(
@@ -188,6 +182,8 @@ struct RootView: View {
 
 private struct PairingView: View {
     @Environment(AppStore.self) private var store
+    @State private var showingScanner = false
+    @State private var scannerError: String?
 
     var body: some View {
         @Bindable var store = store
@@ -195,24 +191,24 @@ private struct PairingView: View {
         Form {
             Section {
                 Text(
-                    "On the computer running pi-remote-host, run npm run pair, then paste the one-time payload below."
+                    "Start Pi Remote on your computer, then scan the pairing QR code shown in its terminal."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-                TextEditor(text: $store.pairingPayload)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 150)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Button("Paste from Clipboard") {
-                    if let value = UIPasteboard.general.string {
-                        store.pairingPayload = value
-                    }
+                Button {
+                    scannerError = nil
+                    showingScanner = true
+                } label: {
+                    Label(
+                        "Scan Pairing QR Code",
+                        systemImage: "qrcode.viewfinder"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isPairing)
             } header: {
-                Text("One-time pairing")
+                Text("Pair with your computer")
             }
 
             if let pairingError = store.pairingError {
@@ -222,14 +218,31 @@ private struct PairingView: View {
                 }
             }
 
-            if store.tailcatDiagnostics != nil
-                || store.tailcatDiagnosticsError != nil {
-                Section("Tailcat Diagnostics") {
-                    TailcatDiagnosticsRows()
+            if let scannerError {
+                Section {
+                    Text(scannerError)
+                        .foregroundStyle(.red)
                 }
             }
 
-            Section {
+            Section("Manual pairing") {
+                TextEditor(text: $store.pairingPayload)
+                    .font(
+                        .system(
+                            .caption,
+                            design: .monospaced
+                        )
+                    )
+                    .frame(minHeight: 100)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Button("Paste from Clipboard") {
+                    if let value = UIPasteboard.general.string {
+                        store.pairingPayload = value
+                    }
+                }
+
                 Button {
                     Task {
                         await store.pairFromPayload()
@@ -242,7 +255,7 @@ private struct PairingView: View {
                         Text(
                             store.isPairing
                                 ? "Pairing…"
-                                : "Pair this iPhone"
+                                : "Pair using code"
                         )
                     }
                 }
@@ -256,155 +269,34 @@ private struct PairingView: View {
                 )
             }
         }
-    }
-}
-
-
-private struct TailcatDiagnosticsRows: View {
-    @Environment(AppStore.self) private var store
-
-    var body: some View {
-        if let diagnostics = store.tailcatDiagnostics {
-            LabeledContent("Path") {
-                Text(pathLabel(diagnostics))
-            }
-
-            if let latency = diagnostics.probe?.latencyMs,
-               diagnostics.probe?.ok == true {
-                LabeledContent("Latency") {
-                    Text(String(format: "%.1f ms", latency))
-                        .monospacedDigit()
+        .sheet(isPresented: $showingScanner) {
+            NavigationStack {
+                QRCodeScannerView { code in
+                    store.pairingPayload = code
+                    showingScanner = false
+                    Task {
+                        await store.pairFromPayload()
+                    }
+                } onError: { message in
+                    scannerError = message
+                    showingScanner = false
                 }
-            }
-
-            LabeledContent("Bridge") {
-                Text(
-                    "127.0.0.1:\(diagnostics.localPort) → "
-                        + "Tailcat:\(diagnostics.remotePort)"
-                )
-                .font(.caption.monospaced())
-            }
-
-            LabeledContent("Connections") {
-                Text(
-                    "\(diagnostics.activeConnections) active / "
-                        + "\(diagnostics.acceptedConnections) accepted"
-                )
-                .monospacedDigit()
-            }
-
-            LabeledContent("Dials") {
-                Text(
-                    "\(diagnostics.dialSuccesses) ok / "
-                        + "\(diagnostics.dialFailures) failed"
-                )
-                .monospacedDigit()
-            }
-
-            LabeledContent("Traffic") {
-                Text(
-                    "↑ \(formatBytes(diagnostics.bytesToHost))  "
-                        + "↓ \(formatBytes(diagnostics.bytesToPhone))"
-                )
-                .monospacedDigit()
-            }
-
-            if let error = diagnostics.lastError,
-               !error.isEmpty {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            if let probeError = diagnostics.probe?.error,
-               diagnostics.probe?.ok == false {
-                Text("Probe: \(probeError)")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            if let events = diagnostics.events,
-               !events.isEmpty {
-                Divider()
-                Text("Recent native events")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                ForEach(Array(events.suffix(10).reversed())) { event in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(event.event)
-                            .font(.caption.monospaced())
-                        if let detail = event.detail,
-                           !detail.isEmpty {
-                            Text(detail)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                .ignoresSafeArea()
+                .navigationTitle("Scan Pairing QR")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(
+                        placement: .cancellationAction
+                    ) {
+                        Button("Cancel") {
+                            showingScanner = false
                         }
-                        Text(event.at)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.tertiary)
                     }
                 }
             }
         }
-
-        if let error = store.tailcatDiagnosticsError {
-            Text(error)
-                .font(.caption)
-                .foregroundStyle(.red)
-        }
-
-        Button("Refresh / Probe Tailcat") {
-            Task {
-                await store.refreshTailcatDiagnostics()
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(
-                    nanoseconds: 2_000_000_000
-                )
-                if Task.isCancelled { return }
-                await store.refreshTailcatDiagnostics(
-                    probe: false
-                )
-            }
-        }
-    }
-
-    private func pathLabel(
-        _ diagnostics: TailcatDiagnostics
-    ) -> String {
-        guard let probe = diagnostics.probe else {
-            return "Not probed"
-        }
-        guard probe.ok else {
-            return "Probe failed"
-        }
-
-        switch probe.path {
-        case "direct":
-            return "Direct P2P"
-        case "derp":
-            if let region = probe.derpRegion,
-               !region.isEmpty {
-                return "DERP (\(region))"
-            }
-            return "DERP"
-        default:
-            return probe.path ?? "Unknown"
-        }
-    }
-
-    private func formatBytes(_ value: Int64) -> String {
-        ByteCountFormatter.string(
-            fromByteCount: value,
-            countStyle: .binary
-        )
     }
 }
-
 
 private struct SessionRow: View {
     let session: RemoteSession
