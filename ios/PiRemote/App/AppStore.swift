@@ -679,7 +679,6 @@ final class AppStore {
         needsRpcTransportResume = false
         isResumingSession = false
         resumeInFlight = false
-        relayConnectInFlight = false
     }
 
     private func disconnectRelayPreservingRpc() async {
