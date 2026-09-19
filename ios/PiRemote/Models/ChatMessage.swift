@@ -1,7 +1,7 @@
 import Foundation
 import PiRemoteCore
 
-enum ChatMessageRole: Sendable {
+enum ChatMessageRole: Sendable, Equatable {
     case user
     case assistant
     case tool
