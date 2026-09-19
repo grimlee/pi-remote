@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "node scripts/tailcat-launcher.mjs",
+    "quick-connect": "node scripts/tailcat-launcher.mjs",
     "tailcat": "node scripts/tailcat-launcher.mjs"
   }
 }
