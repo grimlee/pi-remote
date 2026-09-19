@@ -214,6 +214,15 @@ final class AppStore {
     func openSession(_ session: RemoteSession) async {
         guard !isOpeningSession else { return }
 
+        let openStartedAtMs = diagnosticNowMs()
+        let openStartedAt = ProcessInfo.processInfo.systemUptime
+        reportDiagnosticTiming(
+            stage: "open.begin",
+            startedAtMs: openStartedAtMs,
+            durationMs: 0,
+            detail: "sid=\(diagnosticShortID(session.instanceId))"
+        )
+
         // Navigation is presentation state, not Pi process ownership. If the
         // user leaves a conversation view and re-enters the same session, keep
         // the existing RPC channel alive instead of sending piremote.close and
@@ -226,6 +235,14 @@ final class AppStore {
             case .connecting, .live:
                 selectedSessionID = session.instanceId
                 sessionError = nil
+                reportDiagnosticTiming(
+                    stage: "open.reuse",
+                    startedAtMs: openStartedAtMs,
+                    durationMs: diagnosticElapsedMs(
+                        since: openStartedAt
+                    ),
+                    detail: "sid=\(diagnosticShortID(session.instanceId))"
+                )
                 return
             case .closed:
                 break
@@ -246,30 +263,64 @@ final class AppStore {
         needsSessionRestore = false
         needsRpcTransportResume = false
 
+        let closeStartedAtMs = diagnosticNowMs()
+        let closeStartedAt = ProcessInfo.processInfo.systemUptime
         await closeRpc()
+        reportDiagnosticTiming(
+            stage: "open.closeRpc",
+            startedAtMs: closeStartedAtMs,
+            durationMs: diagnosticElapsedMs(since: closeStartedAt),
+            detail: "sid=\(diagnosticShortID(session.instanceId))"
+        )
+
         activeRpcSessionID = session.instanceId
         activeCacheSessionId = session.sessionId
         lastCachedMessageRevision = 0
 
+        let cacheStartedAtMs = diagnosticNowMs()
+        let cacheStartedAt = ProcessInfo.processInfo.systemUptime
         let cachedMessages = (
             try? await conversationCache.load(
                 machineId: machine.id,
                 sessionId: session.sessionId
             )
         ) ?? []
+        reportDiagnosticTiming(
+            stage: "open.cache",
+            startedAtMs: cacheStartedAtMs,
+            durationMs: diagnosticElapsedMs(since: cacheStartedAt),
+            detail: "sid=\(diagnosticShortID(session.instanceId))|m=\(cachedMessages.count)"
+        )
 
+        let snapshotStartedAtMs = diagnosticNowMs()
+        let snapshotStartedAt = ProcessInfo.processInfo.systemUptime
         rpcSnapshot = PiRpcSnapshot(
             phase: .connecting,
             messages: cachedMessages
         )
+        reportDiagnosticTiming(
+            stage: "open.snapshot",
+            startedAtMs: snapshotStartedAtMs,
+            durationMs: diagnosticElapsedMs(since: snapshotStartedAt),
+            detail: "sid=\(diagnosticShortID(session.instanceId))|m=\(cachedMessages.count)"
+        )
 
         do {
+            let linkStartedAtMs = diagnosticNowMs()
+            let linkStartedAt = ProcessInfo.processInfo.systemUptime
             let link = try await relayClient.requestSessionLink(
                 machine: machine,
                 instanceId: session.instanceId,
                 generation: session.generation,
                 access: session.access
             )
+            reportDiagnosticTiming(
+                stage: "open.link",
+                startedAtMs: linkStartedAtMs,
+                durationMs: diagnosticElapsedMs(since: linkStartedAt),
+                detail: "sid=\(diagnosticShortID(session.instanceId))"
+            )
+
             let device = try await identityStore.publicIdentity()
             let client = try PiRpcClient(
                 capabilityString: link.collabUrl,
@@ -288,8 +339,22 @@ final class AppStore {
                 }
             }
 
+            let startStartedAtMs = diagnosticNowMs()
+            let startStartedAt = ProcessInfo.processInfo.systemUptime
             try await client.start()
+            reportDiagnosticTiming(
+                stage: "open.rpcStart",
+                startedAtMs: startStartedAtMs,
+                durationMs: diagnosticElapsedMs(since: startStartedAt),
+                detail: "sid=\(diagnosticShortID(session.instanceId))"
+            )
         } catch {
+            reportDiagnosticTiming(
+                stage: "open.error",
+                startedAtMs: openStartedAtMs,
+                durationMs: diagnosticElapsedMs(since: openStartedAt),
+                detail: "sid=\(diagnosticShortID(session.instanceId))"
+            )
             sessionError = error.localizedDescription
             rpcClient = nil
             activeRpcSessionID = nil
@@ -305,6 +370,12 @@ final class AppStore {
         }
 
         isOpeningSession = false
+        reportDiagnosticTiming(
+            stage: "open.total",
+            startedAtMs: openStartedAtMs,
+            durationMs: diagnosticElapsedMs(since: openStartedAt),
+            detail: "sid=\(diagnosticShortID(session.instanceId))|m=\(cachedMessages.count)"
+        )
     }
 
     func createNewSession(from bootstrap: RemoteSession) async {
@@ -481,6 +552,91 @@ final class AppStore {
         } catch {
             sessionError = error.localizedDescription
         }
+    }
+
+    func reportDiagnosticTiming(
+        stage: String,
+        startedAtMs: Int64,
+        durationMs: Int,
+        detail: String = ""
+    ) {
+        guard let machine = activeMachine,
+              let relayClient
+        else {
+            return
+        }
+
+        let safeStage = diagnosticSanitize(stage, limit: 48)
+        let safeDetail = diagnosticSanitize(detail, limit: 128)
+        var marker = "diag|stage=\(safeStage)|dur=\(max(0, durationMs))"
+            + "|at=\(startedAtMs)"
+        if !safeDetail.isEmpty {
+            marker += "|\(safeDetail)"
+        }
+
+        let report = ConversationPerformanceReport(
+            sessionId: String(marker.prefix(240)),
+            windowStartedAtMs: max(0, startedAtMs),
+            windowDurationMs: min(
+                60_000,
+                max(500, durationMs)
+            ),
+            displayFrames: 0,
+            slowFrames25Ms: 0,
+            slowFrames50Ms: 0,
+            dragFrames: 0,
+            dragSlowFrames25Ms: 0,
+            maxFrameGapMs: 0,
+            snapshotCount: 0,
+            liveCharacters: 0,
+            isStreaming: false
+        )
+
+        Task {
+            try? await relayClient.sendDiagnostics(
+                machineId: machine.id,
+                report: report
+            )
+        }
+    }
+
+    private func diagnosticNowMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
+    }
+
+    private func diagnosticElapsedMs(
+        since startedAt: TimeInterval
+    ) -> Int {
+        max(
+            0,
+            Int(
+                (
+                    (
+                        ProcessInfo.processInfo.systemUptime
+                            - startedAt
+                    ) * 1_000
+                ).rounded()
+            )
+        )
+    }
+
+    private func diagnosticShortID(_ value: String) -> String {
+        String(value.prefix(12))
+    }
+
+    private func diagnosticSanitize(
+        _ value: String,
+        limit: Int
+    ) -> String {
+        let safe = value.map { character -> Character in
+            if character.isLetter
+                || character.isNumber
+                || "-_.=|".contains(character) {
+                return character
+            }
+            return "_"
+        }
+        return String(safe.prefix(limit))
     }
 
     func reportPerformance(
