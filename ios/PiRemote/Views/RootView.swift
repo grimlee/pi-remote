@@ -360,6 +360,17 @@ private struct TailcatDiagnosticsRows: View {
                 await store.refreshTailcatDiagnostics()
             }
         }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: 2_000_000_000
+                )
+                if Task.isCancelled { return }
+                await store.refreshTailcatDiagnostics(
+                    probe: false
+                )
+            }
+        }
     }
 
     private func pathLabel(
