@@ -250,12 +250,12 @@ private struct MarkdownMessageText: View {
 
     var body: some View {
         if isStreaming {
-            // Avoid reparsing the entire growing response as Markdown on
-            // every delta. Selection is also expensive for a Text view whose
-            // storage changes continuously. The completed message switches
-            // back to the full Markdown/selectable renderer once.
-            Text(text)
-                .foregroundStyle(foreground)
+            // TextKit is much better suited to a long append-only stream than
+            // replacing one increasingly-large SwiftUI Text value. The
+            // representable appends only the new UTF-16 suffix to textStorage,
+            // allowing TextKit to keep the already-laid-out prefix stable
+            // while the user scrolls through a long response.
+            StreamingPlainTextView(text: text)
         } else {
             Group {
                 if let attributed = try? AttributedString(
@@ -269,5 +269,111 @@ private struct MarkdownMessageText: View {
             .foregroundStyle(foreground)
             .textSelection(.enabled)
         }
+    }
+}
+
+private struct StreamingPlainTextView: UIViewRepresentable {
+    let text: String
+
+    final class Coordinator {
+        var renderedText = ""
+        var renderedUTF16Length = 0
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear
+        view.isEditable = false
+        view.isSelectable = false
+        view.isScrollEnabled = false
+        view.isUserInteractionEnabled = false
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.font = UIFont.preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = .label
+        view.setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        view.setContentHuggingPriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: UITextView,
+        context: Context
+    ) {
+        let coordinator = context.coordinator
+        let newText = text as NSString
+        let oldLength = coordinator.renderedUTF16Length
+
+        if oldLength > 0,
+           newText.length >= oldLength,
+           newText.substring(to: oldLength)
+                == coordinator.renderedText {
+            let delta = newText.substring(from: oldLength)
+            if !delta.isEmpty {
+                uiView.textStorage.append(
+                    NSAttributedString(
+                        string: delta,
+                        attributes: textAttributes(for: uiView)
+                    )
+                )
+                coordinator.renderedText += delta
+                coordinator.renderedUTF16Length = newText.length
+                uiView.invalidateIntrinsicContentSize()
+            }
+            return
+        }
+
+        uiView.attributedText = NSAttributedString(
+            string: text,
+            attributes: textAttributes(for: uiView)
+        )
+        coordinator.renderedText = text
+        coordinator.renderedUTF16Length = newText.length
+        uiView.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: UITextView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width,
+              width.isFinite,
+              width > 0
+        else {
+            return nil
+        }
+
+        let measured = uiView.sizeThatFits(
+            CGSize(
+                width: width,
+                height: .greatestFiniteMagnitude
+            )
+        )
+        return CGSize(
+            width: width,
+            height: ceil(measured.height)
+        )
+    }
+
+    private func textAttributes(
+        for view: UITextView
+    ) -> [NSAttributedString.Key: Any] {
+        [
+            .font: view.font
+                ?? UIFont.preferredFont(forTextStyle: .body),
+            .foregroundColor: view.textColor ?? UIColor.label
+        ]
     }
 }
