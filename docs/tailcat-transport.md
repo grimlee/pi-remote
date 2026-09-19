@@ -157,7 +157,7 @@ The dedicated `Tailcat iOS Experiment` GitHub Actions workflow verifies the
 native framework, PiRemoteCore tests, Xcode project generation, unsigned
 `iphoneos` build, and sideload IPA packaging.
 
-## iOS experiment isolation
+## Identity continuity
 
 The historical Tailcat PoC used a separate iOS identity so it could coexist with main during experimentation. The integrated product deliberately does **not** keep that split:
 
@@ -167,13 +167,25 @@ The historical Tailcat PoC used a separate iOS identity so it could coexist with
 
 This lets a host move between Quick Connect and the backup Relay path without creating a second device identity.
 
+## Security and lifecycle
+
+A Tailcat address is treated as a sensitive reachability capability, not as Pi Remote authorization. Possessing the address may allow a peer to reach the local Relay transport, but control still requires the existing Pi Remote device identity, signed grant, Host authorization snapshot, and per-channel E2EE capability.
+
+Routine logs and diagnostics must never contain the Tailcat address or private key. The Host sidecar and native iOS diagnostics redact strings matching Tailcat bearer capabilities, launcher trace files are created with mode `0600`, and the launcher enforces mode `0600` on the persistent Tailcat private key. Pairing QR output is intentionally shown only in the interactive terminal and is not copied into routine Host/Relay trace logs.
+
+Device revocation continues to use Pi Remote's existing authorized-device store. Revoking a device invalidates its authorization even if that device still knows the Tailcat address.
+
+Tailcat key/address rotation is an explicit Host operation. Rotating the persistent Tailcat key changes the reachability address and invalidates stored Tailcat transport coordinates on phones. The machine identity and Pi Remote device identities do not rotate with it; affected phones only need a fresh transport bootstrap/QR to learn the new address. Automatic address rotation is intentionally deferred until there is a safe signed transport-update protocol.
+
+The integrated launcher uses the normal Pi Remote Host configuration rather than the PoC's repo-local identity store. This keeps the same machine identity and device grants available to both Quick Connect and the backup Relay path.
+
 ## Compatibility
 
 `PI_REMOTE_TRANSPORT` defaults to `relay`. Existing WSS/Cloudflare behavior is
 unchanged unless `PI_REMOTE_TRANSPORT=tailcat` is explicitly selected.
 
 The pairing format remains version 1. The optional `transport` field is ignored
-by older decoders, while this branch treats a missing field as the existing
+by older decoders, while the integrated app treats a missing field as the existing
 public Relay transport.
 
 ## Exit criteria before considering merge to main
