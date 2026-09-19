@@ -11,6 +11,8 @@ struct RootView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var path: [SessionRoute] = []
+    @State private var showingQuickConnectScanner = false
+    @State private var quickConnectScannerError: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -73,6 +75,47 @@ struct RootView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingQuickConnectScanner) {
+            NavigationStack {
+                QRCodeScannerView { code in
+                    store.pairingPayload = code
+                    showingQuickConnectScanner = false
+                    Task {
+                        await store.pairFromPayload()
+                    }
+                } onError: { message in
+                    quickConnectScannerError = message
+                    showingQuickConnectScanner = false
+                }
+                .ignoresSafeArea()
+                .navigationTitle("Set Up Quick Connect")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            showingQuickConnectScanner = false
+                        }
+                    }
+                }
+            }
+        }
+        .alert(
+            "Quick Connect",
+            isPresented: Binding(
+                get: { quickConnectScannerError != nil },
+                set: { presented in
+                    if !presented {
+                        quickConnectScannerError = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                quickConnectScannerError = nil
+            }
+        } message: {
+            Text(quickConnectScannerError ?? "Could not scan the pairing code.")
+        }
     }
 
     @ViewBuilder
@@ -106,6 +149,14 @@ struct RootView: View {
                             await store.refreshSessions()
                         }
                     }
+
+                    if store.canSetUpQuickConnect {
+                        Button("Set Up Quick Connect") {
+                            quickConnectScannerError = nil
+                            showingQuickConnectScanner = true
+                        }
+                        .disabled(store.isPairing)
+                    }
                 }
             } else {
                 List {
@@ -120,6 +171,19 @@ struct RootView: View {
                     }
 
                     Section {
+                        if store.canSetUpQuickConnect {
+                            Button {
+                                quickConnectScannerError = nil
+                                showingQuickConnectScanner = true
+                            } label: {
+                                Label(
+                                    "Set Up Quick Connect",
+                                    systemImage: "qrcode.viewfinder"
+                                )
+                            }
+                            .disabled(store.isPairing)
+                        }
+
                         Button(
                             "Forget Host",
                             role: .destructive
@@ -153,6 +217,14 @@ struct RootView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+
+                if store.canSetUpQuickConnect {
+                    Button("Set Up Quick Connect") {
+                        quickConnectScannerError = nil
+                        showingQuickConnectScanner = true
+                    }
+                    .disabled(store.isPairing)
+                }
 
                 if store.hasRelayFallback {
                     Button(
