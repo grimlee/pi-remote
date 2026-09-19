@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -99,6 +105,67 @@ test("uses the first user message as a fallback session title", async () => {
   const [session] = await new PiRegistry({ sessionDir: root }).listSessions();
   assert.equal(session?.name, "Fix the native Pi RPC bridge");
 });
+
+test("keeps session generation stable when Pi appends messages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-generation-"));
+  const file = await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01STABLEGEN",
+      timestamp: "2026-09-19T05:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi.mjs");
+  await writeFile(
+    fakePi,
+    "#!/usr/bin/env node\nsetTimeout(() => {}, 5000);\n",
+  );
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+  });
+
+  const [before] = await registry.listSessions();
+  assert.ok(before);
+
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await appendFile(
+    file,
+    JSON.stringify({
+      type: "message",
+      id: "m1",
+      parentId: null,
+      timestamp: "2026-09-19T05:00:01.000Z",
+      message: {
+        role: "user",
+        content: "activity must not change session identity",
+        timestamp: 1,
+      },
+    }) + "\n",
+  );
+
+  const [after] = await registry.listSessions();
+  assert.ok(after);
+  assert.equal(after.generation, before.generation);
+
+  await assert.doesNotReject(
+    registry.createLink(
+      before.instanceId,
+      before.generation,
+      "control",
+      { machineId: "machine_test", deviceId: "device_test" },
+    ),
+  );
+
+  registry.stop();
+});
+
 
 test("rejects a stale generation before spawning Pi", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-stale-"));
