@@ -24,7 +24,7 @@ struct QRCodeScannerView: UIViewControllerRepresentable {
 @MainActor
 final class QRCodeScannerViewController:
     UIViewController,
-    AVCaptureMetadataOutputObjectsDelegate
+    @preconcurrency AVCaptureMetadataOutputObjectsDelegate
 {
     private let captureSession = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
