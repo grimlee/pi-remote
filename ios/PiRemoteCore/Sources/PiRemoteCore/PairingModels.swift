@@ -48,20 +48,57 @@ public struct PairingInvitation: Codable, Hashable, Sendable {
     }
 }
 
+public enum PairingTransportKind: String, Codable, Hashable, Sendable {
+    case relay
+    case tailcat
+}
+
+public struct PairingTransport: Codable, Hashable, Sendable {
+    public let kind: PairingTransportKind
+    public let address: String?
+    public let remotePort: Int?
+
+    public init(
+        kind: PairingTransportKind,
+        address: String? = nil,
+        remotePort: Int? = nil
+    ) {
+        self.kind = kind
+        self.address = address
+        self.remotePort = remotePort
+    }
+
+    public static let relay = PairingTransport(kind: .relay)
+
+    public static func tailcat(
+        address: String,
+        remotePort: Int
+    ) -> PairingTransport {
+        PairingTransport(
+            kind: .tailcat,
+            address: address,
+            remotePort: remotePort
+        )
+    }
+}
+
 public struct PairingBootstrap: Codable, Hashable, Sendable {
     public static let prefix = "piremote-pair-v1."
 
     public let version: Int
     public let relayUrl: String
+    public let transport: PairingTransport?
     public let invitation: PairingInvitation
 
     public init(
         version: Int = 1,
         relayUrl: String,
+        transport: PairingTransport? = nil,
         invitation: PairingInvitation
     ) {
         self.version = version
         self.relayUrl = relayUrl
+        self.transport = transport
         self.invitation = invitation
     }
 
@@ -82,11 +119,34 @@ public struct PairingBootstrap: Codable, Hashable, Sendable {
               value.invitation.pairingId.hasPrefix("pair_"),
               value.invitation.machine.id.hasPrefix("machine_"),
               let relayURL = URL(string: value.relayUrl),
-              relayURL.scheme?.lowercased() == "wss",
               relayURL.host != nil
         else {
             throw PairingBootstrapError.invalidPayload
         }
+
+        switch value.transport?.kind ?? .relay {
+        case .relay:
+            guard relayURL.scheme?.lowercased() == "wss" else {
+                throw PairingBootstrapError.invalidPayload
+            }
+
+        case .tailcat:
+            guard let transport = value.transport,
+                  let address = transport.address,
+                  address.hasPrefix("tc"),
+                  address.count >= 20,
+                  let remotePort = transport.remotePort,
+                  (1...65_535).contains(remotePort),
+                  relayURL.scheme?.lowercased() == "ws",
+                  let host = relayURL.host?.lowercased(),
+                  ["127.0.0.1", "localhost", "::1"].contains(host),
+                  relayURL.port == remotePort,
+                  relayURL.path == "/v0/client"
+            else {
+                throw PairingBootstrapError.invalidPayload
+            }
+        }
+
         return value
     }
 }
