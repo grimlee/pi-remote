@@ -378,16 +378,30 @@ await waitFor(
   },
 );
 
-async function showPairingQr(mode = "compact") {
+function terminalSupportsSixel() {
+  if (!process.stdout.isTTY) return false;
+  if (process.env.TMUX) return false;
+
+  const term = (process.env.TERM ?? "").toLowerCase();
+  const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
+
+  return term.startsWith("foot")
+    || termProgram === "foot";
+}
+
+async function showPairingQr(mode = "inline") {
   if (qrInFlight || stopping) return;
   qrInFlight = true;
   try {
     clearScreen();
     printDashboard();
 
+    const useSixel = mode !== "safe"
+      && terminalSupportsSixel();
+
     const args = [
       `--ttl=${pairTTL}`,
-      mode === "safe" ? "--qr-safe" : "--qr",
+      useSixel ? "--qr-sixel" : "--qr-safe",
     ];
 
     const executable = path.join(
@@ -415,10 +429,19 @@ async function showPairingQr(mode = "compact") {
 
     console.log("");
     console.log(
-      mode === "safe"
-        ? "Keys: [p] compact QR   [s] compatibility QR   [q] stop"
-        : "Keys: [p] new compact QR   [s] compatibility QR   [q] stop",
+      useSixel
+        ? "Keys: [p] new inline QR   [s] compatibility QR   [q] stop"
+        : "Keys: [p] new QR   [q] stop",
     );
+    if (useSixel) {
+      console.log(
+        "Sixel inline image mode detected (Foot terminal).",
+      );
+    } else if (mode !== "safe") {
+      console.log(
+        "Sixel is unavailable here; using compatibility terminal QR.",
+      );
+    }
     console.log("(no Enter required)");
   } finally {
     qrInFlight = false;
@@ -435,7 +458,7 @@ function startControls() {
 
     process.stdin.on("data", key => {
       if (key === "p" || key === "P") {
-        void showPairingQr("compact");
+        void showPairingQr("inline");
       } else if (key === "s" || key === "S") {
         void showPairingQr("safe");
       } else if (
@@ -457,7 +480,7 @@ function startControls() {
   lineInput.on("line", line => {
     const command = line.trim().toLowerCase();
     if (command === "p") {
-      void showPairingQr("compact");
+      void showPairingQr("inline");
     } else if (command === "s") {
       void showPairingQr("safe");
     } else if (command === "q") {
@@ -474,7 +497,7 @@ if (showInitialQr) {
   clearScreen();
   printDashboard();
   console.log(
-    "Keys: [p] compact QR   [s] compatibility QR   [q] stop",
+    "Keys: [p] pairing QR   [s] compatibility QR   [q] stop",
   );
   console.log("(no Enter required)");
 }
