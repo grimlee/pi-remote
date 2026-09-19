@@ -1,8 +1,23 @@
 import type { PairingInvitation } from "./pairing.js";
 
+export interface RelayPairingTransport {
+  kind: "relay";
+}
+
+export interface TailcatPairingTransport {
+  kind: "tailcat";
+  address: string;
+  remotePort: number;
+}
+
+export type PairingTransport =
+  | RelayPairingTransport
+  | TailcatPairingTransport;
+
 export interface PairingBootstrap {
   version: 1;
   relayUrl: string;
+  transport?: PairingTransport;
   invitation: PairingInvitation;
 }
 
@@ -10,12 +25,37 @@ const PREFIX = "piremote-pair-v1.";
 
 export function relayClientUrl(hostUrl: string): string {
   const url = new URL(hostUrl);
-  if (url.pathname === "/v0/host") {
-    url.pathname = "/v0/client";
-  } else {
-    url.pathname = "/v0/client";
-  }
+  url.pathname = "/v0/client";
   return url.toString();
+}
+
+function parseTransport(value: unknown): PairingTransport | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid Pi Remote pairing transport");
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.kind === "relay") {
+    return { kind: "relay" };
+  }
+
+  if (record.kind === "tailcat"
+    && typeof record.address === "string"
+    && record.address.startsWith("tc")
+    && record.address.length >= 20
+    && typeof record.remotePort === "number"
+    && Number.isInteger(record.remotePort)
+    && record.remotePort >= 1
+    && record.remotePort <= 65_535) {
+    return {
+      kind: "tailcat",
+      address: record.address,
+      remotePort: record.remotePort,
+    };
+  }
+
+  throw new Error("invalid Pi Remote pairing transport");
 }
 
 export function encodePairingBootstrap(
@@ -49,5 +89,11 @@ export function decodePairingBootstrap(
     throw new Error("invalid Pi Remote pairing invitation");
   }
 
-  return parsed as PairingBootstrap;
+  const transport = parseTransport(record.transport);
+  return {
+    version: 1,
+    relayUrl: record.relayUrl,
+    ...(transport ? { transport } : {}),
+    invitation: invitation as PairingInvitation,
+  };
 }
