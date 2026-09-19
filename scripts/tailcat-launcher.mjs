@@ -305,9 +305,9 @@ ensurePersistentKey(tailcatBin);
 rmSync(pairSocket, { force: true });
 
 console.log("");
-console.log("Pi Remote Tailcat");
-console.log("=================");
-console.log(`Relay: 127.0.0.1:${port} + [::1]:${port}`);
+console.log("Pi Remote");
+console.log("=========");
+console.log("Quick Connect: starting…");
 console.log(`Logs:  ${runtimeDir}`);
 console.log("");
 
@@ -325,10 +325,9 @@ function clearScreen() {
 }
 
 function printDashboard() {
-  console.log("Pi Remote Tailcat");
-  console.log("=================");
-  console.log("Status: Relay + Host ready");
-  console.log(`Relay:  127.0.0.1:${port} + [::1]:${port}`);
+  console.log("Pi Remote");
+  console.log("=========");
+  console.log("Status: Quick Connect ready");
   console.log(`Logs:   ${runtimeDir}`);
   console.log("");
 }
@@ -346,7 +345,7 @@ async function shutdown(exitCode = 0) {
   if (stopping) return;
   stopping = true;
   restoreTerminalInput();
-  console.log("\n[launcher] stopping Pi Remote Tailcat...");
+  console.log("\n[launcher] stopping Pi Remote...");
 
   for (const child of [host, relay]) {
     if (child && child.exitCode === null) child.kill("SIGTERM");
