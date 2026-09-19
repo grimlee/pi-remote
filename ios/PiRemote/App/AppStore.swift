@@ -338,8 +338,8 @@ final class AppStore {
                 // Host accepted the command; destroying this RPC client could
                 // discard the newly-created Pi session. Keep it alive and let
                 // the resume reconciliation establish the authoritative
-                // sessionId/state.
-                shouldRefreshAfterNewSession = false
+                // sessionId/state. Keep the pending list refresh armed so the
+                // session becomes visible as soon as that state arrives.
             } else {
                 rpcSnapshot = nil
                 rpcClient = nil
@@ -858,8 +858,21 @@ final class AppStore {
                 .stringValue {
                 activeRpcSessionID = sessionId
                 activeCacheSessionId = sessionId
-                if selectedSessionID == nil,
-                   !shouldRefreshAfterNewSession {
+
+                if shouldRefreshAfterNewSession {
+                    // A new Pi session is authoritative as soon as get_state
+                    // exposes its sessionId. Do not wait for an assistant
+                    // message to finish before refreshing the session list:
+                    // users may navigate back while the first response is
+                    // still streaming.
+                    shouldRefreshAfterNewSession = false
+                    selectedSessionID = sessionId
+                    Task { [weak self] in
+                        await self?.refreshSessionsUntilVisible(
+                            sessionId: sessionId
+                        )
+                    }
+                } else if selectedSessionID == nil {
                     selectedSessionID = sessionId
                 }
             }
@@ -878,20 +891,25 @@ final class AppStore {
                 messages: snapshot.messages
             )
 
-            if shouldRefreshAfterNewSession,
-               snapshot.messages.contains(where: { message in
-                   message.objectValue?["role"]?.stringValue
-                       == "assistant"
-               }) {
-                shouldRefreshAfterNewSession = false
-                selectedSessionID = sessionId
-                Task { [weak self] in
-                    await self?.refreshSessions()
-                }
-            }
-
         case let .disconnected(reason):
             sessionError = reason
+        }
+    }
+
+    private func refreshSessionsUntilVisible(
+        sessionId: String
+    ) async {
+        for attempt in 0..<8 {
+            await refreshSessions()
+
+            if sessions.contains(where: {
+                $0.instanceId == sessionId
+            }) {
+                return
+            }
+
+            guard attempt < 7 else { return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
     }
 
