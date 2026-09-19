@@ -14,6 +14,8 @@ struct PiRpcSnapshot: Sendable {
     var messageRevision: Int = 0
     var state: JSONValue?
     var availableModels: [PiModelOption] = []
+    var availableThinkingLevels: [String] = []
+    var availableCommands: [PiSlashCommandOption] = []
     var lastEvent: JSONValue?
     var uiRequest: JSONValue?
     var readOnly: Bool { false }
@@ -218,6 +220,58 @@ actor PiRpcClient {
         state["model"] = data
         snapshot.state = .object(state)
         emitSnapshot()
+
+        try await refreshThinkingLevels(prefix: "model")
+    }
+
+    func setThinkingLevel(_ level: String) async throws {
+        _ = try await sendRequest([
+            "type": .string("set_thinking_level"),
+            "level": .string(level)
+        ])
+
+        var state = snapshot.state?.objectValue ?? [:]
+        state["thinkingLevel"] = .string(level)
+        snapshot.state = .object(state)
+        emitSnapshot()
+    }
+
+    func compact(_ instructions: String?) async throws -> JSONValue {
+        var command: [String: JSONValue] = [
+            "type": .string("compact")
+        ]
+        if let instructions, !instructions.isEmpty {
+            command["customInstructions"] = .string(instructions)
+        }
+
+        let result = try await sendRequest(command)
+        try await refreshAuthoritativeState(prefix: "compact")
+        return result
+    }
+
+    func setSessionName(_ name: String) async throws {
+        _ = try await sendRequest([
+            "type": .string("set_session_name"),
+            "name": .string(name)
+        ])
+
+        var state = snapshot.state?.objectValue ?? [:]
+        state["sessionName"] = .string(name)
+        snapshot.state = .object(state)
+        emitSnapshot()
+    }
+
+    func sessionStats() async throws -> JSONValue {
+        try await sendRequest([
+            "type": .string("get_session_stats")
+        ])
+    }
+
+    func lastAssistantText() async throws -> String? {
+        let data = try await sendRequest([
+            "type": .string("get_last_assistant_text")
+        ])
+        return data.objectValue?["text"]?.stringValue
     }
 
     func receive(_ frame: PiRpcRelayFrame) throws {
@@ -362,6 +416,24 @@ actor PiRpcClient {
         try await sendCommand([
             "id": .string("\(prefix)-models-\(suffix)"),
             "type": .string("get_available_models")
+        ])
+        try await refreshThinkingLevels(
+            prefix: prefix,
+            suffix: suffix
+        )
+        try await sendCommand([
+            "id": .string("\(prefix)-commands-\(suffix)"),
+            "type": .string("get_commands")
+        ])
+    }
+
+    private func refreshThinkingLevels(
+        prefix: String,
+        suffix: String = UUID().uuidString
+    ) async throws {
+        try await sendCommand([
+            "id": .string("\(prefix)-thinking-\(suffix)"),
+            "type": .string("get_available_thinking_levels")
         ])
     }
 
@@ -558,6 +630,25 @@ actor PiRpcClient {
                             .localizedCaseInsensitiveCompare(
                                 $1.provider
                             ) == .orderedAscending
+                    }
+            } else if success,
+                      command == "get_available_thinking_levels",
+                      let levels = object["data"]?
+                        .objectValue?["levels"]?
+                        .arrayValue {
+                snapshot.availableThinkingLevels = levels
+                    .compactMap(\.stringValue)
+            } else if success,
+                      command == "get_commands",
+                      let commands = object["data"]?
+                        .objectValue?["commands"]?
+                        .arrayValue {
+                snapshot.availableCommands = commands
+                    .compactMap(PiSlashCommandOption.parse)
+                    .sorted {
+                        $0.name.localizedCaseInsensitiveCompare(
+                            $1.name
+                        ) == .orderedAscending
                     }
             } else {
                 snapshot.lastEvent = value
