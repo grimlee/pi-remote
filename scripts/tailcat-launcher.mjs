@@ -176,8 +176,21 @@ async function ensureTailcat() {
 
 function ensureNodeDependencies(directory, needsQr = false) {
   const tsx = path.join(directory, "node_modules", ".bin", "tsx");
-  const qr = path.join(directory, "node_modules", "qrcode-terminal");
-  if (existsSync(tsx) && (!needsQr || existsSync(qr))) return;
+  const terminalQr = path.join(
+    directory,
+    "node_modules",
+    "qrcode-terminal",
+  );
+  const svgQr = path.join(
+    directory,
+    "node_modules",
+    "qrcode",
+  );
+  if (existsSync(tsx)
+      && (!needsQr
+        || (existsSync(terminalQr) && existsSync(svgQr)))) {
+    return;
+  }
 
   console.log(`[setup] installing dependencies in ${path.basename(directory)}...`);
   runChecked(
