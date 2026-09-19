@@ -140,6 +140,17 @@ The dedicated `Tailcat iOS Experiment` GitHub Actions workflow verifies the
 native framework, PiRemoteCore tests, Xcode project generation, unsigned
 `iphoneos` build, and sideload IPA packaging.
 
+## iOS experiment isolation
+
+The Tailcat PoC intentionally uses a separate iOS identity from the main app:
+
+- bundle identifier: `top.grimlee.piremote.tailcat`;
+- display name: `Pi Remote Tailcat`;
+- Keychain service: `top.grimlee.piremote.tailcat.identity`.
+
+This lets the main Pi Remote app and the Tailcat PoC coexist on the same iPhone
+without sharing paired-host profiles, device identity, or machine grants.
+
 ## Compatibility
 
 `PI_REMOTE_TRANSPORT` defaults to `relay`. Existing WSS/Cloudflare behavior is
