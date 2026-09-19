@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   decodePairingBootstrap,
+  encodeCompressedPairingBootstrap,
   encodePairingBootstrap,
   relayClientUrl,
   type PairingBootstrap,
@@ -37,6 +38,26 @@ test("pairing bootstrap round trips and derives client relay endpoint", () => {
   const encoded = encodePairingBootstrap(bootstrap);
   assert.ok(encoded.startsWith("piremote-pair-v1."));
   assert.deepEqual(decodePairingBootstrap(encoded), bootstrap);
+});
+
+test("compressed pairing bootstrap round trips and is shorter", () => {
+  const bootstrap: PairingBootstrap = {
+    version: 1,
+    relayUrl: "ws://127.0.0.1:8791/v0/client",
+    transport: {
+      kind: "tailcat",
+      address: "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu",
+      remotePort: 8791,
+    },
+    invitation,
+  };
+
+  const legacy = encodePairingBootstrap(bootstrap);
+  const compressed = encodeCompressedPairingBootstrap(bootstrap);
+
+  assert.ok(compressed.startsWith("piremote-pair-v1z."));
+  assert.ok(compressed.length < legacy.length);
+  assert.deepEqual(decodePairingBootstrap(compressed), bootstrap);
 });
 
 test("pairing bootstrap carries Tailcat underlay metadata", () => {
