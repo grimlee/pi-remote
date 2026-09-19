@@ -36,3 +36,8 @@ run/
 *.key
 *.sock
 .secrets/
+
+
+# Experimental Tailcat native build outputs
+native/tailcat-ios/build/
+ios/Vendor/PiRemoteTailcat.xcframework/
