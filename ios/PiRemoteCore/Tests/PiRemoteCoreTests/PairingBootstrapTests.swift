@@ -31,6 +31,40 @@ func pairingBootstrapParsesRoundTripPayload() throws {
 }
 
 @Test
+func pairingBootstrapAcceptsTailcatLoopbackTransport() throws {
+    let bootstrap = PairingBootstrap(
+        relayUrl: "ws://127.0.0.1:8780/v0/client",
+        transport: .tailcat(
+            address: "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu",
+            remotePort: 8780
+        ),
+        invitation: PairingInvitation(
+            pairingId: "pair_tailcat",
+            machine: PairingMachineIdentity(
+                id: "machine_tailcat",
+                name: "omarchy",
+                platform: "linux",
+                signingPublicKey: "signing",
+                keyAgreementPublicKey: "agreement",
+                fingerprint: "fingerprint"
+            ),
+            expiresAt: "2026-09-18T00:02:00.000Z",
+            secret: Data(repeating: 7, count: 32)
+                .base64URLEncodedString()
+        )
+    )
+
+    let payload = PairingBootstrap.prefix
+        + (try JSONEncoder().encode(bootstrap))
+            .base64URLEncodedString()
+    let parsed = try PairingBootstrap.parse(payload)
+
+    #expect(parsed == bootstrap)
+    #expect(parsed.transport?.kind == .tailcat)
+    #expect(parsed.transport?.remotePort == 8780)
+}
+
+@Test
 func pairingAcceptanceRequiresHostAndGrantSignatures() throws {
     let hostSigning = Curve25519.Signing.PrivateKey()
     let hostAgreement = Curve25519.KeyAgreement.PrivateKey()
@@ -142,7 +176,6 @@ func pairingAcceptanceRequiresHostAndGrantSignatures() throws {
     )
 }
 
-
 @Test
 func pairingBootstrapRejectsInsecureRelayURL() throws {
     let bootstrap = PairingBootstrap(
@@ -151,6 +184,39 @@ func pairingBootstrapRejectsInsecureRelayURL() throws {
             pairingId: "pair_test",
             machine: PairingMachineIdentity(
                 id: "machine_test",
+                name: "omarchy",
+                platform: "linux",
+                signingPublicKey: "signing",
+                keyAgreementPublicKey: "agreement",
+                fingerprint: "fingerprint"
+            ),
+            expiresAt: "2026-09-18T00:02:00.000Z",
+            secret: Data(repeating: 7, count: 32)
+                .base64URLEncodedString()
+        )
+    )
+
+    let encoded = PairingBootstrap.prefix
+        + (try JSONEncoder().encode(bootstrap))
+            .base64URLEncodedString()
+
+    #expect(throws: (any Error).self) {
+        try PairingBootstrap.parse(encoded)
+    }
+}
+
+@Test
+func pairingBootstrapRejectsTailcatWithNonLoopbackRelayURL() throws {
+    let bootstrap = PairingBootstrap(
+        relayUrl: "ws://relay.example:8780/v0/client",
+        transport: .tailcat(
+            address: "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu",
+            remotePort: 8780
+        ),
+        invitation: PairingInvitation(
+            pairingId: "pair_tailcat",
+            machine: PairingMachineIdentity(
+                id: "machine_tailcat",
                 name: "omarchy",
                 platform: "linux",
                 signingPublicKey: "signing",
