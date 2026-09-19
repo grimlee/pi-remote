@@ -8,6 +8,21 @@ export interface ControlAuthorization {
   signature: string;
 }
 
+export interface PerformanceDiagnosticsReport {
+  sessionId: string;
+  windowStartedAtMs: number;
+  windowDurationMs: number;
+  displayFrames: number;
+  slowFrames25Ms: number;
+  slowFrames50Ms: number;
+  dragFrames: number;
+  dragSlowFrames25Ms: number;
+  maxFrameGapMs: number;
+  snapshotCount: number;
+  liveCharacters: number;
+  isStreaming: boolean;
+}
+
 export type SignedControlPayload =
   | { op: "sessions.list" }
   | {
@@ -16,6 +31,10 @@ export type SignedControlPayload =
       generation: number;
       access: SessionAccess;
       resumeFromHostSeq?: number;
+    }
+  | {
+      op: "diagnostics.report";
+      report: PerformanceDiagnosticsReport;
     };
 
 export interface SignedControlRequest {
@@ -47,6 +66,26 @@ export function controlRequestMessage(
 
   if (request.payload.op === "sessions.list") {
     return Buffer.concat(base);
+  }
+
+  if (request.payload.op === "diagnostics.report") {
+    const report = request.payload.report;
+    return Buffer.concat([
+      ...base,
+      Buffer.from([0]),
+      field(report.sessionId), Buffer.from([0]),
+      field(String(report.windowStartedAtMs)), Buffer.from([0]),
+      field(String(report.windowDurationMs)), Buffer.from([0]),
+      field(String(report.displayFrames)), Buffer.from([0]),
+      field(String(report.slowFrames25Ms)), Buffer.from([0]),
+      field(String(report.slowFrames50Ms)), Buffer.from([0]),
+      field(String(report.dragFrames)), Buffer.from([0]),
+      field(String(report.dragSlowFrames25Ms)), Buffer.from([0]),
+      field(String(report.maxFrameGapMs)), Buffer.from([0]),
+      field(String(report.snapshotCount)), Buffer.from([0]),
+      field(String(report.liveCharacters)), Buffer.from([0]),
+      field(report.isStreaming ? "1" : "0"),
+    ]);
   }
 
   const link = [
