@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,8 @@ type tunnel struct {
 
 	lastErrorMu sync.Mutex
 	lastError   string
+	eventsMu    sync.Mutex
+	events      []diagnosticsEvent
 }
 
 type countingWriter struct {
@@ -48,6 +51,12 @@ func (w countingWriter) Write(p []byte) (int, error) {
 		w.counter.Add(int64(n))
 	}
 	return n, err
+}
+
+type diagnosticsEvent struct {
+	At     string `json:"at"`
+	Event  string `json:"event"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type diagnosticsProbe struct {
@@ -70,7 +79,10 @@ type diagnosticsSnapshot struct {
 	BytesToPhone        int64             `json:"bytesToPhone"`
 	LastError           string            `json:"lastError,omitempty"`
 	Probe               *diagnosticsProbe `json:"probe,omitempty"`
+	Events              []diagnosticsEvent `json:"events,omitempty"`
 }
+
+var tailcatSecretPattern = regexp.MustCompile(`tc[A-Za-z0-9_-]{20,}`)
 
 var (
 	tunnelsMu    sync.Mutex
@@ -106,17 +118,44 @@ func (t *tunnel) errorString() string {
 	return t.lastError
 }
 
+func redactDiagnosticDetail(value string) string {
+	return tailcatSecretPattern.ReplaceAllString(value, "tc[REDACTED]")
+}
+
+func (t *tunnel) addEvent(event, detail string) {
+	t.eventsMu.Lock()
+	defer t.eventsMu.Unlock()
+	t.events = append(t.events, diagnosticsEvent{
+		At:     time.Now().UTC().Format(time.RFC3339Nano),
+		Event:  event,
+		Detail: redactDiagnosticDetail(detail),
+	})
+	if len(t.events) > 64 {
+		t.events = append([]diagnosticsEvent(nil), t.events[len(t.events)-64:]...)
+	}
+}
+
+func (t *tunnel) eventSnapshot() []diagnosticsEvent {
+	t.eventsMu.Lock()
+	defer t.eventsMu.Unlock()
+	return append([]diagnosticsEvent(nil), t.events...)
+}
+
 func proxyConnection(ctx context.Context, t *tunnel, local net.Conn) {
 	defer local.Close()
 
+	t.addEvent("dial.start", fmt.Sprintf("remotePort=%d", t.remotePort))
 	remote, err := t.client.DialTCPPort(ctx, t.remotePort)
 	if err != nil {
 		t.dialFailures.Add(1)
-		t.setError(fmt.Errorf("tailcat dial failed: %w", err))
-		setLastError(fmt.Errorf("tailcat dial failed: %w", err))
+		wrapped := fmt.Errorf("tailcat dial failed: %w", err)
+		t.setError(wrapped)
+		setLastError(wrapped)
+		t.addEvent("dial.fail", wrapped.Error())
 		return
 	}
 	t.dialSuccesses.Add(1)
+	t.addEvent("dial.ok", fmt.Sprintf("remotePort=%d", t.remotePort))
 	t.activeConnections.Add(1)
 	t.setError(nil)
 	defer t.activeConnections.Add(-1)
@@ -140,9 +179,14 @@ func proxyConnection(ctx context.Context, t *tunnel, local net.Conn) {
 
 	select {
 	case <-ctx.Done():
+		t.addEvent("connection.closed", "context cancelled")
 	case err := <-errc:
 		if err != nil {
-			t.setError(fmt.Errorf("tailcat proxy failed: %w", err))
+			wrapped := fmt.Errorf("tailcat proxy failed: %w", err)
+			t.setError(wrapped)
+			t.addEvent("connection.closed", wrapped.Error())
+		} else {
+			t.addEvent("connection.closed", "stream closed")
 		}
 	}
 }
@@ -162,6 +206,7 @@ func acceptLoop(ctx context.Context, t *tunnel) {
 			}
 		}
 		t.acceptedConnections.Add(1)
+		t.addEvent("local.accept", "loopback WebSocket connection accepted")
 		go proxyConnection(ctx, t, local)
 	}
 }
@@ -172,6 +217,7 @@ func probeTunnel(t *tunnel) *diagnosticsProbe {
 
 	res, err := t.client.DiscoPing(ctx)
 	if err != nil {
+		t.addEvent("probe.fail", err.Error())
 		return &diagnosticsProbe{
 			OK:    false,
 			Error: err.Error(),
@@ -184,6 +230,7 @@ func probeTunnel(t *tunnel) *diagnosticsProbe {
 	}
 	if res.Endpoint != "" {
 		probe.Path = "direct"
+		t.addEvent("probe.ok", fmt.Sprintf("path=direct latencyMs=%.1f", probe.LatencyMS))
 		return probe
 	}
 
@@ -192,6 +239,10 @@ func probeTunnel(t *tunnel) *diagnosticsProbe {
 	if probe.DERPRegion == "" {
 		probe.DERPRegion = res.DERPRegionID.String()
 	}
+	t.addEvent(
+		"probe.ok",
+		fmt.Sprintf("path=derp region=%s latencyMs=%.1f", probe.DERPRegion, probe.LatencyMS),
+	)
 	return probe
 }
 
@@ -207,6 +258,7 @@ func snapshot(t *tunnel, withProbe bool) diagnosticsSnapshot {
 		BytesToHost:         t.bytesToHost.Load(),
 		BytesToPhone:        t.bytesToPhone.Load(),
 		LastError:           t.errorString(),
+		Events:              t.eventSnapshot(),
 	}
 	if withProbe {
 		value.Probe = probeTunnel(t)
@@ -257,6 +309,13 @@ func piremote_tailcat_start(address *C.char, remotePort C.int) C.longlong {
 		remotePort: uint16(port),
 		localPort:  tcpAddr.Port,
 	}
+	client.Logf = func(format string, args ...any) {
+		t.addEvent("tailcat.log", fmt.Sprintf(format, args...))
+	}
+	t.addEvent(
+		"bridge.start",
+		fmt.Sprintf("localPort=%d remotePort=%d", tcpAddr.Port, port),
+	)
 
 	handle := nextHandle.Add(1)
 	if handle <= 0 {
