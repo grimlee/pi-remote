@@ -113,7 +113,7 @@ test("control request canonical bytes match Swift vector", () => {
       "51",
       "8192",
       "1",
-    ].join("\\0"),
+    ].join("\u0000"),
   );
 });
 
