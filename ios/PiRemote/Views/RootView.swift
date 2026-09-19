@@ -913,7 +913,12 @@ private struct SessionDetailView: View {
         // Pi's get_commands RPC and intentionally pass through as /... prompt
         // text so Pi performs its own expansion/dispatch.
         commandNotice = nil
-        await store.sendPrompt()
+        let originalDraft = store.composerText
+        store.composerText = ""
+        let accepted = await store.sendPrompt(text)
+        if !accepted && store.composerText.isEmpty {
+            store.composerText = originalDraft
+        }
     }
 
     @ViewBuilder
