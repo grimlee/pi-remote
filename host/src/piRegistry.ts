@@ -326,6 +326,9 @@ export class PiRegistry {
       && channel.deviceId === context.deviceId
     );
     if (existing) {
+      console.log(
+        `Pi RPC link reuse [${existing.channelId}] session=${session.instanceId}`,
+      );
       this.#armIdleTimer(existing);
       if (context.resumeFromHostSeq !== undefined) {
         return this.#resumeLinkForChannel(
@@ -371,6 +374,10 @@ export class PiRegistry {
       throw new PiRegistryError("pi_command_failed", "Could not start Pi RPC", { cause: error });
     }
 
+    console.log(
+      `Pi RPC spawn session=${session.instanceId} cwd=${cwd}`,
+    );
+
     const channel: RpcChannel = {
       channelId,
       instanceId: session.instanceId,
@@ -410,7 +417,10 @@ export class PiRegistry {
       if (line) console.error(`Pi RPC stderr [${channelId}]: ${line}`);
     });
     child.on("error", error => {
-      console.error(`Pi RPC process error [${channelId}]:`, error.message);
+      console.error(
+        `Pi RPC process error [${channelId}] session=${channel.instanceId}:`,
+        error.message,
+      );
       this.#sendHostPayload(channel, {
         type: "piremote.channel_closed",
         error: "Pi RPC process failed to start",
@@ -418,6 +428,9 @@ export class PiRegistry {
       this.#deleteChannel(channelId);
     });
     child.on("exit", (code, signal) => {
+      console.log(
+        `Pi RPC process exit [${channelId}] session=${channel.instanceId} code=${code ?? "-"} signal=${signal ?? "-"}`,
+      );
       if (this.#channels.get(channelId) !== channel) return;
       const tail = channel.stdoutBuffer + channel.stdoutDecoder.end();
       if (tail.trim()) this.#emitPiLine(channel, tail);
@@ -565,7 +578,10 @@ export class PiRegistry {
     this.#armIdleTimer(channel);
 
     if (record.type === "piremote.close") {
-      this.#terminateChannel(channel.channelId);
+      console.log(
+        `Pi RPC close requested [${channel.channelId}] session=${channel.instanceId}`,
+      );
+      this.#terminateChannel(channel.channelId, "client_close");
       return;
     }
 
@@ -587,7 +603,7 @@ export class PiRegistry {
         type: "piremote.channel_closed",
         error: "Pi RPC stdin is not writable",
       });
-      this.#terminateChannel(channel.channelId);
+      this.#terminateChannel(channel.channelId, "stdin_not_writable");
       return;
     }
 
@@ -605,7 +621,10 @@ export class PiRegistry {
             type: "piremote.channel_closed",
             error: "Pi RPC command write failed",
           });
-          this.#terminateChannel(channel.channelId);
+          this.#terminateChannel(
+            channel.channelId,
+            "stdin_write_failed",
+          );
           return;
         }
 
@@ -622,7 +641,7 @@ export class PiRegistry {
     clearInterval(this.#metricsTimer);
     this.#flushMetrics();
     for (const channelId of [...this.#channels.keys()]) {
-      this.#terminateChannel(channelId);
+      this.#terminateChannel(channelId, "host_stop");
     }
   }
 
@@ -686,8 +705,36 @@ export class PiRegistry {
     } catch {
       return;
     }
-    if (!asRecord(value)) return;
-    this.#sendHostPayload(channel, value as Record<string, unknown>);
+    const record = asRecord(value);
+    if (!record) return;
+
+    this.#trackSessionIdentity(channel, record);
+    this.#sendHostPayload(channel, record);
+  }
+
+  #trackSessionIdentity(
+    channel: RpcChannel,
+    value: Record<string, unknown>,
+  ): void {
+    if (value.type !== "response"
+      || value.command !== "get_state"
+      || value.success !== true) {
+      return;
+    }
+
+    const data = asRecord(value.data);
+    const sessionId = data?.sessionId;
+    if (typeof sessionId !== "string"
+      || !sessionId
+      || sessionId === channel.instanceId) {
+      return;
+    }
+
+    const previous = channel.instanceId;
+    channel.instanceId = sessionId;
+    console.log(
+      `Pi RPC session rebind [${channel.channelId}] ${previous} -> ${sessionId}`,
+    );
   }
 
   #sendHostPayload(channel: RpcChannel, value: Record<string, unknown>): void {
@@ -792,15 +839,21 @@ export class PiRegistry {
     const previous = this.#idleTimers.get(channel.channelId);
     if (previous) clearTimeout(previous);
     const timer = setTimeout(() => {
-      this.#terminateChannel(channel.channelId);
+      this.#terminateChannel(channel.channelId, "idle_timeout");
     }, this.#idleTimeoutMs);
     timer.unref();
     this.#idleTimers.set(channel.channelId, timer);
   }
 
-  #terminateChannel(channelId: string): void {
+  #terminateChannel(
+    channelId: string,
+    reason = "unspecified",
+  ): void {
     const channel = this.#channels.get(channelId);
     if (!channel) return;
+    console.log(
+      `Pi RPC terminate [${channelId}] session=${channel.instanceId} reason=${reason}`,
+    );
     this.#deleteChannel(channelId);
     if (!channel.process.stdin.destroyed) channel.process.stdin.end();
     if (!channel.process.killed) channel.process.kill("SIGTERM");
