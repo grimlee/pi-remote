@@ -61,6 +61,14 @@ struct RootView: View {
         .task {
             await store.start()
         }
+        .onChange(of: path) { oldPath, newPath in
+            guard !oldPath.isEmpty, newPath.isEmpty else {
+                return
+            }
+            Task {
+                await store.refreshSessionsForList()
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             Task {
                 switch phase {
