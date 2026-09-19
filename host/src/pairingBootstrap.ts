@@ -1,3 +1,4 @@
+import { deflateSync, inflateSync } from "node:zlib";
 import type { PairingInvitation } from "./pairing.js";
 
 export interface RelayPairingTransport {
@@ -22,6 +23,8 @@ export interface PairingBootstrap {
 }
 
 const PREFIX = "piremote-pair-v1.";
+const COMPRESSED_PREFIX = "piremote-pair-v1z.";
+const MAX_BOOTSTRAP_BYTES = 64 * 1024;
 
 export function relayClientUrl(hostUrl: string): string {
   const url = new URL(hostUrl);
@@ -65,16 +68,39 @@ export function encodePairingBootstrap(
     + Buffer.from(JSON.stringify(bootstrap), "utf8").toString("base64url");
 }
 
+export function encodeCompressedPairingBootstrap(
+  bootstrap: PairingBootstrap,
+): string {
+  const raw = Buffer.from(JSON.stringify(bootstrap), "utf8");
+  const compressed = deflateSync(raw, { level: 9 });
+  return COMPRESSED_PREFIX + compressed.toString("base64url");
+}
+
 export function decodePairingBootstrap(
   value: string,
 ): PairingBootstrap {
   const text = value.trim();
-  if (!text.startsWith(PREFIX)) {
+
+  let raw: Buffer;
+  if (text.startsWith(COMPRESSED_PREFIX)) {
+    const compressed = Buffer.from(
+      text.slice(COMPRESSED_PREFIX.length),
+      "base64url",
+    );
+    raw = inflateSync(compressed, {
+      maxOutputLength: MAX_BOOTSTRAP_BYTES,
+    });
+  } else if (text.startsWith(PREFIX)) {
+    raw = Buffer.from(text.slice(PREFIX.length), "base64url");
+  } else {
     throw new Error("invalid Pi Remote pairing bootstrap prefix");
   }
 
-  const raw = Buffer.from(text.slice(PREFIX.length), "base64url").toString("utf8");
-  const parsed: unknown = JSON.parse(raw);
+  if (raw.length === 0 || raw.length > MAX_BOOTSTRAP_BYTES) {
+    throw new Error("invalid Pi Remote pairing bootstrap size");
+  }
+
+  const parsed: unknown = JSON.parse(raw.toString("utf8"));
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("invalid Pi Remote pairing bootstrap");
   }
