@@ -1,3 +1,4 @@
+import Compression
 import CryptoKit
 import Foundation
 
@@ -84,6 +85,8 @@ public struct PairingTransport: Codable, Hashable, Sendable {
 
 public struct PairingBootstrap: Codable, Hashable, Sendable {
     public static let prefix = "piremote-pair-v1."
+    public static let compressedPrefix = "piremote-pair-v1z."
+    private static let maxDecodedBytes = 64 * 1024
 
     public let version: Int
     public let relayUrl: String
@@ -104,16 +107,40 @@ public struct PairingBootstrap: Codable, Hashable, Sendable {
 
     public static func parse(_ text: String) throws -> PairingBootstrap {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(prefix) else {
+
+        let data: Data
+        if trimmed.hasPrefix(compressedPrefix) {
+            let encoded = String(
+                trimmed.dropFirst(compressedPrefix.count)
+            )
+            guard let compressed = Data(
+                base64URLEncoded: encoded
+            ) else {
+                throw PairingBootstrapError.invalidEncoding
+            }
+            data = try decompressZlib(compressed)
+        } else if trimmed.hasPrefix(prefix) {
+            let encoded = String(trimmed.dropFirst(prefix.count))
+            guard let decoded = Data(
+                base64URLEncoded: encoded
+            ) else {
+                throw PairingBootstrapError.invalidEncoding
+            }
+            data = decoded
+        } else {
             throw PairingBootstrapError.invalidPrefix
         }
 
-        let encoded = String(trimmed.dropFirst(prefix.count))
-        guard let data = Data(base64URLEncoded: encoded) else {
+        guard !data.isEmpty,
+              data.count <= maxDecodedBytes
+        else {
             throw PairingBootstrapError.invalidEncoding
         }
 
-        let value = try JSONDecoder().decode(PairingBootstrap.self, from: data)
+        let value = try JSONDecoder().decode(
+            PairingBootstrap.self,
+            from: data
+        )
         guard value.version == 1,
               value.invitation.version == 1,
               value.invitation.pairingId.hasPrefix("pair_"),
@@ -148,6 +175,51 @@ public struct PairingBootstrap: Codable, Hashable, Sendable {
         }
 
         return value
+    }
+
+    private static func decompressZlib(
+        _ compressed: Data
+    ) throws -> Data {
+        guard !compressed.isEmpty else {
+            throw PairingBootstrapError.invalidEncoding
+        }
+
+        var capacity = max(4_096, compressed.count * 4)
+        while capacity <= maxDecodedBytes {
+            var output = Data(count: capacity)
+            let decodedSize = output.withUnsafeMutableBytes {
+                destination in
+                compressed.withUnsafeBytes { source in
+                    guard let destinationBase = destination
+                        .bindMemory(to: UInt8.self)
+                        .baseAddress,
+                          let sourceBase = source
+                            .bindMemory(to: UInt8.self)
+                            .baseAddress
+                    else {
+                        return 0
+                    }
+
+                    return compression_decode_buffer(
+                        destinationBase,
+                        capacity,
+                        sourceBase,
+                        compressed.count,
+                        nil,
+                        COMPRESSION_ZLIB
+                    )
+                }
+            }
+
+            if decodedSize > 0 {
+                output.count = decodedSize
+                return output
+            }
+
+            capacity *= 2
+        }
+
+        throw PairingBootstrapError.invalidEncoding
     }
 }
 
