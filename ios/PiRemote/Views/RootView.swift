@@ -287,11 +287,16 @@ private struct SessionRow: View {
 
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     let session: RemoteSession
     let startFresh: Bool
 
     @State private var editorResponse = ""
     @State private var showingModelPicker = false
+    @State private var showingThinkingPicker = false
+    @State private var showingCommands = false
+    @State private var commandResult: PiCommandResultPayload?
+    @State private var commandNotice: String?
 
     var body: some View {
         @Bindable var store = store
@@ -339,52 +344,73 @@ private struct SessionDetailView: View {
 
             Divider()
 
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField(
-                    "Message Pi",
-                    text: $store.composerText,
-                    axis: .vertical
-                )
-                .lineLimit(1...6)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(.quaternary)
-                .clipShape(
-                    RoundedRectangle(cornerRadius: 20)
-                )
-
-                Button {
-                    Task {
-                        if isStreaming {
-                            await store.abort()
-                        } else {
-                            await store.sendPrompt()
-                        }
+            VStack(spacing: 0) {
+                if !slashSuggestions.isEmpty {
+                    SlashCommandSuggestionsView(
+                        commands: slashSuggestions
+                    ) { command in
+                        selectSlashCommand(command)
                     }
-                } label: {
-                    Image(
-                        systemName: isStreaming
-                            ? "stop.fill"
-                            : "arrow.up"
-                    )
-                    .font(
-                        .system(
-                            size: 15,
-                            weight: .bold
-                        )
-                    )
-                    .frame(width: 34, height: 34)
+
+                    Divider()
                 }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.circle)
-                .disabled(
-                    isStreaming
-                        ? !canWrite
-                        : !canSend
-                )
+
+                if let commandNotice {
+                    Text(commandNotice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                }
+
+                HStack(alignment: .bottom, spacing: 10) {
+                    TextField(
+                        "Message Pi",
+                        text: $store.composerText,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...6)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.quaternary)
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: 20)
+                    )
+
+                    Button {
+                        Task {
+                            if sendButtonIsAbort {
+                                await store.abort()
+                            } else {
+                                await submitComposer()
+                            }
+                        }
+                    } label: {
+                        Image(
+                            systemName: sendButtonIsAbort
+                                ? "stop.fill"
+                                : "arrow.up"
+                        )
+                        .font(
+                            .system(
+                                size: 15,
+                                weight: .bold
+                            )
+                        )
+                        .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.circle)
+                    .disabled(
+                        sendButtonIsAbort
+                            ? !canWrite
+                            : !canSend
+                    )
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
             .background(.bar)
         }
         .navigationTitle(conversationTitle)
@@ -410,6 +436,27 @@ private struct SessionDetailView: View {
         }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
+        }
+        .sheet(isPresented: $showingThinkingPicker) {
+            PiThinkingPickerView(
+                levels: store.rpcSnapshot?
+                    .availableThinkingLevels ?? [],
+                current: currentThinkingLevel
+            ) { level in
+                Task {
+                    await store.setThinkingLevel(level)
+                }
+            }
+        }
+        .sheet(isPresented: $showingCommands) {
+            PiCommandBrowserView(
+                commands: allSlashCommands
+            ) { command in
+                selectSlashCommand(command)
+            }
+        }
+        .sheet(item: $commandResult) { payload in
+            PiCommandResultView(payload: payload)
         }
         .task(
             id: session.instanceId
@@ -474,6 +521,195 @@ private struct SessionDetailView: View {
                     in: .whitespacesAndNewlines
                 )
                 .isEmpty
+    }
+
+    private var sendButtonIsAbort: Bool {
+        isStreaming && !composerIsSlashCommand
+    }
+
+    private var composerIsSlashCommand: Bool {
+        store.composerText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .hasPrefix("/")
+    }
+
+    private var currentThinkingLevel: String? {
+        store.rpcSnapshot?
+            .state?
+            .objectValue?["thinkingLevel"]?
+            .stringValue
+    }
+
+    private var allSlashCommands: [PiSlashCommandOption] {
+        var seen = Set<String>()
+        var result: [PiSlashCommandOption] = []
+
+        for command in PiSlashCommandOption.remoteBuiltins
+            + (store.rpcSnapshot?.availableCommands ?? []) {
+            let key = command.name.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(command)
+        }
+
+        return result.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name)
+                == .orderedAscending
+        }
+    }
+
+    private var slashSuggestions: [PiSlashCommandOption] {
+        let text = store.composerText
+        guard text.hasPrefix("/") else { return [] }
+
+        let body = String(text.dropFirst())
+        guard !body.contains(where: { $0.isWhitespace }) else {
+            return []
+        }
+
+        let query = body.lowercased()
+        return Array(
+            allSlashCommands
+                .filter {
+                    query.isEmpty
+                        || $0.name.lowercased().hasPrefix(query)
+                }
+                .prefix(8)
+        )
+    }
+
+    private func selectSlashCommand(
+        _ command: PiSlashCommandOption
+    ) {
+        commandNotice = nil
+        store.composerText = command.invocation + " "
+    }
+
+    private func submitComposer() async {
+        let text = store.composerText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        guard text.hasPrefix("/") else {
+            commandNotice = nil
+            await store.sendPrompt()
+            return
+        }
+
+        let commandText = String(text.dropFirst())
+        let pieces = commandText.split(
+            maxSplits: 1,
+            whereSeparator: { $0.isWhitespace }
+        )
+        guard let first = pieces.first else { return }
+
+        let name = first.lowercased()
+        let arguments = pieces.count > 1
+            ? String(pieces[1]).trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            : ""
+
+        if PiSlashCommandOption.adaptedBuiltinNames.contains(name) {
+            if isStreaming,
+               !["copy", "commands", "help"].contains(name) {
+                commandNotice = "Finish or stop the current Pi run before using /\(name)."
+                return
+            }
+
+            switch name {
+            case "model":
+                store.composerText = ""
+                commandNotice = nil
+                showingModelPicker = true
+
+            case "thinking":
+                if arguments.isEmpty {
+                    store.composerText = ""
+                    commandNotice = nil
+                    showingThinkingPicker = true
+                } else if store.rpcSnapshot?
+                    .availableThinkingLevels
+                    .contains(arguments) == true {
+                    store.composerText = ""
+                    await store.setThinkingLevel(arguments)
+                    commandNotice = "Thinking level: \(arguments)"
+                } else {
+                    let levels = store.rpcSnapshot?
+                        .availableThinkingLevels
+                        .joined(separator: ", ") ?? ""
+                    commandNotice = levels.isEmpty
+                        ? "Pi did not report available thinking levels."
+                        : "Thinking levels: \(levels)"
+                }
+
+            case "compact":
+                store.composerText = ""
+                let result = await store.compactContext(
+                    arguments.isEmpty ? nil : arguments
+                )
+                if result != nil {
+                    commandNotice = "Context compacted."
+                }
+
+            case "name":
+                guard !arguments.isEmpty else {
+                    commandNotice = "Usage: /name <session name>"
+                    return
+                }
+                store.composerText = ""
+                if await store.setSessionName(arguments) {
+                    commandNotice = "Session renamed."
+                }
+
+            case "session":
+                store.composerText = ""
+                if let value = await store.fetchSessionStats() {
+                    commandResult = PiCommandResultPayload(
+                        title: "Session",
+                        value: value
+                    )
+                }
+
+            case "copy":
+                store.composerText = ""
+                if let value = await store.fetchLastAssistantText(),
+                   !value.isEmpty {
+                    UIPasteboard.general.string = value
+                    commandNotice = "Copied the last assistant response."
+                } else {
+                    commandNotice = "There is no assistant response to copy."
+                }
+
+            case "resume":
+                store.composerText = ""
+                dismiss()
+
+            case "new":
+                store.composerText = ""
+                await store.createNewSession(from: session)
+                commandNotice = "Started a fresh Pi session."
+
+            case "commands", "help":
+                store.composerText = ""
+                commandNotice = nil
+                showingCommands = true
+
+            default:
+                break
+            }
+            return
+        }
+
+        if PiSlashCommandOption.knownTUIBuiltins.contains(name) {
+            commandNotice = "/\(name) is a Pi TUI command that Pi Remote has not adapted yet."
+            return
+        }
+
+        // Extension commands, prompt templates and skills are discovered from
+        // Pi's get_commands RPC and intentionally pass through as /... prompt
+        // text so Pi performs its own expansion/dispatch.
+        commandNotice = nil
+        await store.sendPrompt()
     }
 
     @ViewBuilder
