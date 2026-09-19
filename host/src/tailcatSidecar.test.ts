@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   extractTailcatAddress,
+  redactTailcatSecrets,
   tailcatServeArgs,
 } from "./tailcatSidecar.js";
 
@@ -25,8 +26,25 @@ test("tailcatServeArgs exposes only the loopback relay port", () => {
     tailcatServeArgs({ relayPort: 8780, key: "piremote" }),
     ["serve", "--full-address", "--key=piremote", "8780"],
   );
+  assert.deepEqual(
+    tailcatServeArgs({
+      relayPort: 8780,
+      key: "piremote",
+      verbose: true,
+    }),
+    ["--verbose", "serve", "--full-address", "--key=piremote", "8780"],
+  );
   assert.throws(
     () => tailcatServeArgs({ relayPort: 0 }),
     /valid TCP port/,
+  );
+});
+
+
+test("redactTailcatSecrets hides bearer capabilities in trace logs", () => {
+  const secret = "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu";
+  assert.equal(
+    redactTailcatSecrets(`server listening at ${secret}`),
+    "server listening at tc[REDACTED]",
   );
 });
