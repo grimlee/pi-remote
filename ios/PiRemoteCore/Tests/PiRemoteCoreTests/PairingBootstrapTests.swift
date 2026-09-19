@@ -1,3 +1,4 @@
+import Compression
 import CryptoKit
 import Foundation
 import Testing
@@ -28,6 +29,70 @@ func pairingBootstrapParsesRoundTripPayload() throws {
         + encodedData.base64URLEncodedString()
 
     #expect(try PairingBootstrap.parse(payload) == bootstrap)
+}
+
+@Test
+func compressedPairingBootstrapParsesRoundTripPayload() throws {
+    let bootstrap = PairingBootstrap(
+        relayUrl: "ws://127.0.0.1:8791/v0/client",
+        transport: .tailcat(
+            address: "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu",
+            remotePort: 8791
+        ),
+        invitation: PairingInvitation(
+            pairingId: "pair_compressed",
+            machine: PairingMachineIdentity(
+                id: "machine_compressed",
+                name: "omarchy",
+                platform: "linux",
+                signingPublicKey: "signing",
+                keyAgreementPublicKey: "agreement",
+                fingerprint: "fingerprint"
+            ),
+            expiresAt: "2026-09-19T10:20:00.000Z",
+            secret: Data(repeating: 3, count: 32)
+                .base64URLEncodedString()
+        )
+    )
+
+    let encoded = try JSONEncoder().encode(bootstrap)
+    let compressed = try zlibCompress(encoded)
+    let payload = PairingBootstrap.compressedPrefix
+        + compressed.base64URLEncodedString()
+
+    #expect(try PairingBootstrap.parse(payload) == bootstrap)
+}
+
+private func zlibCompress(_ data: Data) throws -> Data {
+    var output = Data(count: data.count + 256)
+    let encodedSize = output.withUnsafeMutableBytes { destination in
+        data.withUnsafeBytes { source in
+            guard let destinationBase = destination
+                .bindMemory(to: UInt8.self)
+                .baseAddress,
+                  let sourceBase = source
+                    .bindMemory(to: UInt8.self)
+                    .baseAddress
+            else {
+                return 0
+            }
+
+            return compression_encode_buffer(
+                destinationBase,
+                output.count,
+                sourceBase,
+                data.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+    }
+
+    guard encodedSize > 0 else {
+        throw PairingBootstrapError.invalidEncoding
+    }
+    output.count = encodedSize
+    return output
 }
 
 @Test
