@@ -119,6 +119,7 @@ final class AppStore {
                 hostName: acceptance.machine.name
             )
         } catch {
+            await tailcatTransport.stop()
             pairingError = error.localizedDescription
             connectionState = profile == nil ? .unpaired : .disconnected
         }
