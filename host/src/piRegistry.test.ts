@@ -192,6 +192,12 @@ process.stdin.on("data", chunk => {
     const timer = setTimeout(() => reject(new Error("timed out waiting for Pi RPC response")), 3_000);
     timer.unref();
   });
+  let resolveAck!: (value: Record<string, unknown>) => void;
+  const clientAck = new Promise<Record<string, unknown>>((resolve, reject) => {
+    resolveAck = resolve;
+    const timer = setTimeout(() => reject(new Error("timed out waiting for Pi Remote client ACK")), 3_000);
+    timer.unref();
+  });
 
   let capabilityKey: Buffer | null = null;
   registry.setOutboundFrameHandler(frame => {
@@ -201,6 +207,10 @@ process.stdin.on("data", chunk => {
     ) as Record<string, unknown>;
     if (decoded.type === "response" && decoded.command === "get_state") {
       resolveResponse(decoded);
+    }
+    if (decoded.type === "piremote.client_ack"
+      && decoded.commandId === "req-state") {
+      resolveAck(decoded);
     }
   });
 
@@ -250,7 +260,9 @@ process.stdin.on("data", chunk => {
     capabilityKey,
   ));
 
-  const decoded = await response;
+  const [decoded, ack] = await Promise.all([response, clientAck]);
+  assert.equal(ack.clientSeq, 2);
+  assert.equal(ack.commandId, "req-state");
   assert.equal(decoded.success, true);
   assert.equal(decoded.command, "get_state");
   assert.deepEqual(decoded.data, {
@@ -398,7 +410,7 @@ process.stdin.on("data", chunk => {
   const eventA = await waitForLabel("A");
   send({ type: "emit_test", label: "B" });
   const eventB = await waitForLabel("B");
-  assert.equal(eventB.frame.seq, eventA.frame.seq + 1);
+  assert.ok(eventB.frame.seq > eventA.frame.seq);
 
   const resumedLink = await registry.createLink(
     session.instanceId,
@@ -418,10 +430,16 @@ process.stdin.on("data", chunk => {
   };
 
   assert.equal(resumed.replayAvailable, true);
-  assert.equal(resumed.resumeTargetHostSeq, eventB.frame.seq);
+  assert.ok(resumed.resumeTargetHostSeq >= eventB.frame.seq);
   assert.deepEqual(
     resumedLink.replayFrames.map(frame => frame.seq),
-    [eventB.frame.seq],
+    Array.from(
+      {
+        length:
+          resumed.resumeTargetHostSeq - eventA.frame.seq,
+      },
+      (_, index) => eventA.frame.seq + index + 1,
+    ),
   );
 
   clientSeq = resumed.nextClientSeq;
@@ -438,7 +456,23 @@ process.stdin.on("data", chunk => {
     hostSeq: resumed.resumeTargetHostSeq,
   });
   const eventC = await waitForLabel("C");
-  assert.equal(eventC.frame.seq, eventB.frame.seq + 1);
+  assert.ok(eventC.frame.seq > resumed.resumeTargetHostSeq);
+  assert.deepEqual(
+    outbound
+      .filter(item =>
+        item.frame.seq > resumed.resumeTargetHostSeq
+        && item.frame.seq <= eventC.frame.seq
+      )
+      .map(item => item.frame.seq),
+    Array.from(
+      {
+        length:
+          eventC.frame.seq - resumed.resumeTargetHostSeq,
+      },
+      (_, index) =>
+        resumed.resumeTargetHostSeq + index + 1,
+    ),
+  );
 
   registry.stop();
 });
@@ -489,10 +523,19 @@ process.stdin.on("data", chunk => {
   const [session] = await registry.listSessions();
   assert.ok(session);
 
-  const outbound: ReturnType<typeof encryptRpcPayload>[] = [];
+  const outbound: Array<{
+    frame: ReturnType<typeof encryptRpcPayload>;
+    value: Record<string, unknown>;
+  }> = [];
   let key: Buffer | null = null;
   registry.setOutboundFrameHandler(frame => {
-    if (key) outbound.push(frame);
+    if (!key) return;
+    outbound.push({
+      frame,
+      value: JSON.parse(
+        decryptRpcPayload(frame, key).toString("utf8"),
+      ) as Record<string, unknown>,
+    });
   });
 
   const link = await registry.createLink(
@@ -546,12 +589,28 @@ process.stdin.on("data", chunk => {
 
   send("A");
   send("B");
-  for (let attempt = 0; attempt < 200 && outbound.length < 2; attempt += 1) {
+
+  let eventA:
+    | {
+        frame: ReturnType<typeof encryptRpcPayload>;
+        value: Record<string, unknown>;
+      }
+    | undefined;
+  let eventB:
+    | {
+        frame: ReturnType<typeof encryptRpcPayload>;
+        value: Record<string, unknown>;
+      }
+    | undefined;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    eventA = outbound.find(item => item.value.label === "A");
+    eventB = outbound.find(item => item.value.label === "B");
+    if (eventA && eventB) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.ok(outbound.length >= 2);
+  assert.ok(eventA);
+  assert.ok(eventB);
 
-  const firstEventSeq = outbound.at(-2)!.seq;
   const resumedLink = await registry.createLink(
     session.instanceId,
     session.generation,
@@ -559,7 +618,7 @@ process.stdin.on("data", chunk => {
     {
       machineId: "machine_test",
       deviceId: "device_test",
-      resumeFromHostSeq: firstEventSeq - 1,
+      resumeFromHostSeq: eventA.frame.seq - 1,
     },
   );
   const resumed = JSON.parse(resumedLink.collabUrl) as {

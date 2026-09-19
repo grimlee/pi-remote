@@ -29,6 +29,8 @@ actor PiRpcClient {
         case invalidCapability
         case invalidFrame
         case sequenceGap(expected: Int64, received: Int64)
+        case reliableQueueFull
+        case deliveredResponseUnavailable(String)
         case closed
         case remote(String)
 
@@ -40,6 +42,10 @@ actor PiRpcClient {
                 return "The Pi RPC channel returned an invalid encrypted frame."
             case let .sequenceGap(expected, received):
                 return "Pi RPC event gap detected: expected seq \(expected), received \(received)."
+            case .reliableQueueFull:
+                return "Too many Pi commands are waiting for delivery confirmation."
+            case let .deliveredResponseUnavailable(command):
+                return "The \(command) command reached the Host, but its Pi response fell outside the replay window. State is being reconciled; the command was not retried."
             case .closed:
                 return "The Pi RPC channel is closed."
             case let .remote(message):
@@ -62,6 +68,15 @@ actor PiRpcClient {
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
     private var didAcknowledgeInitialBarrier = false
+    private struct ReliableCommand: Sendable {
+        var sequence: Int64
+        let commandId: String?
+        let commandType: String
+        let object: [String: JSONValue]
+    }
+
+    private let maxReliableCommands = 128
+    private var reliableCommands: [ReliableCommand] = []
     private var isClosed = false
     private var pendingResponses:
         [String: CheckedContinuation<JSONValue, Error>] = [:]
@@ -112,9 +127,9 @@ actor PiRpcClient {
         }
 
         self.sendFrame = sendFrame
-        if let nextClientSeq = resumedCapability.nextClientSeq {
-            self.nextClientSequence = nextClientSeq
-        }
+        let hostNextClientSeq = resumedCapability.nextClientSeq
+            ?? self.nextClientSequence
+        self.nextClientSequence = hostNextClientSeq
 
         if let resumeToken = resumedCapability.resumeToken,
            let resumeFromHostSeq = resumedCapability.resumeFromHostSeq,
@@ -135,7 +150,13 @@ actor PiRpcClient {
                     targetHostSeq
                 )
                 snapshot.liveMessage = nil
+                snapshot.uiRequest = nil
             }
+
+            try await resendUnacknowledgedCommands(
+                hostNextClientSeq: hostNextClientSeq,
+                responseReplayAvailable: replayAvailable
+            )
 
             try await sendCommand([
                 "type": .string("piremote.resume_ack"),
@@ -151,6 +172,10 @@ actor PiRpcClient {
                 lastHostSeq
             )
             snapshot.liveMessage = nil
+            try await resendUnacknowledgedCommands(
+                hostNextClientSeq: hostNextClientSeq,
+                responseReplayAvailable: true
+            )
         }
 
         try await refreshAuthoritativeState(prefix: "resume")
@@ -232,19 +257,17 @@ actor PiRpcClient {
         guard !trimmed.isEmpty else { return }
 
         var command: [String: JSONValue] = [
-            "id": .string(UUID().uuidString),
             "type": .string("prompt"),
             "message": .string(trimmed)
         ]
         if snapshot.state?.objectValue?["isStreaming"]?.boolValue == true {
             command["streamingBehavior"] = .string("followUp")
         }
-        try await sendCommand(command)
+        _ = try await sendRequest(command)
     }
 
     func abort() async throws {
-        try await sendCommand([
-            "id": .string(UUID().uuidString),
+        _ = try await sendRequest([
             "type": .string("abort")
         ])
     }
@@ -266,7 +289,7 @@ actor PiRpcClient {
         } else {
             response["cancelled"] = .bool(true)
         }
-        try await sendCommand(response)
+        try await sendReliableCommand(response)
         if snapshot.uiRequest?.objectValue?["id"]?.stringValue == id {
             snapshot.uiRequest = nil
             emitSnapshot()
@@ -352,7 +375,7 @@ actor PiRpcClient {
 
             Task {
                 do {
-                    try await sendCommand(command)
+                    try await sendReliableCommand(command)
                 } catch {
                     failPendingResponse(
                         requestId: requestId,
@@ -365,18 +388,114 @@ actor PiRpcClient {
 
     private func sendCommand(_ object: [String: JSONValue]) async throws {
         guard !isClosed else { throw ClientError.closed }
+        let sequence = nextClientSequence
+        let frame = try makeClientFrame(
+            object,
+            sequence: sequence
+        )
+        nextClientSequence += 1
+        try await sendFrame(frame)
+    }
+
+    private func sendReliableCommand(
+        _ object: [String: JSONValue]
+    ) async throws {
+        guard !isClosed else { throw ClientError.closed }
+        guard reliableCommands.count < maxReliableCommands else {
+            throw ClientError.reliableQueueFull
+        }
+
+        let sequence = nextClientSequence
+        let frame = try makeClientFrame(
+            object,
+            sequence: sequence
+        )
+        nextClientSequence += 1
+
+        reliableCommands.append(
+            ReliableCommand(
+                sequence: sequence,
+                commandId: object["id"]?.stringValue,
+                commandType: object["type"]?.stringValue ?? "unknown",
+                object: object
+            )
+        )
+
+        do {
+            try await sendFrame(frame)
+        } catch {
+            // Keep the command in the in-memory journal. A Relay send error
+            // is ambiguous: the Host may or may not have received the frame.
+            // The next sessions.link capability exposes Host nextClientSeq,
+            // which is the authority for deciding whether this command must
+            // be retried.
+        }
+    }
+
+    private func resendUnacknowledgedCommands(
+        hostNextClientSeq: Int64,
+        responseReplayAvailable: Bool
+    ) async throws {
+        // Host sequence acceptance is contiguous. Any reliable command below
+        // Host nextClientSeq is already delivered and must never be retried.
+        let accepted = reliableCommands.filter {
+            $0.sequence < hostNextClientSeq
+        }
+        if !responseReplayAvailable {
+            for command in accepted {
+                guard let commandId = command.commandId,
+                      let continuation = pendingResponses.removeValue(
+                        forKey: commandId
+                      )
+                else {
+                    continue
+                }
+                continuation.resume(
+                    throwing: ClientError
+                        .deliveredResponseUnavailable(
+                            command.commandType
+                        )
+                )
+            }
+        }
+
+        reliableCommands.removeAll {
+            $0.sequence < hostNextClientSeq
+        }
+
+        let pending = reliableCommands.sorted {
+            $0.sequence < $1.sequence
+        }
+        reliableCommands.removeAll()
+        nextClientSequence = hostNextClientSeq
+
+        for var command in pending {
+            let sequence = nextClientSequence
+            let frame = try makeClientFrame(
+                command.object,
+                sequence: sequence
+            )
+            nextClientSequence += 1
+            command.sequence = sequence
+            reliableCommands.append(command)
+            try await sendFrame(frame)
+        }
+    }
+
+    private func makeClientFrame(
+        _ object: [String: JSONValue],
+        sequence: Int64
+    ) throws -> PiRpcRelayFrame {
         let data = try encoder.encode(JSONValue.object(object))
-        let frame = try PiRpcChannelCrypto.seal(
+        return try PiRpcChannelCrypto.seal(
             plaintext: data,
             keyBase64URL: capability.key,
             machineId: machineId,
             deviceId: deviceId,
             channelId: capability.channelId,
             direction: .client,
-            seq: nextClientSequence
+            seq: sequence
         )
-        nextClientSequence += 1
-        try await sendFrame(frame)
     }
 
     private func handle(_ value: JSONValue) {
@@ -389,6 +508,15 @@ actor PiRpcClient {
         }
 
         switch type {
+        case "piremote.client_ack":
+            if let clientSeq = object["clientSeq"]?.integerValue,
+               clientSeq >= 0 {
+                reliableCommands.removeAll {
+                    $0.sequence <= clientSeq
+                }
+            }
+            return
+
         case "ready":
             snapshot.phase = .live
             snapshot.lastEvent = value
@@ -498,6 +626,10 @@ actor PiRpcClient {
             return
         }
 
+        reliableCommands.removeAll {
+            $0.commandId == requestId
+        }
+
         let success = object["success"]?.boolValue ?? false
         if success {
             continuation.resume(
@@ -522,6 +654,7 @@ actor PiRpcClient {
     }
 
     private func failPending(_ error: Error) {
+        reliableCommands.removeAll()
         let pending = pendingResponses
         pendingResponses.removeAll()
         for continuation in pending.values {

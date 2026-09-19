@@ -273,6 +273,20 @@ final class AppStore {
             }
 
             try await client.startFreshSession()
+        } catch let error as PiRpcClient.ClientError {
+            sessionError = error.localizedDescription
+
+            if case .deliveredResponseUnavailable("new_session") = error {
+                // Host accepted the command; destroying this RPC client could
+                // discard the newly-created Pi session. Keep it alive and let
+                // the resume reconciliation establish the authoritative
+                // sessionId/state.
+                shouldRefreshAfterNewSession = false
+            } else {
+                rpcSnapshot = nil
+                rpcClient = nil
+                shouldRefreshAfterNewSession = false
+            }
         } catch {
             sessionError = error.localizedDescription
             rpcSnapshot = nil
@@ -300,6 +314,14 @@ final class AppStore {
         do {
             try await rpcClient.sendPrompt(text)
             composerText = ""
+        } catch let error as PiRpcClient.ClientError {
+            if case .deliveredResponseUnavailable(_) = error {
+                // Host sequence state proves this prompt was accepted for
+                // delivery. Do not leave the original text in the composer,
+                // which would invite an accidental duplicate retry.
+                composerText = ""
+            }
+            sessionError = error.localizedDescription
         } catch {
             sessionError = error.localizedDescription
         }
@@ -550,8 +572,12 @@ final class AppStore {
                 shouldReopen = true
             }
         } catch {
+            // A second transport failure during recovery must not destroy the
+            // live PiRpcClient: it owns the reliable-command journal. Keep the
+            // session in resume mode and let the next Relay connection retry.
             sessionError = error.localizedDescription
-            shouldReopen = true
+            needsRpcTransportResume = true
+            needsSessionRestore = false
         }
 
         isOpeningSession = false
