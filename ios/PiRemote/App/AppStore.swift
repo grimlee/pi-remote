@@ -166,6 +166,20 @@ final class AppStore {
             return
         }
 
+        // Navigating back to the home list must not tear down a live Pi
+        // process. If this row represents the session already owned by the
+        // in-memory RPC client, re-enter the existing conversation instead of
+        // calling closeRpc(), which sends piremote.close to the Host.
+        if rpcClient != nil,
+           activeCacheSessionId == session.sessionId,
+           rpcSnapshot?.phase != .closed,
+           !needsRpcTransportResume,
+           !needsSessionRestore {
+            selectedSessionID = session.instanceId
+            sessionError = nil
+            return
+        }
+
         isOpeningSession = true
         isResumingSession = false
         sessionError = nil
@@ -718,8 +732,17 @@ final class AppStore {
                 .objectValue?["sessionId"]?
                 .stringValue {
                 activeCacheSessionId = sessionId
-                if selectedSessionID == nil,
-                   !shouldRefreshAfterNewSession {
+
+                if shouldRefreshAfterNewSession {
+                    // Pi's authoritative state already names the new session.
+                    // Make it a first-class navigation target immediately;
+                    // do not wait for the first assistant message to finish.
+                    shouldRefreshAfterNewSession = false
+                    selectedSessionID = sessionId
+                    Task { [weak self] in
+                        await self?.refreshSessions()
+                    }
+                } else if selectedSessionID == nil {
                     selectedSessionID = sessionId
                 }
             }
@@ -737,18 +760,6 @@ final class AppStore {
                 sessionId: sessionId,
                 messages: snapshot.messages
             )
-
-            if shouldRefreshAfterNewSession,
-               snapshot.messages.contains(where: { message in
-                   message.objectValue?["role"]?.stringValue
-                       == "assistant"
-               }) {
-                shouldRefreshAfterNewSession = false
-                selectedSessionID = sessionId
-                Task { [weak self] in
-                    await self?.refreshSessions()
-                }
-            }
 
         case let .disconnected(reason):
             sessionError = reason
