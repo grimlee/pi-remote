@@ -202,9 +202,7 @@ final class AppStore {
             switch phase {
             case .connecting, .live:
                 selectedSessionID = session.instanceId
-                isResumingSession = false
                 sessionError = nil
-                needsSessionRestore = false
                 return
             case .closed:
                 break
