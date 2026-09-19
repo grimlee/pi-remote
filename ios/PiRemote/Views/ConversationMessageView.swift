@@ -4,12 +4,17 @@ import UIKit
 
 struct ConversationTranscriptView: View {
     let snapshot: PiRpcSnapshot
+    let showAgentActivity: Bool
 
     @State private var parsedMessages: [ChatMessage]
     @State private var parsedRevision: Int
 
-    init(snapshot: PiRpcSnapshot) {
+    init(
+        snapshot: PiRpcSnapshot,
+        showAgentActivity: Bool
+    ) {
         self.snapshot = snapshot
+        self.showAgentActivity = showAgentActivity
         _parsedMessages = State(
             initialValue: ChatMessageParser.parseAll(
                 snapshot.messages
@@ -26,16 +31,25 @@ struct ConversationTranscriptView: View {
                 Array(parsedMessages.enumerated()),
                 id: \.offset
             ) { _, message in
-                ConversationMessageRow(
-                    message: message,
+                if let presented = presentedMessage(
+                    message,
                     isStreaming: false
-                )
+                ) {
+                    ConversationMessageRow(
+                        message: presented,
+                        isStreaming: false
+                    )
+                }
             }
 
             if let live = snapshot.liveMessage,
-               let message = ChatMessageParser.parse(live) {
+               let message = ChatMessageParser.parse(live),
+               let presented = presentedMessage(
+                    message,
+                    isStreaming: true
+               ) {
                 ConversationMessageRow(
-                    message: message,
+                    message: presented,
                     isStreaming: true
                 )
             }
@@ -47,6 +61,46 @@ struct ConversationTranscriptView: View {
                 snapshot.messages
             )
             parsedRevision = revision
+        }
+    }
+
+    private func presentedMessage(
+        _ message: ChatMessage,
+        isStreaming: Bool
+    ) -> ChatMessage? {
+        guard !showAgentActivity else { return message }
+
+        switch message.role {
+        case .tool:
+            return nil
+
+        case .assistant:
+            let visibleBlocks = message.blocks.compactMap {
+                block -> ChatMessageBlock? in
+                switch block {
+                case let .text(text):
+                    return text.isEmpty ? nil : .text(text)
+                case let .image(label):
+                    return .image(label: label)
+                case .thinking, .toolCall, .raw:
+                    return nil
+                }
+            }
+
+            guard !visibleBlocks.isEmpty else {
+                return nil
+            }
+
+            return ChatMessage(
+                role: message.role,
+                timestamp: message.timestamp,
+                blocks: visibleBlocks,
+                toolName: message.toolName,
+                isError: message.isError
+            )
+
+        case .user, .system:
+            return message
         }
     }
 }
