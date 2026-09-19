@@ -109,6 +109,12 @@ struct RootView: View {
                 }
             } else {
                 List {
+                    if store.usesTailcatTransport {
+                        Section("Tailcat Diagnostics") {
+                            TailcatDiagnosticsRows()
+                        }
+                    }
+
                     Section {
                         ForEach(store.sessions) { session in
                             NavigationLink(
@@ -216,6 +222,13 @@ private struct PairingView: View {
                 }
             }
 
+            if store.tailcatDiagnostics != nil
+                || store.tailcatDiagnosticsError != nil {
+                Section("Tailcat Diagnostics") {
+                    TailcatDiagnosticsRows()
+                }
+            }
+
             Section {
                 Button {
                     Task {
@@ -245,6 +258,117 @@ private struct PairingView: View {
         }
     }
 }
+
+
+private struct TailcatDiagnosticsRows: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        if let diagnostics = store.tailcatDiagnostics {
+            LabeledContent("Path") {
+                Text(pathLabel(diagnostics))
+            }
+
+            if let latency = diagnostics.probe?.latencyMs,
+               diagnostics.probe?.ok == true {
+                LabeledContent("Latency") {
+                    Text(String(format: "%.1f ms", latency))
+                        .monospacedDigit()
+                }
+            }
+
+            LabeledContent("Bridge") {
+                Text(
+                    "127.0.0.1:\(diagnostics.localPort) → "
+                        + "Tailcat:\(diagnostics.remotePort)"
+                )
+                .font(.caption.monospaced())
+            }
+
+            LabeledContent("Connections") {
+                Text(
+                    "\(diagnostics.activeConnections) active / "
+                        + "\(diagnostics.acceptedConnections) accepted"
+                )
+                .monospacedDigit()
+            }
+
+            LabeledContent("Dials") {
+                Text(
+                    "\(diagnostics.dialSuccesses) ok / "
+                        + "\(diagnostics.dialFailures) failed"
+                )
+                .monospacedDigit()
+            }
+
+            LabeledContent("Traffic") {
+                Text(
+                    "↑ \(formatBytes(diagnostics.bytesToHost))  "
+                        + "↓ \(formatBytes(diagnostics.bytesToPhone))"
+                )
+                .monospacedDigit()
+            }
+
+            if let error = diagnostics.lastError,
+               !error.isEmpty {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if let probeError = diagnostics.probe?.error,
+               diagnostics.probe?.ok == false {
+                Text("Probe: \(probeError)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+
+        if let error = store.tailcatDiagnosticsError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+
+        Button("Probe Tailcat Path") {
+            Task {
+                await store.refreshTailcatDiagnostics()
+            }
+        }
+    }
+
+    private func pathLabel(
+        _ diagnostics: TailcatDiagnostics
+    ) -> String {
+        guard let probe = diagnostics.probe else {
+            return "Not probed"
+        }
+        guard probe.ok else {
+            return "Probe failed"
+        }
+
+        switch probe.path {
+        case "direct":
+            return "Direct P2P"
+        case "derp":
+            if let region = probe.derpRegion,
+               !region.isEmpty {
+                return "DERP (\(region))"
+            }
+            return "DERP"
+        default:
+            return probe.path ?? "Unknown"
+        }
+    }
+
+    private func formatBytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(
+            fromByteCount: value,
+            countStyle: .binary
+        )
+    }
+}
+
 
 private struct SessionRow: View {
     let session: RemoteSession
