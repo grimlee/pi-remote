@@ -1,0 +1,106 @@
+name: Tailcat iOS Experiment
+# Builds the isolated Tailcat PoC app identity.
+
+on:
+  push:
+    branches:
+      - experimental/tailcat-transport
+    paths:
+      - "native/tailcat-ios/**"
+      - "ios/**"
+      - ".github/workflows/tailcat-ios-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailcat-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Tailcat XCFramework and Pi Remote
+    runs-on: macos-26
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: false
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          go version
+
+      - name: Build Tailcat device XCFramework
+        env:
+          PI_REMOTE_TAILCAT_DEVICE_ONLY: "1"
+        run: sh native/tailcat-ios/build-xcframework.sh
+
+      - name: Inspect Tailcat XCFramework
+        run: |
+          test -d ios/Vendor/PiRemoteTailcat.xcframework
+          find ios/Vendor/PiRemoteTailcat.xcframework -maxdepth 3 -type f -print
+
+      - name: Test PiRemoteCore
+        working-directory: ios/PiRemoteCore
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build unsigned device app
+        working-directory: ios
+        run: |
+          set -o pipefail
+          rm -rf build-device
+          xcodebuild -project PiRemote.xcodeproj -scheme PiRemote -configuration Release -sdk iphoneos -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CONFIGURATION_BUILD_DIR="$PWD/build-device" build | tee xcodebuild-device.log
+
+      - name: Package sideload IPA
+        working-directory: ios
+        run: |
+          test -d build-device/PiRemote.app
+          rm -rf Payload PiRemote-Tailcat-Sideload.ipa
+          mkdir Payload
+          ditto build-device/PiRemote.app Payload/PiRemote.app
+          zip -qry PiRemote-Tailcat-Sideload.ipa Payload
+          rm -rf Payload
+          test -s PiRemote-Tailcat-Sideload.ipa
+
+      - name: Upload Tailcat XCFramework
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiRemoteTailcat-XCFramework
+          path: ios/Vendor/PiRemoteTailcat.xcframework
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload sideload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiRemote-Tailcat-Sideload
+          path: ios/PiRemote-Tailcat-Sideload.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailcat-ios-build-logs
+          path: ios/xcodebuild-device.log
+          if-no-files-found: ignore
+          retention-days: 7
