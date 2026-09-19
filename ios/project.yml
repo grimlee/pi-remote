@@ -17,6 +17,8 @@ targets:
       - PiRemote
     dependencies:
       - package: PiRemoteCore
+      - framework: Vendor/PiRemoteTailcat.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.grimlee.piremote
