@@ -1,25 +1,32 @@
 import net from "node:net";
 import qrcode from "qrcode-terminal";
 import {
-  colorizeCompactQr,
-  renderCompactQr,
-} from "./compactQr.js";
-import {
   decodePairingBootstrap,
   encodeCompressedPairingBootstrap,
 } from "./pairingBootstrap.js";
 import { defaultPairingSocketPath } from "./pairingIpc.js";
+import { renderSixelQr } from "./sixelQr.js";
 
 const socketPath = defaultPairingSocketPath();
 const ttlArgument = process.argv.find(argument => argument.startsWith("--ttl="));
 const ttlMs = ttlArgument
   ? Number(ttlArgument.slice("--ttl=".length)) * 1000
   : undefined;
-const renderQr = process.argv.includes("--qr");
-const safeQr = process.argv.includes("--qr-safe");
+const renderSixel = process.argv.includes("--qr-sixel");
+const renderSafe = process.argv.includes("--qr-safe");
 const quiet = process.argv.includes("--quiet");
-const showPayload = (!renderQr && !safeQr)
+const showPayload = (!renderSixel && !renderSafe)
   || process.argv.includes("--show-payload");
+
+const scaleArgument = process.argv.find(argument =>
+  argument.startsWith("--qr-scale=")
+);
+const requestedScale = scaleArgument
+  ? Number(scaleArgument.slice("--qr-scale=".length))
+  : 2;
+const qrScale = Number.isInteger(requestedScale)
+  ? requestedScale
+  : 2;
 
 const response = await new Promise<string>((resolve, reject) => {
   const socket = net.createConnection(socketPath);
@@ -61,20 +68,19 @@ if (!quiet) {
   console.log("");
 }
 
-if (renderQr && !quiet) {
+if (renderSixel && !quiet) {
   console.log("Scan this QR code with Pi Remote:");
   console.log("");
-
-  const qr = renderCompactQr(compactBootstrap);
-  console.log(colorizeCompactQr(qr.text));
-  console.log("");
+  const qr = renderSixelQr(compactBootstrap, qrScale, 4);
+  process.stdout.write(qr.text);
+  process.stdout.write("\n\n");
   console.log(
-    `Compact QR: ${qr.widthCharacters} columns × ${qr.heightLines} lines `
+    `Inline QR: ${qr.widthPixels}×${qr.heightPixels}px `
       + `(${qr.moduleCount} modules)`,
   );
 }
 
-if (safeQr && !quiet) {
+if (renderSafe && !quiet) {
   console.log("Scan this compatibility QR code with Pi Remote:");
   console.log("");
   await new Promise<void>(resolve => {
@@ -86,7 +92,7 @@ if (safeQr && !quiet) {
 }
 
 if (showPayload && !quiet) {
-  if (renderQr || safeQr) console.log("Pairing payload:");
+  if (renderSixel || renderSafe) console.log("Pairing payload:");
   console.log(record.bootstrap);
   console.log("");
 }
@@ -94,9 +100,9 @@ if (showPayload && !quiet) {
 if (!quiet) {
   console.log("Expires: " + String(record.expiresAt));
   console.log(
-    renderQr
-      ? "If this compact QR does not scan, press s in the launcher for compatibility mode."
-      : safeQr
+    renderSixel
+      ? "If this inline QR does not render or scan, press s in the launcher for compatibility mode."
+      : renderSafe
         ? "Compatibility QR mode."
         : "Paste this payload into Pi Remote on the iPhone.",
   );
