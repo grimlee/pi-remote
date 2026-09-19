@@ -52,6 +52,15 @@ interface ResumeBarrier {
   timer: NodeJS.Timeout | null;
 }
 
+interface RpcChannelMetrics {
+  windowStartedAt: number;
+  clientFrames: number;
+  clientBytes: number;
+  hostFrames: number;
+  hostBytes: number;
+  replayFrames: number;
+}
+
 interface RpcChannel {
   channelId: string;
   instanceId: string;
@@ -66,6 +75,7 @@ interface RpcChannel {
   resumeBarrier: ResumeBarrier | null;
   stdoutBuffer: string;
   stdoutDecoder: StringDecoder;
+  metrics: RpcChannelMetrics;
 }
 
 export interface SessionLinkDelivery extends SessionLink {
@@ -207,6 +217,7 @@ export class PiRegistry {
   readonly #channels = new Map<string, RpcChannel>();
   readonly #idleTimers = new Map<string, NodeJS.Timeout>();
   #outbound: ((frame: RpcRelayFrame) => void) | null = null;
+  readonly #metricsTimer: NodeJS.Timeout;
 
   constructor(options: PiRegistryOptions = {}) {
     this.#executable = options.executable ?? process.env.PI_REMOTE_PI_COMMAND ?? "pi";
@@ -218,6 +229,10 @@ export class PiRegistry {
     this.#maxReplayFrames = options.maxReplayFrames ?? 2_048;
     this.#maxReplayBytes = options.maxReplayBytes ?? 8 * 1024 * 1024;
     this.#resumeBarrierTimeoutMs = options.resumeBarrierTimeoutMs ?? 15_000;
+    this.#metricsTimer = setInterval(() => {
+      this.#flushMetrics();
+    }, 5_000);
+    this.#metricsTimer.unref();
   }
 
   setOutboundFrameHandler(handler: ((frame: RpcRelayFrame) => void) | null): void {
@@ -370,6 +385,14 @@ export class PiRegistry {
       resumeBarrier: null,
       stdoutBuffer: "",
       stdoutDecoder: new StringDecoder("utf8"),
+      metrics: {
+        windowStartedAt: Date.now(),
+        clientFrames: 0,
+        clientBytes: 0,
+        hostFrames: 0,
+        hostBytes: 0,
+        replayFrames: 0,
+      },
     };
     this.#channels.set(channelId, channel);
     this.#armIdleTimer(channel);
@@ -476,6 +499,8 @@ export class PiRegistry {
         )
       : [];
 
+    channel.metrics.replayFrames += replayFrames.length;
+
     console.log(
       `Pi RPC resume [${channel.channelId}]: cursor=${resumeFromHostSeq} target=${targetHostSeq} `
       + (replayAvailable
@@ -532,6 +557,11 @@ export class PiRegistry {
     if (!record) return;
 
     channel.lastClientSeq = frame.seq;
+    channel.metrics.clientFrames += 1;
+    channel.metrics.clientBytes += Buffer.byteLength(
+      JSON.stringify(frame),
+      "utf8",
+    );
     this.#armIdleTimer(channel);
 
     if (record.type === "piremote.close") {
@@ -589,8 +619,41 @@ export class PiRegistry {
   }
 
   stop(): void {
+    clearInterval(this.#metricsTimer);
+    this.#flushMetrics();
     for (const channelId of [...this.#channels.keys()]) {
       this.#terminateChannel(channelId);
+    }
+  }
+
+  #flushMetrics(): void {
+    const now = Date.now();
+    for (const channel of this.#channels.values()) {
+      const metrics = channel.metrics;
+      const windowMs = Math.max(1, now - metrics.windowStartedAt);
+      if (metrics.clientFrames > 0
+        || metrics.hostFrames > 0
+        || metrics.replayFrames > 0) {
+        console.log(
+          `Pi RPC stats [${channel.channelId}]`
+          + ` session=${channel.instanceId}`
+          + ` window=${windowMs}ms`
+          + ` clientFrames=${metrics.clientFrames}`
+          + ` clientBytes=${metrics.clientBytes}`
+          + ` hostFrames=${metrics.hostFrames}`
+          + ` hostBytes=${metrics.hostBytes}`
+          + ` replay=${metrics.replayFrames}`
+          + ` barrierQueued=${channel.resumeBarrier?.pendingFrames.length ?? 0}`,
+        );
+      }
+      channel.metrics = {
+        windowStartedAt: now,
+        clientFrames: 0,
+        clientBytes: 0,
+        hostFrames: 0,
+        hostBytes: 0,
+        replayFrames: 0,
+      };
     }
   }
 
@@ -641,6 +704,11 @@ export class PiRegistry {
     );
 
     this.#recordReplayFrame(channel, frame);
+    channel.metrics.hostFrames += 1;
+    channel.metrics.hostBytes += Buffer.byteLength(
+      JSON.stringify(frame),
+      "utf8",
+    );
 
     if (channel.resumeBarrier) {
       channel.resumeBarrier.pendingFrames.push(frame);

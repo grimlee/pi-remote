@@ -64,6 +64,57 @@ test("control request canonical bytes match Swift vector", () => {
     controlRequestMessage(resumedLink).toString("base64url"),
     "cGlyZW1vdGUtY29udHJvbC1yZXF1ZXN0LXYxAHJlcV90ZXN0dmVjdG9yAG1hY2hpbmVfdGVzdHZlY3RvcgBkZXZpY2VfdGVzdHZlY3RvcgAxODAwMDAwMDAwMDAwAHNlc3Npb25zLmxpbmsAaW5zdGFuY2VfdGVzdAA3AGNvbnRyb2wANDI",
   );
+
+  const diagnostics = {
+    protocolVersion: 0 as const,
+    type: "control.request" as const,
+    requestId: "req_diag",
+    machineId: "machine_testvector",
+    payload: {
+      op: "diagnostics.report" as const,
+      report: {
+        sessionId: "session_test",
+        windowStartedAtMs: 1_800_000_000_100,
+        windowDurationMs: 5_000,
+        displayFrames: 300,
+        slowFrames25Ms: 4,
+        slowFrames50Ms: 1,
+        dragFrames: 120,
+        dragSlowFrames25Ms: 3,
+        maxFrameGapMs: 67,
+        snapshotCount: 51,
+        liveCharacters: 8_192,
+        isStreaming: true,
+      },
+    },
+    authorization: {
+      deviceId: "device_testvector",
+      issuedAtMs: 1_800_000_000_000,
+    },
+  };
+  assert.equal(
+    controlRequestMessage(diagnostics).toString("utf8"),
+    [
+      "piremote-control-request-v1",
+      "req_diag",
+      "machine_testvector",
+      "device_testvector",
+      "1800000000000",
+      "diagnostics.report",
+      "session_test",
+      "1800000000100",
+      "5000",
+      "300",
+      "4",
+      "1",
+      "120",
+      "3",
+      "67",
+      "51",
+      "8192",
+      "1",
+    ].join("\u0000"),
+  );
 });
 
 test("host authorizes a valid signed request once and rejects replay", async () => {

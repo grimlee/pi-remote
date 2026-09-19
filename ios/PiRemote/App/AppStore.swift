@@ -400,6 +400,38 @@ final class AppStore {
         }
     }
 
+    func reportPerformance(
+        _ report: ConversationPerformanceReport
+    ) async {
+        guard let machine = activeMachine,
+              let relayClient
+        else {
+            return
+        }
+
+        let enriched = ConversationPerformanceReport(
+            sessionId: selectedSessionID ?? "",
+            windowStartedAtMs: report.windowStartedAtMs,
+            windowDurationMs: report.windowDurationMs,
+            displayFrames: report.displayFrames,
+            slowFrames25Ms: report.slowFrames25Ms,
+            slowFrames50Ms: report.slowFrames50Ms,
+            dragFrames: report.dragFrames,
+            dragSlowFrames25Ms: report.dragSlowFrames25Ms,
+            maxFrameGapMs: report.maxFrameGapMs,
+            snapshotCount: report.snapshotCount,
+            liveCharacters: report.liveCharacters,
+            isStreaming: report.isStreaming
+        )
+
+        // Diagnostics are intentionally best-effort. They must never surface
+        // an error or disturb the conversation UX if telemetry delivery fails.
+        try? await relayClient.sendDiagnostics(
+            machineId: machine.id,
+            report: enriched
+        )
+    }
+
     func answerInteractiveRequest(
         id: String,
         method: String,

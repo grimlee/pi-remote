@@ -159,6 +159,11 @@ actor RelayClient {
         let resumeFromHostSeq: Int64?
     }
 
+    private struct DiagnosticsReportPayload: Encodable, Sendable {
+        let op = "diagnostics.report"
+        let report: ConversationPerformanceReport
+    }
+
     private struct SessionsListResponsePayload: Decodable {
         let op: String
         let sessions: [RemoteSession]
@@ -510,6 +515,53 @@ actor RelayClient {
                 }
             }
         }
+    }
+
+    func sendDiagnostics(
+        machineId: String,
+        report: ConversationPerformanceReport
+    ) async throws {
+        guard let device = authenticatedDevice else {
+            throw RelayError.authenticationFailed
+        }
+
+        let requestId = UUID().uuidString
+        let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
+        let message = ControlRequestCrypto.diagnosticsReportMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: device.id,
+            issuedAtMs: issuedAtMs,
+            sessionId: report.sessionId,
+            windowStartedAtMs: report.windowStartedAtMs,
+            windowDurationMs: report.windowDurationMs,
+            displayFrames: report.displayFrames,
+            slowFrames25Ms: report.slowFrames25Ms,
+            slowFrames50Ms: report.slowFrames50Ms,
+            dragFrames: report.dragFrames,
+            dragSlowFrames25Ms: report.dragSlowFrames25Ms,
+            maxFrameGapMs: report.maxFrameGapMs,
+            snapshotCount: report.snapshotCount,
+            liveCharacters: report.liveCharacters,
+            isStreaming: report.isStreaming
+        )
+        let signature = try await identityStore.signature(for: message)
+            .base64URLEncodedString()
+
+        let request = ControlRequest(
+            requestId: requestId,
+            machineId: machineId,
+            payload: DiagnosticsReportPayload(
+                report: report
+            ),
+            authorization: ControlAuthorization(
+                deviceId: device.id,
+                issuedAtMs: issuedAtMs,
+                signature: signature
+            )
+        )
+
+        try await send(request)
     }
 
     func sendRpcFrame(_ frame: PiRpcRelayFrame) async throws {

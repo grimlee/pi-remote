@@ -297,6 +297,8 @@ private struct SessionDetailView: View {
     @State private var showingCommands = false
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
+    @State private var performanceMonitor =
+        ConversationPerformanceMonitor()
 
     var body: some View {
         @Bindable var store = store
@@ -346,6 +348,36 @@ private struct SessionDetailView: View {
                     dismissKeyboard()
                 }
             )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { _ in
+                        performanceMonitor.beginDragging()
+                    }
+                    .onEnded { _ in
+                        performanceMonitor.endDragging()
+                    }
+            )
+            .onAppear {
+                performanceMonitor.start { report in
+                    await store.reportPerformance(report)
+                }
+            }
+            .onDisappear {
+                performanceMonitor.stop()
+            }
+            .onChange(
+                of: store.rpcSnapshot?.presentationRevision
+            ) { _, _ in
+                guard let snapshot = store.rpcSnapshot else {
+                    return
+                }
+                performanceMonitor.recordSnapshot(
+                    liveCharacters: snapshot.liveCharacterCount,
+                    isStreaming: snapshot.state?
+                        .objectValue?["isStreaming"]?
+                        .boolValue ?? false
+                )
+            }
 
             Divider()
 
