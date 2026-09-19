@@ -432,6 +432,9 @@ private struct SessionDetailView: View {
     let startFresh: Bool
 
     @State private var editorResponse = ""
+    @State private var composerText = ""
+    @State private var composerFieldEpoch = 0
+    @FocusState private var composerFocused: Bool
     @State private var showingModelPicker = false
     @State private var showingThinkingPicker = false
     @State private var showingCommands = false
@@ -544,9 +547,11 @@ private struct SessionDetailView: View {
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
                         "Message Pi",
-                        text: $store.composerText,
+                        text: $composerText,
                         axis: .vertical
                     )
+                    .id(composerFieldEpoch)
+                    .focused($composerFocused)
                     .lineLimit(1...6)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -703,7 +708,7 @@ private struct SessionDetailView: View {
 
     private var canSend: Bool {
         canWrite
-            && !store.composerText
+            && !composerText
                 .trimmingCharacters(
                     in: .whitespacesAndNewlines
                 )
@@ -715,7 +720,7 @@ private struct SessionDetailView: View {
     }
 
     private var composerIsSlashCommand: Bool {
-        store.composerText
+        composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .hasPrefix("/")
     }
@@ -745,7 +750,7 @@ private struct SessionDetailView: View {
     }
 
     private var slashSuggestions: [PiSlashCommandOption] {
-        let text = store.composerText
+        let text = composerText
         guard text.hasPrefix("/") else { return [] }
 
         let body = String(text.dropFirst())
@@ -768,26 +773,24 @@ private struct SessionDetailView: View {
         _ command: PiSlashCommandOption
     ) {
         commandNotice = nil
-        store.composerText = command.invocation + " "
+        composerText = command.invocation + " "
     }
 
     private func submitComposer() {
-        let text = store.composerText
+        let text = composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
         guard text.hasPrefix("/") else {
             commandNotice = nil
+            let originalDraft = composerText
 
-            // Capture and clear synchronously inside the Button action. Doing
-            // the clear only after entering an async Task races SwiftUI's
-            // TextField/IME write-back and can restore the just-sent draft.
-            store.composerText = ""
+            resetComposerAfterSend()
 
             Task {
                 let accepted = await store.sendPrompt(text)
-                if !accepted && store.composerText.isEmpty {
-                    store.composerText = text
+                if !accepted && composerText.isEmpty {
+                    composerText = originalDraft
                 }
             }
             return
@@ -822,19 +825,19 @@ private struct SessionDetailView: View {
 
             switch name {
             case "model":
-                store.composerText = ""
+                composerText = ""
                 commandNotice = nil
                 showingModelPicker = true
 
             case "thinking":
                 if arguments.isEmpty {
-                    store.composerText = ""
+                    composerText = ""
                     commandNotice = nil
                     showingThinkingPicker = true
                 } else if store.rpcSnapshot?
                     .availableThinkingLevels
                     .contains(arguments) == true {
-                    store.composerText = ""
+                    composerText = ""
                     await store.setThinkingLevel(arguments)
                     commandNotice = "Thinking level: \(arguments)"
                 } else {
@@ -847,7 +850,7 @@ private struct SessionDetailView: View {
                 }
 
             case "compact":
-                store.composerText = ""
+                composerText = ""
                 let result = await store.compactContext(
                     arguments.isEmpty ? nil : arguments
                 )
@@ -860,13 +863,13 @@ private struct SessionDetailView: View {
                     commandNotice = "Usage: /name <session name>"
                     return
                 }
-                store.composerText = ""
+                composerText = ""
                 if await store.setSessionName(arguments) {
                     commandNotice = "Session renamed."
                 }
 
             case "session":
-                store.composerText = ""
+                composerText = ""
                 if let value = await store.fetchSessionStats() {
                     commandResult = PiCommandResultPayload(
                         title: "Session",
@@ -875,7 +878,7 @@ private struct SessionDetailView: View {
                 }
 
             case "copy":
-                store.composerText = ""
+                composerText = ""
                 if let value = await store.fetchLastAssistantText(),
                    !value.isEmpty {
                     UIPasteboard.general.string = value
@@ -885,16 +888,16 @@ private struct SessionDetailView: View {
                 }
 
             case "resume":
-                store.composerText = ""
+                composerText = ""
                 dismiss()
 
             case "new":
-                store.composerText = ""
+                composerText = ""
                 await store.createNewSession(from: session)
                 commandNotice = "Started a fresh Pi session."
 
             case "commands", "help":
-                store.composerText = ""
+                composerText = ""
                 commandNotice = nil
                 showingCommands = true
 
@@ -913,11 +916,28 @@ private struct SessionDetailView: View {
         // Pi's get_commands RPC and intentionally pass through as /... prompt
         // text so Pi performs its own expansion/dispatch.
         commandNotice = nil
-        let originalDraft = store.composerText
-        store.composerText = ""
+        let originalDraft = composerText
+        resetComposerAfterSend()
         let accepted = await store.sendPrompt(text)
-        if !accepted && store.composerText.isEmpty {
-            store.composerText = originalDraft
+        if !accepted && composerText.isEmpty {
+            composerText = originalDraft
+        }
+    }
+
+    private func resetComposerAfterSend() {
+        composerText = ""
+
+        // Recreate the underlying UITextField. SwiftUI may otherwise let an
+        // active CJK IME/marked-text transaction write the just-submitted
+        // value back after the binding has been cleared.
+        composerFieldEpoch &+= 1
+
+        // Keep the chat-like UX: replace the field, then restore focus on the
+        // next main-actor turn so the keyboard remains ready for the next
+        // message instead of forcing another tap.
+        Task { @MainActor in
+            await Task.yield()
+            composerFocused = true
         }
     }
 
