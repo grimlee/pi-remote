@@ -155,6 +155,23 @@ function parseRequest(value: Record<string, unknown>): SignedControlRequest | nu
     };
   }
 
+  if (payload.op === "diagnostics.report") {
+    const report = parseDiagnosticsReport(payload.report);
+    if (!report) return null;
+    return {
+      protocolVersion: 0,
+      type: "control.request",
+      requestId: value.requestId,
+      machineId: value.machineId,
+      payload: { op: "diagnostics.report", report },
+      authorization: {
+        deviceId: authorization.deviceId,
+        issuedAtMs: authorization.issuedAtMs,
+        signature: authorization.signature,
+      },
+    };
+  }
+
   const access = parseAccess(payload.access);
   const resumeFromHostSeq = payload.resumeFromHostSeq;
   const validResumeCursor = resumeFromHostSeq === undefined
@@ -214,6 +231,47 @@ function parseAuthChallenge(value: Record<string, unknown>): RelayAuthChallenge 
 
 function parseAccess(value: unknown): SessionAccess | null {
   return value === "view" || value === "control" ? value : null;
+}
+
+function isSafeMetric(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= min
+    && value <= max;
+}
+
+function parseDiagnosticsReport(value: unknown) {
+  const report = asRecord(value);
+  if (!report
+    || typeof report.sessionId !== "string"
+    || report.sessionId.length > 256
+    || !isSafeMetric(report.windowStartedAtMs, 0, Number.MAX_SAFE_INTEGER)
+    || !isSafeMetric(report.windowDurationMs, 500, 60_000)
+    || !isSafeMetric(report.displayFrames, 0, 10_000)
+    || !isSafeMetric(report.slowFrames25Ms, 0, 10_000)
+    || !isSafeMetric(report.slowFrames50Ms, 0, 10_000)
+    || !isSafeMetric(report.dragFrames, 0, 10_000)
+    || !isSafeMetric(report.dragSlowFrames25Ms, 0, 10_000)
+    || !isSafeMetric(report.maxFrameGapMs, 0, 10_000)
+    || !isSafeMetric(report.snapshotCount, 0, 100_000)
+    || !isSafeMetric(report.liveCharacters, 0, 100_000_000)
+    || typeof report.isStreaming !== "boolean") {
+    return null;
+  }
+  return {
+    sessionId: report.sessionId,
+    windowStartedAtMs: report.windowStartedAtMs,
+    windowDurationMs: report.windowDurationMs,
+    displayFrames: report.displayFrames,
+    slowFrames25Ms: report.slowFrames25Ms,
+    slowFrames50Ms: report.slowFrames50Ms,
+    dragFrames: report.dragFrames,
+    dragSlowFrames25Ms: report.dragSlowFrames25Ms,
+    maxFrameGapMs: report.maxFrameGapMs,
+    snapshotCount: report.snapshotCount,
+    liveCharacters: report.liveCharacters,
+    isStreaming: report.isStreaming,
+  };
 }
 
 function errorCode(error: unknown): string {
@@ -283,6 +341,7 @@ export class RelayHostClient {
 
     ws.on("open", () => {
       this.#reconnectMs = this.#minReconnectMs;
+      console.log("Pi Remote Relay socket connected");
     });
 
     ws.on("message", raw => {
@@ -374,9 +433,12 @@ export class RelayHostClient {
       console.error("Pi Remote relay connection error:", error.message);
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
       if (this.#socket === ws) this.#socket = null;
       this.#authenticated = false;
+      console.log(
+        `Pi Remote Relay socket closed code=${code} reason=${reason.toString("utf8") || "-"}`,
+      );
       this.#scheduleReconnect();
     });
   }
@@ -384,6 +446,7 @@ export class RelayHostClient {
   #scheduleReconnect(): void {
     if (this.#stopped || this.#reconnectTimer) return;
     const delay = this.#reconnectMs;
+    console.log(`Pi Remote Relay reconnect scheduled in ${delay}ms`);
     this.#reconnectMs = Math.min(
       this.#maxReconnectMs,
       Math.max(delay + 1, delay * 2),
@@ -512,7 +575,32 @@ export class RelayHostClient {
 
     try {
       const op = request.payload.op;
-      if (op === "sessions.list") {
+      if (op === "diagnostics.report") {
+        const report = request.payload.report;
+        console.log(
+          "Pi Remote UX"
+          + ` device=${authorizedDevice.id}`
+          + ` session=${report.sessionId || "-"}`
+          + ` window=${report.windowDurationMs}ms`
+          + ` frames=${report.displayFrames}`
+          + ` slow25=${report.slowFrames25Ms}`
+          + ` slow50=${report.slowFrames50Ms}`
+          + ` dragFrames=${report.dragFrames}`
+          + ` dragSlow25=${report.dragSlowFrames25Ms}`
+          + ` maxGap=${report.maxFrameGapMs}ms`
+          + ` snapshots=${report.snapshotCount}`
+          + ` liveChars=${report.liveCharacters}`
+          + ` streaming=${report.isStreaming}`,
+        );
+        response = {
+          protocolVersion: 0,
+          type: "control.response",
+          requestId: request.requestId,
+          machineId: request.machineId,
+          ok: true,
+          payload: { op },
+        };
+      } else if (op === "sessions.list") {
         const sessions = await this.#registry.listSessions();
         console.log(
           `Pi Remote sessions.list -> ${sessions.length} persisted sessions for ${authorizedDevice.id}`,
