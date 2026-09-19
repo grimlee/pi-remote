@@ -375,7 +375,7 @@ export class PiRegistry {
     }
 
     console.log(
-      `Pi RPC spawn session=${session.instanceId} cwd=${cwd}`,
+      `Pi RPC spawn session=${session.instanceId}`,
     );
 
     const channel: RpcChannel = {
