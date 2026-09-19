@@ -1,4 +1,4 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { PairingInvitation } from "./pairing.js";
 
 export interface RelayPairingTransport {
@@ -72,7 +72,7 @@ export function encodeCompressedPairingBootstrap(
   bootstrap: PairingBootstrap,
 ): string {
   const raw = Buffer.from(JSON.stringify(bootstrap), "utf8");
-  const compressed = deflateSync(raw, { level: 9 });
+  const compressed = deflateRawSync(raw, { level: 9 });
   return COMPRESSED_PREFIX + compressed.toString("base64url");
 }
 
@@ -87,7 +87,7 @@ export function decodePairingBootstrap(
       text.slice(COMPRESSED_PREFIX.length),
       "base64url",
     );
-    raw = inflateSync(compressed, {
+    raw = inflateRawSync(compressed, {
       maxOutputLength: MAX_BOOTSTRAP_BYTES,
     });
   } else if (text.startsWith(PREFIX)) {
