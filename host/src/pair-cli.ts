@@ -1,5 +1,7 @@
+import { writeFile } from "node:fs/promises";
 import net from "node:net";
 import qrcode from "qrcode-terminal";
+import QRCode from "qrcode";
 import {
   decodePairingBootstrap,
   encodeCompressedPairingBootstrap,
@@ -12,7 +14,24 @@ const ttlMs = ttlArgument
   ? Number(ttlArgument.slice("--ttl=".length)) * 1000
   : undefined;
 const renderQr = process.argv.includes("--qr");
-const showPayload = !renderQr || process.argv.includes("--show-payload");
+const svgArgument = process.argv.find(argument =>
+  argument.startsWith("--qr-svg=")
+);
+const svgPath = svgArgument
+  ? svgArgument.slice("--qr-svg=".length)
+  : undefined;
+const quiet = process.argv.includes("--quiet");
+const sizeArgument = process.argv.find(argument =>
+  argument.startsWith("--qr-size=")
+);
+const requestedQrSize = sizeArgument
+  ? Number(sizeArgument.slice("--qr-size=".length))
+  : 240;
+const qrSize = Number.isFinite(requestedQrSize)
+  ? Math.min(512, Math.max(160, Math.round(requestedQrSize)))
+  : 240;
+const showPayload = (!renderQr && !svgPath)
+  || process.argv.includes("--show-payload");
 
 const response = await new Promise<string>((resolve, reject) => {
   const socket = net.createConnection(socketPath);
@@ -45,32 +64,56 @@ if (record.ok !== true || typeof record.bootstrap !== "string") {
   );
 }
 
-console.log("Pi Remote pairing");
-console.log("");
+const compactBootstrap = encodeCompressedPairingBootstrap(
+  decodePairingBootstrap(record.bootstrap as string),
+);
+
+if (!quiet) {
+  console.log("Pi Remote pairing");
+  console.log("");
+}
 
 if (renderQr) {
-  console.log("Scan this QR code with Pi Remote:");
-  console.log("");
-  const compactBootstrap = encodeCompressedPairingBootstrap(
-    decodePairingBootstrap(record.bootstrap as string),
-  );
+  if (!quiet) {
+    console.log("Scan this QR code with Pi Remote:");
+    console.log("");
+  }
   await new Promise<void>(resolve => {
     qrcode.generate(compactBootstrap, { small: true }, code => {
-      console.log(code);
+      if (!quiet) console.log(code);
       resolve();
     });
   });
 }
 
-if (showPayload) {
-  if (renderQr) console.log("Pairing payload:");
+if (svgPath) {
+  const svg = await QRCode.toString(compactBootstrap, {
+    type: "svg",
+    errorCorrectionLevel: "L",
+    margin: 4,
+    width: qrSize,
+  });
+  await writeFile(svgPath, svg, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  if (!quiet) {
+    console.log("Pairing QR saved to: " + svgPath);
+    console.log("");
+  }
+}
+
+if (showPayload && !quiet) {
+  if (renderQr || svgPath) console.log("Pairing payload:");
   console.log(record.bootstrap);
   console.log("");
 }
 
-console.log("Expires: " + String(record.expiresAt));
-console.log(
-  renderQr
-    ? "Keep this terminal private. Press p in the launcher to create a fresh QR."
-    : "Paste this payload into Pi Remote on the iPhone.",
-);
+if (!quiet) {
+  console.log("Expires: " + String(record.expiresAt));
+  console.log(
+    renderQr || svgPath
+      ? "Keep this pairing QR private."
+      : "Paste this payload into Pi Remote on the iPhone.",
+  );
+}
