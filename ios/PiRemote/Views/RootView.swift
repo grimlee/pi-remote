@@ -182,6 +182,8 @@ struct RootView: View {
 
 private struct PairingView: View {
     @Environment(AppStore.self) private var store
+    @State private var showingScanner = false
+    @State private var scannerError: String?
 
     var body: some View {
         @Bindable var store = store
@@ -189,24 +191,24 @@ private struct PairingView: View {
         Form {
             Section {
                 Text(
-                    "On the computer running pi-remote-host, run npm run pair, then paste the one-time payload below."
+                    "Start Pi Remote on your computer, then scan the pairing QR code shown in its terminal."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-                TextEditor(text: $store.pairingPayload)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 150)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Button("Paste from Clipboard") {
-                    if let value = UIPasteboard.general.string {
-                        store.pairingPayload = value
-                    }
+                Button {
+                    scannerError = nil
+                    showingScanner = true
+                } label: {
+                    Label(
+                        "Scan Pairing QR Code",
+                        systemImage: "qrcode.viewfinder"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isPairing)
             } header: {
-                Text("One-time pairing")
+                Text("Pair with your computer")
             }
 
             if let pairingError = store.pairingError {
@@ -216,7 +218,31 @@ private struct PairingView: View {
                 }
             }
 
-            Section {
+            if let scannerError {
+                Section {
+                    Text(scannerError)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Manual pairing") {
+                TextEditor(text: $store.pairingPayload)
+                    .font(
+                        .system(
+                            .caption,
+                            design: .monospaced
+                        )
+                    )
+                    .frame(minHeight: 100)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Button("Paste from Clipboard") {
+                    if let value = UIPasteboard.general.string {
+                        store.pairingPayload = value
+                    }
+                }
+
                 Button {
                     Task {
                         await store.pairFromPayload()
@@ -229,7 +255,7 @@ private struct PairingView: View {
                         Text(
                             store.isPairing
                                 ? "Pairing…"
-                                : "Pair this iPhone"
+                                : "Pair using code"
                         )
                     }
                 }
@@ -241,6 +267,32 @@ private struct PairingView: View {
                             )
                             .isEmpty
                 )
+            }
+        }
+        .sheet(isPresented: $showingScanner) {
+            NavigationStack {
+                QRCodeScannerView { code in
+                    store.pairingPayload = code
+                    showingScanner = false
+                    Task {
+                        await store.pairFromPayload()
+                    }
+                } onError: { message in
+                    scannerError = message
+                    showingScanner = false
+                }
+                .ignoresSafeArea()
+                .navigationTitle("Scan Pairing QR")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(
+                        placement: .cancellationAction
+                    ) {
+                        Button("Cancel") {
+                            showingScanner = false
+                        }
+                    }
+                }
             }
         }
     }
