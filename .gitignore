@@ -28,3 +28,11 @@ dist/
 .tmp/
 tmp/
 run/
+
+
+# Sensitive local artifacts
+*.jsonl
+*.p8
+*.key
+*.sock
+.secrets/
