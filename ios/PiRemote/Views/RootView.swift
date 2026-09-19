@@ -297,6 +297,8 @@ private struct SessionDetailView: View {
     @State private var showingCommands = false
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
+    @AppStorage("showAgentActivity")
+    private var showAgentActivity = false
 
     var body: some View {
         @Bindable var store = store
@@ -326,7 +328,8 @@ private struct SessionDetailView: View {
 
                     if let snapshot = store.rpcSnapshot {
                         ConversationTranscriptView(
-                            snapshot: snapshot
+                            snapshot: snapshot,
+                            showAgentActivity: showAgentActivity
                         )
 
                         if let request = snapshot.uiRequest {
@@ -341,6 +344,11 @@ private struct SessionDetailView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    dismissKeyboard()
+                }
+            )
 
             Divider()
 
@@ -433,6 +441,18 @@ private struct SessionDetailView: View {
                             .availableModels.isEmpty ?? true)
                 )
             }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Toggle(
+                        "Show Agent Activity",
+                        isOn: $showAgentActivity
+                    )
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("Conversation display options")
+            }
         }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
@@ -468,6 +488,15 @@ private struct SessionDetailView: View {
                 await store.openSession(session)
             }
         }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
     }
 
     private var conversationTitle: String {
