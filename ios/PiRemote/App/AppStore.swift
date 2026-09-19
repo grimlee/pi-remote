@@ -40,6 +40,7 @@ final class AppStore {
     var sessionError: String?
     var isPairing = false
     var isOpeningSession = false
+    var isResumingSession = false
     var isCreatingSession = false
 
     private let identityStore = DeviceIdentityStore()
@@ -54,6 +55,7 @@ final class AppStore {
     private var started = false
     private var needsSessionRestore = false
     private var needsRpcTransportResume = false
+    private var resumeInFlight = false
     private var activeMachine: RemoteMachine?
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
@@ -164,6 +166,7 @@ final class AppStore {
         }
 
         isOpeningSession = true
+        isResumingSession = false
         sessionError = nil
         selectedSessionID = session.instanceId
         needsSessionRestore = false
@@ -238,6 +241,7 @@ final class AppStore {
         }
 
         isCreatingSession = true
+        isResumingSession = false
         sessionError = nil
         selectedSessionID = nil
         needsSessionRestore = false
@@ -374,6 +378,7 @@ final class AppStore {
             sessionError = nil
             needsSessionRestore = false
             needsRpcTransportResume = false
+            isResumingSession = false
             connectionState = .unpaired
         } catch {
             sessionError = error.localizedDescription
@@ -408,6 +413,7 @@ final class AppStore {
             if rpcClient != nil, selectedSessionID != nil {
                 needsRpcTransportResume = true
                 needsSessionRestore = false
+                isResumingSession = true
             } else {
                 needsSessionRestore = selectedSessionID != nil
             }
@@ -521,6 +527,7 @@ final class AppStore {
             if rpcClient != nil, selectedSessionID != nil {
                 needsRpcTransportResume = true
                 needsSessionRestore = false
+                isResumingSession = true
             } else {
                 needsSessionRestore = selectedSessionID != nil
             }
@@ -535,7 +542,7 @@ final class AppStore {
     private func resumeSessionTransport(
         _ session: RemoteSession
     ) async {
-        guard !isOpeningSession else { return }
+        guard !isOpeningSession, !resumeInFlight else { return }
         guard let machine = activeMachine,
               let relayClient,
               let rpcClient
@@ -546,7 +553,8 @@ final class AppStore {
             return
         }
 
-        isOpeningSession = true
+        resumeInFlight = true
+        isResumingSession = true
         var shouldReopen = false
 
         do {
@@ -567,6 +575,7 @@ final class AppStore {
             if resumed {
                 needsRpcTransportResume = false
                 needsSessionRestore = false
+                isResumingSession = false
                 sessionError = nil
             } else {
                 shouldReopen = true
@@ -580,11 +589,12 @@ final class AppStore {
             needsSessionRestore = false
         }
 
-        isOpeningSession = false
+        resumeInFlight = false
 
         if shouldReopen {
             needsRpcTransportResume = false
             needsSessionRestore = false
+            isResumingSession = false
             await openSession(session)
         }
     }
@@ -650,6 +660,8 @@ final class AppStore {
         lastCachedMessageRevision = 0
         shouldRefreshAfterNewSession = false
         needsRpcTransportResume = false
+        isResumingSession = false
+        resumeInFlight = false
     }
 
     private func disconnectRelayPreservingRpc() async {
@@ -657,9 +669,9 @@ final class AppStore {
             await relayClient.disconnect()
         }
         self.relayClient = nil
-        activeMachine = nil
-        machines = []
-        sessions = []
+        // Keep the last verified machine/session list and in-memory transcript.
+        // They are presentation state only; the fresh Relay snapshot and Pi
+        // reconciliation remain authoritative after reconnect.
     }
 
     private func disconnectRelayAndRpc() async {
