@@ -378,16 +378,81 @@ await waitFor(
   },
 );
 
-function terminalSupportsSixel() {
-  if (!process.stdout.isTTY) return false;
+function parseSixelOverride() {
+  const value = (process.env.PI_REMOTE_SIXEL ?? "")
+    .trim()
+    .toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return null;
+}
+
+function parseDa1SixelResponse(text) {
+  const matches = text.matchAll(/\\x1b\\[\\?([0-9;]+)c/g);
+  for (const match of matches) {
+    const values = match[1]
+      .split(";")
+      .map(value => Number(value));
+    if (values.includes(4)) return true;
+  }
+  return false;
+}
+
+async function probeSixelSupport() {
+  const forced = parseSixelOverride();
+  if (forced !== null) return forced;
+
+  if (!process.stdout.isTTY || !process.stdin.isTTY) return false;
+
+  // tmux needs explicit graphics passthrough configuration. Prefer the safe
+  // text fallback unless the user explicitly opts in with PI_REMOTE_SIXEL=1.
   if (process.env.TMUX) return false;
+
+  if (typeof process.stdin.setRawMode === "function") {
+    const wasRaw = Boolean(process.stdin.isRaw);
+    let response = "";
+
+    const probed = await new Promise(resolve => {
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        process.stdin.off("data", onData);
+        if (!wasRaw) process.stdin.setRawMode(false);
+        resolve(value);
+      };
+      const onData = chunk => {
+        response += chunk.toString();
+        if (/\\x1b\\[\\?[0-9;]+c/.test(response)) {
+          finish(parseDa1SixelResponse(response));
+        }
+      };
+      const timer = setTimeout(() => finish(null), 180);
+
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", onData);
+      process.stdout.write("\\x1b[c");
+    });
+
+    if (probed !== null) return probed;
+  }
+
+  // Conservative fallbacks for terminals that may not answer DA1 here.
+  // Shell choice (bash, PowerShell, zsh, etc.) is intentionally irrelevant.
+  if (process.env.WT_SESSION) return true;
 
   const term = (process.env.TERM ?? "").toLowerCase();
   const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
 
-  return term.startsWith("foot")
-    || termProgram === "foot";
+  if (term.startsWith("foot") || term.includes("mlterm")) return true;
+  if (termProgram.includes("wezterm")) return true;
+
+  return false;
 }
+
+let sixelSupported = false;
 
 async function showPairingQr(mode = "inline") {
   if (qrInFlight || stopping) return;
@@ -397,7 +462,7 @@ async function showPairingQr(mode = "inline") {
     printDashboard();
 
     const useSixel = mode !== "safe"
-      && terminalSupportsSixel();
+      && sixelSupported;
 
     const args = [
       `--ttl=${pairTTL}`,
@@ -488,6 +553,11 @@ function startControls() {
     }
   });
 }
+
+// Probe the terminal, not the shell. This lets the same launcher work from
+// bash, zsh, PowerShell, WSL, and SSH whenever the actual terminal emulator
+// advertises Sixel support.
+sixelSupported = await probeSixelSupport();
 
 startControls();
 
