@@ -650,3 +650,139 @@ process.stdin.on("data", chunk => {
 
   registry.stop();
 });
+
+
+test("deduplicates retried RPC commands by command id", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-dedupe-"));
+  await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01DEDUPE",
+      timestamp: "2026-09-19T00:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({type:"ready",protocolVersion:1})+"\\n");
+let buffer="";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0,index);
+    buffer = buffer.slice(index+1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    if (command.type === "prompt") {
+      process.stdout.write(JSON.stringify({
+        type: "test_event",
+        commandId: command.id
+      })+"\\n");
+    }
+  }
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+    resumeBarrierTimeoutMs: 5_000,
+  });
+  const [session] = await registry.listSessions();
+  assert.ok(session);
+
+  const outbound: Array<Record<string, unknown>> = [];
+  let key: Buffer | null = null;
+  registry.setOutboundFrameHandler(frame => {
+    if (!key) return;
+    outbound.push(JSON.parse(
+      decryptRpcPayload(frame, key).toString("utf8"),
+    ) as Record<string, unknown>);
+  });
+
+  const link = await registry.createLink(
+    session.instanceId,
+    session.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const capability = JSON.parse(link.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+  };
+  key = Buffer.from(capability.key, "base64url");
+
+  const send = (seq: number, value: Record<string, unknown>) => {
+    registry.handleRpcFrame(encryptRpcPayload(
+      {
+        machineId: "machine_test",
+        deviceId: "device_test",
+        channelId: capability.channelId,
+        direction: "client",
+        seq,
+      },
+      Buffer.from(JSON.stringify(value)),
+      key!,
+    ));
+  };
+
+  send(capability.nextClientSeq, {
+    type: "piremote.resume_ack",
+    resumeToken: capability.resumeToken,
+    hostSeq: capability.resumeTargetHostSeq,
+  });
+
+  send(capability.nextClientSeq + 1, {
+    id: "prompt-duplicate-test",
+    type: "prompt",
+    message: "hello",
+  });
+
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (outbound.some(value =>
+      value.type === "test_event"
+      && value.commandId === "prompt-duplicate-test"
+    )) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  send(capability.nextClientSeq + 2, {
+    id: "prompt-duplicate-test",
+    type: "prompt",
+    message: "hello",
+  });
+
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (outbound.some(value =>
+      value.type === "piremote.client_ack"
+      && value.clientSeq === capability.nextClientSeq + 2
+      && value.duplicate === true
+    )) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  const events = outbound.filter(value =>
+    value.type === "test_event"
+    && value.commandId === "prompt-duplicate-test"
+  );
+  assert.equal(events.length, 1);
+
+  const duplicateAck = outbound.find(value =>
+    value.type === "piremote.client_ack"
+    && value.clientSeq === capability.nextClientSeq + 2
+  );
+  assert.equal(duplicateAck?.duplicate, true);
+
+  registry.stop();
+});
