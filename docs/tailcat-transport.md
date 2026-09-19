@@ -42,7 +42,7 @@ authorization, and replay logic.
 
 ## Host experiment
 
-The experimental branch now has a one-command launcher:
+Pi Remote includes a one-command Quick Connect launcher:
 
 ```bash
 cd pi-remote
@@ -92,7 +92,7 @@ Advanced overrides remain available through environment variables:
 
 - `PI_REMOTE_TAILCAT_RELAY_PORT`: local Relay/Tailcat port; defaults to 8791.
 - `PI_REMOTE_TAILCAT_KEY`: saved Tailcat key name; defaults to
-  `piremote-test` on this experimental branch.
+  `piremote-test` by default.
 - `PI_REMOTE_PAIR_TTL_SECONDS`: QR pairing lifetime; defaults to 600.
 - `PI_REMOTE_TRACE`: defaults to `1`; set to `0` to disable verbose PC
   tracing.
@@ -102,7 +102,7 @@ Relay, while Tailcat is only the userspace transport underlay.
 
 ## iOS status
 
-The experimental iOS data plane is implemented on this branch.
+The iOS data plane is implemented by the integrated native Tailcat bridge.
 
 `native/tailcat-ios` pins Tailcat `v0.6.0` and builds a small Go/C bridge as a
 static `PiRemoteTailcat.xcframework`. The bridge intentionally exposes only a
@@ -146,7 +146,7 @@ Build the full device+simulator XCFramework with:
 sh native/tailcat-ios/build-xcframework.sh
 ```
 
-For the real-device PoC path only:
+For a device-only local build:
 
 ```bash
 PI_REMOTE_TAILCAT_DEVICE_ONLY=1 \
