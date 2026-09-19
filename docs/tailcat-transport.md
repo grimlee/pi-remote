@@ -62,10 +62,11 @@ The launcher:
   `.runtime/host-trace.log`;
 - waits until the Relay and Host pairing socket are ready;
 - renders a 10-minute pairing QR using a compressed bootstrap;
-- renders the default QR directly in the terminal with a compact Braille
-  2x4-module renderer, reducing both width and height without opening another
-  window;
-- keeps the previous half-block terminal QR available as compatibility mode;
+- on Omarchy's default Foot terminal, renders the QR as a small inline Sixel
+  image so the symbol keeps true square pixels while staying inside the same
+  terminal;
+- keeps the half-block text QR available as compatibility mode when Sixel is
+  unavailable or when running through a terminal multiplexer;
 - keeps verbose Host/Relay/Tailcat output in the trace files instead of
   continuously scrolling the interactive terminal.
 
@@ -75,8 +76,8 @@ address remains redacted from routine Host logs.
 While the launcher is running:
 
 ```text
-p           create a fresh compact pairing QR
-s           show the larger compatibility QR
+p           create a fresh inline pairing QR
+s           show the text compatibility QR
 q           stop Host and Relay
 Ctrl+C      stop Host and Relay
 ```
@@ -84,7 +85,8 @@ Ctrl+C      stop Host and Relay
 On an interactive TTY, `p`, `s`, and `q` are single-key controls and do
 not require Enter. Re-rendering a QR clears the launcher screen first, so the
 active QR and status remain visible while background logs continue to be
-recorded on disk.
+recorded on disk. The launcher detects direct Foot sessions for Sixel output and
+falls back to the text QR elsewhere.
 
 Advanced overrides remain available through environment variables:
 
