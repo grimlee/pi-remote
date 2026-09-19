@@ -401,24 +401,29 @@ final class AppStore {
         }
     }
 
-    func sendPrompt() async {
-        let text = composerText
+    @discardableResult
+    func sendPrompt(_ text: String) async -> Bool {
+        let trimmed = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let rpcClient else { return }
+        guard !trimmed.isEmpty, let rpcClient else { return false }
 
         do {
-            try await rpcClient.sendPrompt(text)
-            composerText = ""
+            try await rpcClient.sendPrompt(trimmed)
+            sessionError = nil
+            return true
         } catch let error as PiRpcClient.ClientError {
+            sessionError = error.localizedDescription
+
             if case .deliveredResponseUnavailable(_) = error {
                 // Host sequence state proves this prompt was accepted for
-                // delivery. Do not leave the original text in the composer,
-                // which would invite an accidental duplicate retry.
-                composerText = ""
+                // delivery. Treat it as accepted so the UI never restores a
+                // draft that could be accidentally sent twice.
+                return true
             }
-            sessionError = error.localizedDescription
+            return false
         } catch {
             sessionError = error.localizedDescription
+            return false
         }
     }
 
