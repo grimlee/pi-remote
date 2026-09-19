@@ -26,7 +26,7 @@ actor DeviceIdentityStore {
         let keyAgreementPrivateKey: Data
     }
 
-    private let service = "top.grimlee.piremote.identity"
+    private let service = "top.grimlee.piremote.tailcat.identity"
     private let account = "device-identity-v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
