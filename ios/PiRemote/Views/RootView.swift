@@ -556,12 +556,12 @@ private struct SessionDetailView: View {
                     )
 
                     Button {
-                        Task {
-                            if sendButtonIsAbort {
+                        if sendButtonIsAbort {
+                            Task {
                                 await store.abort()
-                            } else {
-                                await submitComposer()
                             }
+                        } else {
+                            submitComposer()
                         }
                     } label: {
                         Image(
@@ -771,17 +771,34 @@ private struct SessionDetailView: View {
         store.composerText = command.invocation + " "
     }
 
-    private func submitComposer() async {
+    private func submitComposer() {
         let text = store.composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
         guard text.hasPrefix("/") else {
             commandNotice = nil
-            await store.sendPrompt()
+
+            // Capture and clear synchronously inside the Button action. Doing
+            // the clear only after entering an async Task races SwiftUI's
+            // TextField/IME write-back and can restore the just-sent draft.
+            store.composerText = ""
+
+            Task {
+                let accepted = await store.sendPrompt(text)
+                if !accepted && store.composerText.isEmpty {
+                    store.composerText = text
+                }
+            }
             return
         }
 
+        Task {
+            await submitSlashCommand(text)
+        }
+    }
+
+    private func submitSlashCommand(_ text: String) async {
         let commandText = String(text.dropFirst())
         let pieces = commandText.split(
             maxSplits: 1,
