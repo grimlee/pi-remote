@@ -64,11 +64,13 @@ function requireCommand(name) {
   return value;
 }
 
-function piRemoteConfigRoot() {
+function configHomeRoot() {
   const xdg = process.env.XDG_CONFIG_HOME?.trim();
-  return xdg
-    ? path.join(xdg, "pi-remote")
-    : path.join(homedir(), ".config", "pi-remote");
+  return xdg || path.join(homedir(), ".config");
+}
+
+function piRemoteConfigRoot() {
+  return path.join(configHomeRoot(), "pi-remote");
 }
 
 function hasActivePairedDevice() {
@@ -212,7 +214,7 @@ function ensureNodeDependencies(directory, needsQr = false) {
 
 function ensurePersistentKey(tailcatBin) {
   const keyPath = path.join(
-    configHome,
+    configHomeRoot(),
     "tailcat",
     "keys",
     `${keyName}.private.json`,
