@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import net from "node:net";
 import qrcode from "qrcode-terminal";
-import QRCode from "qrcode";
+import * as QRCode from "qrcode";
 import {
   decodePairingBootstrap,
   encodeCompressedPairingBootstrap,
