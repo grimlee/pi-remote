@@ -1,5 +1,9 @@
 import net from "node:net";
 import qrcode from "qrcode-terminal";
+import {
+  decodePairingBootstrap,
+  encodeCompressedPairingBootstrap,
+} from "./pairingBootstrap.js";
 import { defaultPairingSocketPath } from "./pairingIpc.js";
 
 const socketPath = defaultPairingSocketPath();
@@ -47,8 +51,11 @@ console.log("");
 if (renderQr) {
   console.log("Scan this QR code with Pi Remote:");
   console.log("");
+  const compactBootstrap = encodeCompressedPairingBootstrap(
+    decodePairingBootstrap(record.bootstrap as string),
+  );
   await new Promise<void>(resolve => {
-    qrcode.generate(record.bootstrap as string, { small: true }, code => {
+    qrcode.generate(compactBootstrap, { small: true }, code => {
       console.log(code);
       resolve();
     });
