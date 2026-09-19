@@ -3,18 +3,43 @@ import SwiftUI
 import UIKit
 
 struct ConversationTranscriptView: View {
+    @Environment(AppStore.self) private var store
+
     let snapshot: PiRpcSnapshot
 
     @State private var parsedMessages: [ChatMessage]
     @State private var parsedRevision: Int
+    private let initialParseStartedAtMs: Int64
+    private let initialParseDurationMs: Int
+    private let initialConstructedAt: TimeInterval
+    private let initialMessageCount: Int
 
     init(snapshot: PiRpcSnapshot) {
-        self.snapshot = snapshot
-        _parsedMessages = State(
-            initialValue: ChatMessageParser.parseAll(
-                snapshot.messages
+        let constructedAt = ProcessInfo.processInfo.systemUptime
+        let startedAtMs = Int64(
+            Date().timeIntervalSince1970 * 1_000
+        )
+        let parsed = ChatMessageParser.parseAll(
+            snapshot.messages
+        )
+        let parseDurationMs = max(
+            0,
+            Int(
+                (
+                    (
+                        ProcessInfo.processInfo.systemUptime
+                            - constructedAt
+                    ) * 1_000
+                ).rounded()
             )
         )
+
+        self.snapshot = snapshot
+        self.initialParseStartedAtMs = startedAtMs
+        self.initialParseDurationMs = parseDurationMs
+        self.initialConstructedAt = constructedAt
+        self.initialMessageCount = snapshot.messages.count
+        _parsedMessages = State(initialValue: parsed)
         _parsedRevision = State(
             initialValue: snapshot.messageRevision
         )
@@ -38,13 +63,55 @@ struct ConversationTranscriptView: View {
                 )
             }
         }
+        .onAppear {
+            let appearDurationMs = max(
+                0,
+                Int(
+                    (
+                        (
+                            ProcessInfo.processInfo.systemUptime
+                                - initialConstructedAt
+                        ) * 1_000
+                    ).rounded()
+                )
+            )
+            store.reportDiagnosticTiming(
+                stage: "transcript.appear",
+                startedAtMs: initialParseStartedAtMs,
+                durationMs: appearDurationMs,
+                detail: "parse=\(initialParseDurationMs)|m=\(initialMessageCount)"
+            )
+        }
         .onChange(of: snapshot.messageRevision) { _, revision in
             guard parsedRevision != revision else { return }
 
-            parsedMessages = ChatMessageParser.parseAll(
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let startedAtMs = Int64(
+                Date().timeIntervalSince1970 * 1_000
+            )
+            let parsed = ChatMessageParser.parseAll(
                 snapshot.messages
             )
+            let durationMs = max(
+                0,
+                Int(
+                    (
+                        (
+                            ProcessInfo.processInfo.systemUptime
+                                - startedAt
+                        ) * 1_000
+                    ).rounded()
+                )
+            )
+
+            parsedMessages = parsed
             parsedRevision = revision
+            store.reportDiagnosticTiming(
+                stage: "transcript.reparse",
+                startedAtMs: startedAtMs,
+                durationMs: durationMs,
+                detail: "m=\(snapshot.messages.count)"
+            )
         }
     }
 
@@ -482,20 +549,97 @@ private struct MarkdownMessageText: View {
             // while the user scrolls through a long response.
             StreamingPlainTextView(text: text)
         } else {
-            Group {
-                if let attributed = try? AttributedString(
-                    markdown: text,
-                    options: AttributedString.MarkdownParsingOptions(
-                        interpretedSyntax: .inlineOnlyPreservingWhitespace
-                    )
-                ) {
-                    Text(attributed)
-                } else {
-                    Text(text)
-                }
+            CompletedMarkdownText(
+                text: text,
+                foreground: foreground
+            )
+        }
+    }
+}
+
+private struct CompletedMarkdownText: View {
+    @Environment(AppStore.self) private var store
+
+    let text: String
+    let foreground: Color
+
+    private let attributed: AttributedString?
+    private let parseStartedAtMs: Int64
+    private let parseDurationMs: Int
+    private let constructedAt: TimeInterval
+    private let characterCount: Int
+
+    init(
+        text: String,
+        foreground: Color
+    ) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let startedAtMs = Int64(
+            Date().timeIntervalSince1970 * 1_000
+        )
+        let attributed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        )
+        let durationMs = max(
+            0,
+            Int(
+                (
+                    (
+                        ProcessInfo.processInfo.systemUptime
+                            - startedAt
+                    ) * 1_000
+                ).rounded()
+            )
+        )
+
+        self.text = text
+        self.foreground = foreground
+        self.attributed = attributed
+        self.parseStartedAtMs = startedAtMs
+        self.parseDurationMs = durationMs
+        self.constructedAt = startedAt
+        self.characterCount = text.utf16.count
+    }
+
+    var body: some View {
+        Group {
+            if let attributed {
+                Text(attributed)
+            } else {
+                Text(text)
             }
-            .foregroundStyle(foreground)
-            .textSelection(.enabled)
+        }
+        .foregroundStyle(foreground)
+        .textSelection(.enabled)
+        .onAppear {
+            let appearDurationMs = max(
+                0,
+                Int(
+                    (
+                        (
+                            ProcessInfo.processInfo.systemUptime
+                                - constructedAt
+                        ) * 1_000
+                    ).rounded()
+                )
+            )
+
+            guard characterCount >= 500
+                || parseDurationMs >= 5
+                || appearDurationMs >= 50
+            else {
+                return
+            }
+
+            store.reportDiagnosticTiming(
+                stage: "markdown.appear",
+                startedAtMs: parseStartedAtMs,
+                durationMs: appearDurationMs,
+                detail: "parse=\(parseDurationMs)|chars=\(characterCount)"
+            )
         }
     }
 }
