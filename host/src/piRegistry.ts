@@ -12,6 +12,18 @@ import {
 } from "./rpcCrypto.js";
 import type { RemoteSession, SessionAccess, SessionLink } from "./types.js";
 
+const TRACE = process.env.PI_REMOTE_TRACE === "1";
+
+function trace(event: string, fields: Record<string, unknown> = {}): void {
+  if (!TRACE) return;
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    component: "pi-registry",
+    event,
+    ...fields,
+  }));
+}
+
 export class PiRegistryError extends Error {
   constructor(
     readonly code:
@@ -482,6 +494,14 @@ export class PiRegistry {
         ? `replay=${replayFrames.length} frame(s)`
         : "replay=unavailable; authoritative reconciliation required"),
     );
+    trace("rpc.resume.begin", {
+      channelId: channel.channelId,
+      resumeFromHostSeq,
+      targetHostSeq,
+      replayAvailable,
+      replayFrames: replayFrames.length,
+      lastClientSeq: channel.lastClientSeq,
+    });
 
     const capability = JSON.stringify({
       version: 1,
@@ -510,8 +530,27 @@ export class PiRegistry {
     if (!channel
       || frame.direction !== "client"
       || frame.machineId !== channel.machineId
-      || frame.deviceId !== channel.deviceId
-      || frame.seq !== channel.lastClientSeq + 1) {
+      || frame.deviceId !== channel.deviceId) {
+      trace("rpc.client.drop", {
+        reason: "channel_or_identity_mismatch",
+        channelId: frame.channelId,
+        deviceId: frame.deviceId,
+        machineId: frame.machineId,
+        seq: frame.seq,
+      });
+      return;
+    }
+
+    const expectedClientSeq = channel.lastClientSeq + 1;
+    if (frame.seq !== expectedClientSeq) {
+      trace("rpc.client.drop", {
+        reason: frame.seq <= channel.lastClientSeq ? "duplicate_or_old_seq" : "sequence_gap",
+        channelId: frame.channelId,
+        deviceId: frame.deviceId,
+        seq: frame.seq,
+        expectedSeq: expectedClientSeq,
+        lastAcceptedSeq: channel.lastClientSeq,
+      });
       return;
     }
 
@@ -534,6 +573,14 @@ export class PiRegistry {
     channel.lastClientSeq = frame.seq;
     this.#armIdleTimer(channel);
 
+    trace("rpc.client.accept", {
+      channelId: channel.channelId,
+      deviceId: channel.deviceId,
+      seq: frame.seq,
+      type: typeof record.type === "string" ? record.type : null,
+      commandId: typeof record.id === "string" ? record.id : null,
+    });
+
     if (record.type === "piremote.close") {
       this.#terminateChannel(channel.channelId);
       return;
@@ -546,6 +593,11 @@ export class PiRegistry {
         && typeof hostSeq === "number"
         && Number.isSafeInteger(hostSeq)
         && hostSeq >= 0) {
+          trace("rpc.resume_ack", {
+          channelId: channel.channelId,
+          clientSeq: frame.seq,
+          hostSeq,
+        });
         this.#ackResumeBarrier(channel, token, hostSeq);
       }
       return;
@@ -564,6 +616,17 @@ export class PiRegistry {
     const commandId = typeof record.id === "string"
       ? record.id
       : undefined;
+    const commandType = typeof record.type === "string"
+      ? record.type
+      : "unknown";
+
+    trace("rpc.stdin.write", {
+      channelId: channel.channelId,
+      clientSeq: frame.seq,
+      commandId: commandId ?? null,
+      commandType,
+    });
+
     channel.process.stdin.write(
       JSON.stringify(record) + "\n",
       error => {
@@ -579,6 +642,12 @@ export class PiRegistry {
           return;
         }
 
+        trace("rpc.stdin.ack", {
+          channelId: channel.channelId,
+          clientSeq: frame.seq,
+          commandId: commandId ?? null,
+          commandType,
+        });
         this.#sendHostPayload(channel, {
           type: "piremote.client_ack",
           clientSeq: frame.seq,
@@ -628,17 +697,28 @@ export class PiRegistry {
   }
 
   #sendHostPayload(channel: RpcChannel, value: Record<string, unknown>): void {
+    const seq = channel.nextHostSeq++;
     const frame = encryptRpcPayload(
       {
         machineId: channel.machineId,
         deviceId: channel.deviceId,
         channelId: channel.channelId,
         direction: "host",
-        seq: channel.nextHostSeq++,
+        seq,
       },
       Buffer.from(JSON.stringify(value), "utf8"),
       channel.key,
     );
+
+    trace("rpc.host.emit", {
+      channelId: channel.channelId,
+      deviceId: channel.deviceId,
+      seq,
+      type: typeof value.type === "string" ? value.type : null,
+      commandId: typeof value.id === "string" ? value.id : null,
+      command: typeof value.command === "string" ? value.command : null,
+      behindResumeBarrier: channel.resumeBarrier !== null,
+    });
 
     this.#recordReplayFrame(channel, frame);
 
@@ -714,6 +794,12 @@ export class PiRegistry {
     channel.resumeBarrier = null;
 
     const outbound = this.#outbound;
+    trace("rpc.resume.release", {
+      channelId: channel.channelId,
+      targetHostSeq: barrier.targetHostSeq,
+      pendingFrames: barrier.pendingFrames.length,
+      hasOutbound: outbound !== null,
+    });
     if (!outbound) return;
     for (const frame of barrier.pendingFrames) {
       outbound(frame);
