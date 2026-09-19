@@ -138,7 +138,27 @@ async function collectSessionFiles(root: string, output: string[]): Promise<void
   }));
 }
 
-async function parseSessionFile(file: string, generation: number): Promise<SessionRecord | null> {
+function stableSessionGeneration(
+  sessionId: string,
+  startedAt: string,
+): number {
+  const timestamp = Date.parse(startedAt);
+  if (Number.isSafeInteger(timestamp) && timestamp > 0) {
+    return timestamp;
+  }
+
+  // Pi session ids are stable and unique. Keep a deterministic positive
+  // fallback if an older session has a non-ISO timestamp.
+  let hash = 2_166_136_261;
+  const input = sessionId + "\0" + startedAt;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0) + 1;
+}
+
+async function parseSessionFile(file: string): Promise<SessionRecord | null> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
@@ -199,7 +219,7 @@ async function parseSessionFile(file: string, generation: number): Promise<Sessi
 
   return {
     instanceId: header.id,
-    generation,
+    generation: stableSessionGeneration(header.id, header.timestamp),
     sessionId: header.id,
     path: file,
     cwd: header.cwd,
@@ -256,7 +276,7 @@ export class PiRegistry {
       .slice(0, this.#maxSessions);
 
     const parsed = await Promise.all(recent.map(item =>
-      parseSessionFile(item.file, Math.max(1, Math.floor(item.info.mtimeMs))),
+      parseSessionFile(item.file),
     ));
 
     this.#sessions.clear();
