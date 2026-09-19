@@ -32,30 +32,12 @@ const keyName = process.env.PI_REMOTE_TAILCAT_KEY ?? "piremote-test";
 const pairTTL = Number(process.env.PI_REMOTE_PAIR_TTL_SECONDS ?? "600");
 const trace = process.env.PI_REMOTE_TRACE ?? "1";
 const showInitialQr = !process.argv.includes("--no-qr");
-const pairUi = (process.env.PI_REMOTE_PAIR_UI ?? "auto")
-  .trim()
-  .toLowerCase();
-const pairQrSize = Number(
-  process.env.PI_REMOTE_PAIR_QR_SIZE ?? "240",
-);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PI_REMOTE_TAILCAT_RELAY_PORT must be a valid TCP port");
 }
 if (!Number.isFinite(pairTTL) || pairTTL < 30 || pairTTL > 3600) {
   throw new Error("PI_REMOTE_PAIR_TTL_SECONDS must be between 30 and 3600");
-}
-if (!["auto", "window", "terminal"].includes(pairUi)) {
-  throw new Error(
-    "PI_REMOTE_PAIR_UI must be auto, window, or terminal",
-  );
-}
-if (!Number.isFinite(pairQrSize)
-    || pairQrSize < 160
-    || pairQrSize > 512) {
-  throw new Error(
-    "PI_REMOTE_PAIR_QR_SIZE must be between 160 and 512 pixels",
-  );
 }
 
 mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
@@ -283,7 +265,6 @@ function spawnTsx(directory, entry, env) {
 const tailcatBin = await ensureTailcat();
 ensureNodeDependencies(relayDir);
 ensureNodeDependencies(hostDir, true);
-cleanupPairingQrFiles();
 const piCommand = requireCommand("pi");
 ensurePersistentKey(tailcatBin);
 
@@ -318,93 +299,6 @@ function printDashboard() {
   console.log("");
 }
 
-function cleanupPairingQrFiles() {
-  for (const entry of readdirSync(runtimeDir, {
-    withFileTypes: true,
-  })) {
-    if (entry.isFile()
-        && entry.name.startsWith("pairing-qr-")
-        && entry.name.endsWith(".svg")) {
-      rmSync(path.join(runtimeDir, entry.name), {
-        force: true,
-      });
-    }
-  }
-}
-
-function desktopPairingAvailable() {
-  if (process.platform !== "linux") return false;
-  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return false;
-  }
-  return Boolean(commandPath("xdg-open"));
-}
-
-function shouldUseDesktopPairing() {
-  if (pairUi === "terminal") return false;
-  if (pairUi === "window") return desktopPairingAvailable();
-  return desktopPairingAvailable();
-}
-
-async function runPairCli(args, stdout = "ignore") {
-  const executable = path.join(
-    hostDir,
-    "node_modules",
-    ".bin",
-    "tsx",
-  );
-  const child = spawn(
-    executable,
-    ["src/pair-cli.ts", ...args],
-    {
-      cwd: hostDir,
-      env: baseEnv,
-      stdio: ["ignore", stdout, "pipe"],
-    },
-  );
-
-  let stderr = "";
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", chunk => {
-    stderr += chunk;
-  });
-
-  const status = await new Promise(resolve => {
-    child.once("exit", code => resolve(code ?? 1));
-    child.once("error", () => resolve(1));
-  });
-  return {
-    status,
-    stderr: stderr.trim(),
-  };
-}
-
-async function openDesktopQr(svgPath) {
-  const opener = commandPath("xdg-open");
-  if (!opener) return false;
-
-  return await new Promise(resolve => {
-    const child = spawn(opener, [svgPath], {
-      detached: true,
-      stdio: "ignore",
-    });
-    let settled = false;
-    child.once("error", () => {
-      if (!settled) {
-        settled = true;
-        resolve(false);
-      }
-    });
-    child.once("spawn", () => {
-      if (!settled) {
-        settled = true;
-        child.unref();
-        resolve(true);
-      }
-    });
-  });
-}
-
 function restoreTerminalInput() {
   if (rawInputEnabled && process.stdin.isTTY) {
     process.stdin.setRawMode(false);
@@ -418,7 +312,6 @@ async function shutdown(exitCode = 0) {
   if (stopping) return;
   stopping = true;
   restoreTerminalInput();
-  cleanupPairingQrFiles();
   console.log("\n[launcher] stopping Pi Remote Tailcat...");
 
   for (const child of [host, relay]) {
@@ -485,70 +378,48 @@ await waitFor(
   },
 );
 
-async function showPairingQr() {
+async function showPairingQr(mode = "compact") {
   if (qrInFlight || stopping) return;
   qrInFlight = true;
   try {
     clearScreen();
     printDashboard();
 
-    if (shouldUseDesktopPairing()) {
-      cleanupPairingQrFiles();
-      const svgPath = path.join(
-        runtimeDir,
-        `pairing-qr-${Date.now()}.svg`,
-      );
-      const result = await runPairCli([
-        `--ttl=${pairTTL}`,
-        `--qr-svg=${svgPath}`,
-        `--qr-size=${Math.round(pairQrSize)}`,
-        "--quiet",
-      ]);
+    const args = [
+      `--ttl=${pairTTL}`,
+      mode === "safe" ? "--qr-safe" : "--qr",
+    ];
 
-      if (result.status === 0
-          && await openDesktopQr(svgPath)) {
-        console.log(
-          `Pairing QR opened in your desktop viewer (~${Math.round(pairQrSize)} px).`,
-        );
-        console.log(
-          "Scan it with Pi Remote. The QR file is private and removed on exit.",
-        );
-        console.log("");
-        console.log(
-          "Keys: [p] new QR   [q] stop   (no Enter required)",
-        );
-        return;
-      }
-
-      rmSync(svgPath, { force: true });
-      if (pairUi === "window") {
-        console.log(
-          "[launcher] desktop QR could not be opened; using terminal fallback.",
-        );
-        if (result.stderr) {
-          console.log("[launcher] " + result.stderr);
-        }
-        console.log("");
-      }
-    }
-
-    const result = await runPairCli(
-      [
-        `--ttl=${pairTTL}`,
-        "--qr",
-      ],
-      "inherit",
+    const executable = path.join(
+      hostDir,
+      "node_modules",
+      ".bin",
+      "tsx",
     );
-    if (result.status !== 0) {
-      console.error(
-        "[launcher] could not create pairing QR"
-          + (result.stderr ? ": " + result.stderr : ""),
-      );
+    const child = spawn(
+      executable,
+      ["src/pair-cli.ts", ...args],
+      {
+        cwd: hostDir,
+        env: baseEnv,
+        stdio: ["ignore", "inherit", "inherit"],
+      },
+    );
+    const status = await new Promise(resolve => {
+      child.once("exit", code => resolve(code ?? 1));
+      child.once("error", () => resolve(1));
+    });
+    if (status !== 0) {
+      console.error("[launcher] could not create pairing QR");
     }
+
     console.log("");
     console.log(
-      "Keys: [p] new QR   [q] stop   (no Enter required)",
+      mode === "safe"
+        ? "Keys: [p] compact QR   [s] compatibility QR   [q] stop"
+        : "Keys: [p] new compact QR   [s] compatibility QR   [q] stop",
     );
+    console.log("(no Enter required)");
   } finally {
     qrInFlight = false;
   }
@@ -564,7 +435,9 @@ function startControls() {
 
     process.stdin.on("data", key => {
       if (key === "p" || key === "P") {
-        void showPairingQr();
+        void showPairingQr("compact");
+      } else if (key === "s" || key === "S") {
+        void showPairingQr("safe");
       } else if (
         key === "q"
         || key === "Q"
@@ -584,7 +457,9 @@ function startControls() {
   lineInput.on("line", line => {
     const command = line.trim().toLowerCase();
     if (command === "p") {
-      void showPairingQr();
+      void showPairingQr("compact");
+    } else if (command === "s") {
+      void showPairingQr("safe");
     } else if (command === "q") {
       void shutdown(0);
     }
@@ -598,12 +473,12 @@ if (showInitialQr) {
 } else {
   clearScreen();
   printDashboard();
-  console.log("Keys: [p] pairing QR   [q] stop   (no Enter required)");
+  console.log(
+    "Keys: [p] compact QR   [s] compatibility QR   [q] stop",
+  );
+  console.log("(no Enter required)");
 }
 
-process.on("exit", () => {
-  restoreTerminalInput();
-  cleanupPairingQrFiles();
-});
+process.on("exit", restoreTerminalInput);
 process.on("SIGINT", () => void shutdown(0));
 process.on("SIGTERM", () => void shutdown(0));
