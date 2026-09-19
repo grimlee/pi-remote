@@ -42,6 +42,11 @@ final class AppStore {
     var isOpeningSession = false
     var isResumingSession = false
     var isCreatingSession = false
+    var isUsingRelayFallback = false
+
+    var hasRelayFallback: Bool {
+        profile?.fallbackRelayURL != nil
+    }
 
     private let identityStore = DeviceIdentityStore()
     private let grantStore = MachineGrantStore()
@@ -131,6 +136,7 @@ final class AppStore {
             )
             try await profileStore.save(pairedProfile)
             profile = pairedProfile
+            isUsingRelayFallback = false
             pairingPayload = ""
             connectionState = .connected(
                 hostName: acceptance.machine.name
@@ -484,6 +490,7 @@ final class AppStore {
             try await profileStore.clear()
 
             profile = nil
+            isUsingRelayFallback = false
             selectedSessionID = nil
             pairingPayload = ""
             pairingError = nil
@@ -558,10 +565,20 @@ final class AppStore {
         }
 
         connectionState = .connecting
-        let url = try await resolveRelayURL(
-            relayURL: profile.relayURL,
-            transport: profile.transport
-        )
+
+        let url: URL
+        if isUsingRelayFallback,
+           let fallback = profile.fallbackRelayURL,
+           let fallbackURL = URL(string: fallback),
+           fallbackURL.scheme?.lowercased() == "wss" {
+            url = fallbackURL
+        } else {
+            url = try await resolveRelayURL(
+                relayURL: profile.relayURL,
+                transport: profile.transport
+            )
+        }
+
         let client = makeRelayClient(url: url)
         relayClient = client
 
@@ -572,6 +589,62 @@ final class AppStore {
                 relayClient = nil
             }
             throw error
+        }
+    }
+
+    func useBackupConnection() async {
+        guard let profile,
+              profile.fallbackRelayURL != nil,
+              !relayConnectInFlight
+        else {
+            return
+        }
+
+        if let relayClient {
+            if rpcClient != nil, selectedSessionID != nil {
+                needsRpcTransportResume = true
+                needsSessionRestore = false
+                isResumingSession = true
+            } else {
+                needsSessionRestore = selectedSessionID != nil
+            }
+            await disconnectRelayPreservingRpc()
+        }
+
+        await tailcatTransport.stop()
+        isUsingRelayFallback = true
+
+        do {
+            try await connectRelay(profile: profile)
+            sessionError = nil
+        } catch {
+            connectionState = .disconnected
+            sessionError = error.localizedDescription
+        }
+    }
+
+    func usePreferredConnection() async {
+        guard let profile, !relayConnectInFlight else { return }
+
+        if let relayClient {
+            if rpcClient != nil, selectedSessionID != nil {
+                needsRpcTransportResume = true
+                needsSessionRestore = false
+                isResumingSession = true
+            } else {
+                needsSessionRestore = selectedSessionID != nil
+            }
+            await disconnectRelayPreservingRpc()
+        }
+
+        isUsingRelayFallback = false
+
+        do {
+            try await connectRelay(profile: profile)
+            sessionError = nil
+        } catch {
+            connectionState = .disconnected
+            sessionError = error.localizedDescription
         }
     }
 
