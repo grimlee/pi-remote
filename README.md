@@ -74,6 +74,20 @@ protocol/   Pi Remote control-plane protocol notes
 relay/      Minimal authenticated router for control and opaque E2EE RPC frames
 ~~~
 
+## Quick Connect
+
+For the low-friction path, start Pi Remote from the repository root:
+
+~~~bash
+npm start
+~~~
+
+On first use the launcher prepares the local Relay/Host, downloads and verifies the pinned Tailcat binary when needed, creates a persistent transport key, and shows a short-lived pairing QR. Scan it once with the iPhone app.
+
+After a device has been paired, normal restarts do **not** show a QR. Start Pi Remote and open the iPhone app; the existing device identity reconnects automatically. Press `p` in the launcher only when pairing another device or refreshing transport coordinates.
+
+Existing Relay/Cloudflare deployments remain supported as the backup connection path.
+
 ## Connectivity policy
 
 Pi Remote treats network transport as an underlay. Machine identity, pairing, authorization, Pi RPC, replay/resume, and E2EE semantics stay the same regardless of how the phone reaches the Relay.
