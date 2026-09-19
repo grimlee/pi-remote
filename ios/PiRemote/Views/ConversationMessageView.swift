@@ -21,22 +21,24 @@ struct ConversationTranscriptView: View {
     }
 
     var body: some View {
-        ForEach(
-            Array(parsedMessages.enumerated()),
-            id: \.offset
-        ) { _, message in
-            ConversationMessageRow(
-                message: message,
-                isStreaming: false
-            )
-        }
+        Group {
+            ForEach(
+                Array(parsedMessages.enumerated()),
+                id: \.offset
+            ) { _, message in
+                ConversationMessageRow(
+                    message: message,
+                    isStreaming: false
+                )
+            }
 
-        if let live = snapshot.liveMessage,
-           let message = ChatMessageParser.parse(live) {
-            ConversationMessageRow(
-                message: message,
-                isStreaming: true
-            )
+            if let live = snapshot.liveMessage,
+               let message = ChatMessageParser.parse(live) {
+                ConversationMessageRow(
+                    message: message,
+                    isStreaming: true
+                )
+            }
         }
         .onChange(of: snapshot.messageRevision) { _, revision in
             guard parsedRevision != revision else { return }
