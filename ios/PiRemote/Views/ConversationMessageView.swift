@@ -475,12 +475,12 @@ private struct MarkdownMessageText: View {
 
     var body: some View {
         if isStreaming {
-            // TextKit is much better suited to a long append-only stream than
-            // replacing one increasingly-large SwiftUI Text value. The
-            // representable appends only the new UTF-16 suffix to textStorage,
-            // allowing TextKit to keep the already-laid-out prefix stable
-            // while the user scrolls through a long response.
-            StreamingPlainTextView(text: text)
+            // UX-01 A/B: keep every other main-branch behavior unchanged,
+            // but bypass the growing non-scrollable UITextView/TextKit bridge.
+            // This isolates whether repeated intrinsic-size measurement of the
+            // live response is the dominant source of scroll hitching.
+            Text(text)
+                .foregroundStyle(foreground)
         } else {
             Group {
                 if let attributed = try? AttributedString(
