@@ -44,6 +44,13 @@ actor PairedHostProfileStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    private static func validFallbackRelayURL(_ value: String?) -> Bool {
+        guard let value else { return true }
+        guard let url = URL(string: value) else { return false }
+        return url.scheme?.lowercased() == "wss"
+            && url.host != nil
+    }
+
     func load() throws -> PairedHostProfile? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -68,7 +75,8 @@ actor PairedHostProfileStore {
               ),
               profile.version == 1,
               profile.machine.id.hasPrefix("machine_"),
-              URL(string: profile.relayURL) != nil
+              URL(string: profile.relayURL) != nil,
+              Self.validFallbackRelayURL(profile.fallbackRelayURL)
         else {
             throw PairedHostProfileStoreError.invalidProfile
         }
@@ -78,7 +86,8 @@ actor PairedHostProfileStore {
     func save(_ profile: PairedHostProfile) throws {
         guard profile.version == 1,
               profile.machine.id.hasPrefix("machine_"),
-              URL(string: profile.relayURL) != nil
+              URL(string: profile.relayURL) != nil,
+              Self.validFallbackRelayURL(profile.fallbackRelayURL)
         else {
             throw PairedHostProfileStoreError.invalidProfile
         }
