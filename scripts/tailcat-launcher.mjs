@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
@@ -21,7 +22,6 @@ const root = path.dirname(scriptDir);
 const relayDir = path.join(root, "relay");
 const hostDir = path.join(root, "host");
 const runtimeDir = path.join(root, ".runtime");
-const configHome = path.join(root, ".config");
 const toolsDir = path.join(root, ".tools");
 const pairSocket = path.join(runtimeDir, "pairing.sock");
 const relayLogPath = path.join(runtimeDir, "relay-trace.log");
@@ -31,7 +31,8 @@ const port = Number(process.env.PI_REMOTE_TAILCAT_RELAY_PORT ?? "8791");
 const keyName = process.env.PI_REMOTE_TAILCAT_KEY ?? "piremote-test";
 const pairTTL = Number(process.env.PI_REMOTE_PAIR_TTL_SECONDS ?? "600");
 const trace = process.env.PI_REMOTE_TRACE ?? "1";
-const showInitialQr = !process.argv.includes("--no-qr");
+const forceInitialQr = process.argv.includes("--qr");
+const suppressInitialQr = process.argv.includes("--no-qr");
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PI_REMOTE_TAILCAT_RELAY_PORT must be a valid TCP port");
@@ -41,12 +42,10 @@ if (!Number.isFinite(pairTTL) || pairTTL < 30 || pairTTL > 3600) {
 }
 
 mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
-mkdirSync(configHome, { recursive: true, mode: 0o700 });
 mkdirSync(toolsDir, { recursive: true, mode: 0o700 });
 
 const baseEnv = {
   ...process.env,
-  XDG_CONFIG_HOME: configHome,
   XDG_RUNTIME_DIR: runtimeDir,
   PI_REMOTE_PAIR_SOCKET: pairSocket,
   PI_REMOTE_TRACE: trace,
@@ -64,6 +63,35 @@ function requireCommand(name) {
   if (!value) throw new Error(`${name} is required but was not found in PATH`);
   return value;
 }
+
+function piRemoteConfigRoot() {
+  const xdg = process.env.XDG_CONFIG_HOME?.trim();
+  return xdg
+    ? path.join(xdg, "pi-remote")
+    : path.join(homedir(), ".config", "pi-remote");
+}
+
+function hasActivePairedDevice() {
+  const file = path.join(
+    piRemoteConfigRoot(),
+    "authorized-devices.json",
+  );
+  if (!existsSync(file)) return false;
+
+  try {
+    const decoded = JSON.parse(readFileSync(file, "utf8"));
+    return decoded?.version === 1
+      && Array.isArray(decoded.devices)
+      && decoded.devices.some(device =>
+        device
+        && typeof device.id === "string"
+        && device.revokedAt === null
+      );
+  } catch {
+    return false;
+  }
+}
+
 
 function runChecked(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -554,13 +582,17 @@ sixelSupported = await probeSixelSupport();
 
 startControls();
 
+const showInitialQr = forceInitialQr
+  || (!suppressInitialQr && !hasActivePairedDevice());
+
 if (showInitialQr) {
   await showPairingQr();
 } else {
   clearScreen();
   printDashboard();
+  console.log("Existing pairing found; QR hidden.");
   console.log(
-    "Keys: [p] pairing QR   [s] compatibility QR   [q] stop",
+    "Keys: [p] pair another device   [s] compatibility QR   [q] stop",
   );
   console.log("(no Enter required)");
 }
