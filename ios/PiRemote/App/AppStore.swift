@@ -217,11 +217,10 @@ final class AppStore {
         )
 
         do {
-            let link = try await relayClient.requestSessionLink(
+            let link = try await requestSessionLinkWithRefresh(
+                relayClient: relayClient,
                 machine: machine,
-                instanceId: session.instanceId,
-                generation: session.generation,
-                access: session.access
+                session: session
             )
             let device = try await identityStore.publicIdentity()
             let client = try PiRpcClient(
@@ -257,6 +256,50 @@ final class AppStore {
         }
 
         isOpeningSession = false
+    }
+
+    private func requestSessionLinkWithRefresh(
+        relayClient: RelayClient,
+        machine: RemoteMachine,
+        session: RemoteSession
+    ) async throws -> SessionLink {
+        do {
+            return try await relayClient.requestSessionLink(
+                machine: machine,
+                instanceId: session.instanceId,
+                generation: session.generation,
+                access: session.access
+            )
+        } catch let error as RelayClient.RelayError {
+            guard case let .remote(code, _) = error,
+                  code == "stale_generation"
+            else {
+                throw error
+            }
+
+            let refreshed = try await relayClient.listSessions(
+                machineId: machine.id
+            )
+            let sorted = refreshed.sorted {
+                $0.startedAt > $1.startedAt
+            }
+            sessions = sorted
+
+            guard let current = sorted.first(
+                where: {
+                    $0.instanceId == session.instanceId
+                }
+            ) else {
+                throw error
+            }
+
+            return try await relayClient.requestSessionLink(
+                machine: machine,
+                instanceId: current.instanceId,
+                generation: current.generation,
+                access: current.access
+            )
+        }
     }
 
     func createNewSession(from bootstrap: RemoteSession) async {
