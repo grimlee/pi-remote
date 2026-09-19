@@ -46,6 +46,47 @@ public enum ControlRequestCrypto {
         return message
     }
 
+    public static func diagnosticsReportMessage(
+        requestId: String,
+        machineId: String,
+        deviceId: String,
+        issuedAtMs: Int64,
+        sessionId: String,
+        windowStartedAtMs: Int64,
+        windowDurationMs: Int,
+        displayFrames: Int,
+        slowFrames25Ms: Int,
+        slowFrames50Ms: Int,
+        dragFrames: Int,
+        dragSlowFrames25Ms: Int,
+        maxFrameGapMs: Int,
+        snapshotCount: Int,
+        liveCharacters: Int,
+        isStreaming: Bool
+    ) -> Data {
+        var message = baseMessage(
+            requestId: requestId,
+            machineId: machineId,
+            deviceId: deviceId,
+            issuedAtMs: issuedAtMs,
+            operation: "diagnostics.report"
+        )
+        message.append(0)
+        append(sessionId, to: &message)
+        append(String(windowStartedAtMs), to: &message)
+        append(String(windowDurationMs), to: &message)
+        append(String(displayFrames), to: &message)
+        append(String(slowFrames25Ms), to: &message)
+        append(String(slowFrames50Ms), to: &message)
+        append(String(dragFrames), to: &message)
+        append(String(dragSlowFrames25Ms), to: &message)
+        append(String(maxFrameGapMs), to: &message)
+        append(String(snapshotCount), to: &message)
+        append(String(liveCharacters), to: &message)
+        message.append(Data((isStreaming ? "1" : "0").utf8))
+        return message
+    }
+
     private static func baseMessage(
         requestId: String,
         machineId: String,
