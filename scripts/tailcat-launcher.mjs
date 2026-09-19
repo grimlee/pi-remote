@@ -388,7 +388,7 @@ function parseSixelOverride() {
 }
 
 function parseDa1SixelResponse(text) {
-  const matches = text.matchAll(/\\x1b\\[\\?([0-9;]+)c/g);
+  const matches = text.matchAll(/\x1b\[\?([0-9;]+)c/g);
   for (const match of matches) {
     const values = match[1]
       .split(";")
@@ -424,7 +424,7 @@ async function probeSixelSupport() {
       };
       const onData = chunk => {
         response += chunk.toString();
-        if (/\\x1b\\[\\?[0-9;]+c/.test(response)) {
+        if (/\x1b\[\?[0-9;]+c/.test(response)) {
           finish(parseDa1SixelResponse(response));
         }
       };
@@ -433,22 +433,15 @@ async function probeSixelSupport() {
       process.stdin.setRawMode(true);
       process.stdin.resume();
       process.stdin.on("data", onData);
-      process.stdout.write("\\x1b[c");
+      process.stdout.write("\x1b[c");
     });
 
     if (probed !== null) return probed;
   }
 
-  // Conservative fallbacks for terminals that may not answer DA1 here.
-  // Shell choice (bash, PowerShell, zsh, etc.) is intentionally irrelevant.
-  if (process.env.WT_SESSION) return true;
-
-  const term = (process.env.TERM ?? "").toLowerCase();
-  const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
-
-  if (term.startsWith("foot") || term.includes("mlterm")) return true;
-  if (termProgram.includes("wezterm")) return true;
-
+  // No positive DA1 capability response means no inline image output.
+  // This is deliberately conservative: shell and terminal brand names are
+  // not treated as proof of Sixel support.
   return false;
 }
 
