@@ -61,7 +61,10 @@ The launcher:
 - writes Relay and Host logs to `.runtime/relay-trace.log` and
   `.runtime/host-trace.log`;
 - waits until the Relay and Host pairing socket are ready;
-- renders a 10-minute pairing QR code in the terminal.
+- renders a 10-minute pairing QR code in the terminal using a compressed
+  bootstrap so the QR is materially smaller than the manual pairing payload;
+- keeps verbose Host/Relay/Tailcat output in the trace files instead of
+  continuously scrolling the interactive terminal.
 
 The QR payload is intentionally not copied into the trace log files. The Tailcat
 address remains redacted from routine Host logs.
@@ -69,10 +72,14 @@ address remains redacted from routine Host logs.
 While the launcher is running:
 
 ```text
-p + Enter   create a fresh pairing QR code
-q + Enter   stop Host and Relay
+p           create a fresh pairing QR code
+q           stop Host and Relay
 Ctrl+C      stop Host and Relay
 ```
+
+On an interactive TTY, `p` and `q` are single-key controls and do not require
+Enter. Re-rendering a QR clears the launcher screen first, so the active QR and
+status remain visible while background logs continue to be recorded on disk.
 
 Advanced overrides remain available through environment variables:
 
@@ -116,9 +123,11 @@ The paired Tailcat address is stored with the host profile in the iOS Keychain.
 Cold start and foreground resume recreate or reuse the native bridge without
 changing Pi RPC identity. A failed pairing tears the bridge down.
 
-Pairing is camera-first on iOS. The PC launcher renders a QR code containing the
-existing `piremote-pair-v1` bootstrap; Pi Remote scans it with AVFoundation and
-starts pairing immediately. Manual paste remains available as a fallback.
+Pairing is camera-first on iOS. The PC launcher renders a compressed
+`piremote-pair-v1z` QR bootstrap; Pi Remote scans it with AVFoundation and
+starts pairing immediately. The parser remains backwards-compatible with the
+original `piremote-pair-v1` payload, and manual paste remains available as a
+fallback.
 
 Tailcat diagnostics are intentionally no longer shown in the normal iOS UI.
 Experiment diagnostics stay on the PC in the Relay/Host trace logs so transport
