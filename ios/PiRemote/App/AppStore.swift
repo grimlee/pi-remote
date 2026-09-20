@@ -743,11 +743,26 @@ final class AppStore {
         }
         backgroundedAt = nil
 
+        let wasDisconnected: Bool
+        if case .disconnected = connectionState {
+            wasDisconnected = true
+        } else {
+            wasDisconnected = false
+        }
+        let exceededBackgroundGrace =
+            elapsed.map { $0 > backgroundGraceInterval } ?? false
+
         if let relayClient {
             let connected = await relayClient.isConnected()
+
+            // A live Relay WebSocket is not enough to declare recovery
+            // complete. The Host can be unavailable while the client socket
+            // itself still reports .running. In that state the explicit
+            // Reconnect button calls resume(), so returning here would turn
+            // Reconnect into a no-op.
             if connected,
-               elapsed == nil
-                || elapsed! <= backgroundGraceInterval {
+               !wasDisconnected,
+               !exceededBackgroundGrace {
                 return
             }
 
@@ -759,6 +774,25 @@ final class AppStore {
                 needsSessionRestore = selectedSessionID != nil
             }
             await disconnectRelayPreservingRpc()
+        } else if rpcClient != nil, selectedSessionID != nil {
+            // transportClosed can clear relayClient while the app is
+            // suspended. Preserve the live Pi RPC journal so the fresh Relay
+            // connection can resume the same channel after foregrounding.
+            needsRpcTransportResume = true
+            needsSessionRestore = false
+            isResumingSession = true
+        } else {
+            needsSessionRestore = selectedSessionID != nil
+        }
+
+        if !isUsingRelayFallback,
+           profile.transport?.kind == .tailcat,
+           wasDisconnected || exceededBackgroundGrace {
+            // The native Quick Connect bridge lives inside the iOS process.
+            // After a long suspension its cached handle/local port can look
+            // valid even though the underlying path is stale. Force a fresh
+            // bridge for long-background recovery and explicit reconnects.
+            await tailcatTransport.stop()
         }
 
         do {
