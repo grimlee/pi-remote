@@ -757,16 +757,236 @@ private struct CompletedTextKitView: UIViewRepresentable {
 private struct StreamingPlainTextView: UIViewRepresentable {
     let text: String
 
-    final class Coordinator {
-        var renderedText = ""
-        var renderedUTF16Length = 0
+    func makeUIView(
+        context: Context
+    ) -> StreamingChunkContainerView {
+        let view = StreamingChunkContainerView()
+        view.apply(text: text)
+        return view
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    func updateUIView(
+        _ uiView: StreamingChunkContainerView,
+        context: Context
+    ) {
+        uiView.apply(text: text)
     }
 
-    func makeUIView(context: Context) -> UITextView {
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: StreamingChunkContainerView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width,
+              width.isFinite,
+              width > 0
+        else {
+            return nil
+        }
+
+        return CGSize(
+            width: width,
+            height: uiView.measuredHeight(for: width)
+        )
+    }
+}
+
+private final class StreamingChunkContainerView: UIView {
+    // Keep live layout work bounded. Completed chunks never change again;
+    // only the final ~2K-character chunk is remeasured as deltas arrive.
+    private let chunkCharacterLimit = 2_048
+    private let boundarySampleUTF16Length = 64
+
+    private var chunkTexts: [String] = []
+    private var chunkViews: [UITextView] = []
+    private var chunkHeights: [CGFloat?] = []
+    private var renderedUTF16Length = 0
+    private var renderedBoundarySample = ""
+    private var measuredWidth: CGFloat?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        setContentHuggingPriority(
+            .defaultLow,
+            for: .horizontal
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(text: String) {
+        let newText = text as NSString
+        let oldLength = renderedUTF16Length
+
+        if oldLength > 0,
+           newText.length >= oldLength,
+           boundaryStillMatches(in: newText) {
+            let delta = newText.substring(from: oldLength)
+            if !delta.isEmpty {
+                append(delta: delta)
+            }
+        } else if newText.length != oldLength
+                    || !boundaryStillMatches(in: newText) {
+            rebuild(from: text)
+        }
+
+        renderedUTF16Length = newText.length
+        renderedBoundarySample = boundarySample(from: newText)
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+    }
+
+    func measuredHeight(for width: CGFloat) -> CGFloat {
+        guard width.isFinite, width > 0 else {
+            return 0
+        }
+
+        if measuredWidth.map({
+            abs($0 - width) > 0.5
+        }) ?? true {
+            measuredWidth = width
+            chunkHeights = Array(
+                repeating: nil,
+                count: chunkViews.count
+            )
+        }
+
+        var total: CGFloat = 0
+        for index in chunkViews.indices {
+            if let cached = chunkHeights[index] {
+                total += cached
+                continue
+            }
+
+            let measured = chunkViews[index].sizeThatFits(
+                CGSize(
+                    width: width,
+                    height: .greatestFiniteMagnitude
+                )
+            )
+            let height = ceil(measured.height)
+            chunkHeights[index] = height
+            total += height
+        }
+        return total
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let width = bounds.width
+        guard width.isFinite, width > 0 else {
+            return
+        }
+
+        _ = measuredHeight(for: width)
+
+        var y: CGFloat = 0
+        for index in chunkViews.indices {
+            let height = chunkHeights[index] ?? 0
+            chunkViews[index].frame = CGRect(
+                x: 0,
+                y: y,
+                width: width,
+                height: height
+            )
+            y += height
+        }
+    }
+
+    private func append(delta: String) {
+        if chunkTexts.isEmpty {
+            appendChunk("")
+        }
+
+        var pending = chunkTexts[chunkTexts.count - 1]
+            + delta
+        var index = chunkTexts.count - 1
+
+        while pending.count > chunkCharacterLimit {
+            let split = pending.index(
+                pending.startIndex,
+                offsetBy: chunkCharacterLimit
+            )
+            let fixed = String(pending[..<split])
+            pending = String(pending[split...])
+
+            setChunk(fixed, at: index)
+            appendChunk("")
+            index += 1
+        }
+
+        setChunk(pending, at: index)
+    }
+
+    private func rebuild(from text: String) {
+        for view in chunkViews {
+            view.removeFromSuperview()
+        }
+        chunkTexts.removeAll(keepingCapacity: true)
+        chunkViews.removeAll(keepingCapacity: true)
+        chunkHeights.removeAll(keepingCapacity: true)
+        measuredWidth = nil
+
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(
+                start,
+                offsetBy: chunkCharacterLimit,
+                limitedBy: text.endIndex
+            ) ?? text.endIndex
+            appendChunk(String(text[start..<end]))
+            start = end
+        }
+
+        if text.isEmpty {
+            appendChunk("")
+        }
+    }
+
+    private func appendChunk(_ text: String) {
+        let view = makeChunkView()
+        addSubview(view)
+        chunkTexts.append(text)
+        chunkViews.append(view)
+        chunkHeights.append(nil)
+        setChunk(text, at: chunkTexts.count - 1)
+    }
+
+    private func setChunk(
+        _ text: String,
+        at index: Int
+    ) {
+        guard chunkTexts.indices.contains(index),
+              chunkViews.indices.contains(index)
+        else {
+            return
+        }
+
+        guard chunkTexts[index] != text
+            || chunkViews[index].text != text
+        else {
+            return
+        }
+
+        chunkTexts[index] = text
+        let view = chunkViews[index]
+        view.attributedText = NSAttributedString(
+            string: text,
+            attributes: textAttributes(for: view)
+        )
+        chunkHeights[index] = nil
+    }
+
+    private func makeChunkView() -> UITextView {
         let view = UITextView()
         view.backgroundColor = .clear
         view.isEditable = false
@@ -789,63 +1009,45 @@ private struct StreamingPlainTextView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(
-        _ uiView: UITextView,
-        context: Context
-    ) {
-        let coordinator = context.coordinator
-        let newText = text as NSString
-        let oldLength = coordinator.renderedUTF16Length
-
-        if oldLength > 0,
-           newText.length >= oldLength,
-           newText.substring(to: oldLength)
-                == coordinator.renderedText {
-            let delta = newText.substring(from: oldLength)
-            if !delta.isEmpty {
-                uiView.textStorage.append(
-                    NSAttributedString(
-                        string: delta,
-                        attributes: textAttributes(for: uiView)
-                    )
-                )
-                coordinator.renderedText += delta
-                coordinator.renderedUTF16Length = newText.length
-                uiView.invalidateIntrinsicContentSize()
-            }
-            return
+    private func boundaryStillMatches(
+        in newText: NSString
+    ) -> Bool {
+        guard renderedUTF16Length > 0 else {
+            return true
+        }
+        guard newText.length >= renderedUTF16Length else {
+            return false
         }
 
-        uiView.attributedText = NSAttributedString(
-            string: text,
-            attributes: textAttributes(for: uiView)
+        let sampleLength = min(
+            boundarySampleUTF16Length,
+            renderedUTF16Length
         )
-        coordinator.renderedText = text
-        coordinator.renderedUTF16Length = newText.length
-        uiView.invalidateIntrinsicContentSize()
+        guard sampleLength > 0 else {
+            return true
+        }
+
+        let range = NSRange(
+            location: renderedUTF16Length - sampleLength,
+            length: sampleLength
+        )
+        return newText.substring(with: range)
+            == renderedBoundarySample
     }
 
-    func sizeThatFits(
-        _ proposal: ProposedViewSize,
-        uiView: UITextView,
-        context: Context
-    ) -> CGSize? {
-        guard let width = proposal.width,
-              width.isFinite,
-              width > 0
-        else {
-            return nil
+    private func boundarySample(
+        from text: NSString
+    ) -> String {
+        let sampleLength = min(
+            boundarySampleUTF16Length,
+            text.length
+        )
+        guard sampleLength > 0 else {
+            return ""
         }
 
-        let measured = uiView.sizeThatFits(
-            CGSize(
-                width: width,
-                height: .greatestFiniteMagnitude
-            )
-        )
-        return CGSize(
-            width: width,
-            height: ceil(measured.height)
+        return text.substring(
+            from: text.length - sampleLength
         )
     }
 
