@@ -23,6 +23,7 @@ struct RootView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var path: [SessionRoute] = []
+    @State private var collapsedProjects: Set<String> = []
     @State private var showingQuickConnectScanner = false
     @State private var quickConnectScannerError: String?
 
@@ -182,21 +183,49 @@ struct RootView: View {
                 List {
                     ForEach(projectGroups) { project in
                         Section {
-                            ForEach(project.sessions) { session in
-                                NavigationLink(
-                                    value: SessionRoute.existing(session)
-                                ) {
-                                    SessionRow(session: session)
+                            if !collapsedProjects.contains(project.cwd) {
+                                ForEach(project.sessions) { session in
+                                    NavigationLink(
+                                        value: SessionRoute.existing(session)
+                                    ) {
+                                        SessionRow(session: session)
+                                    }
                                 }
                             }
                         } header: {
-                            Label(
-                                projectName(project.cwd),
-                                systemImage: "folder"
-                            )
+                            Button {
+                                withAnimation(.snappy(duration: 0.18)) {
+                                    toggleProject(project.cwd)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder")
+                                    Text(projectName(project.cwd))
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    Text("\(project.sessions.count)")
+                                        .foregroundStyle(.tertiary)
+                                        .monospacedDigit()
+
+                                    Image(
+                                        systemName: collapsedProjects
+                                            .contains(project.cwd)
+                                            ? "chevron.right"
+                                            : "chevron.down"
+                                    )
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
                         } footer: {
-                            Text(project.cwd)
-                                .lineLimit(1)
+                            if !collapsedProjects.contains(project.cwd) {
+                                Text(project.cwd)
+                                    .lineLimit(1)
+                            }
                         }
                     }
 
@@ -301,6 +330,14 @@ struct RootView: View {
 
     private var projectSessions: [RemoteSession] {
         projectGroups.compactMap(\.sessions.first)
+    }
+
+    private func toggleProject(_ cwd: String) {
+        if collapsedProjects.contains(cwd) {
+            collapsedProjects.remove(cwd)
+        } else {
+            collapsedProjects.insert(cwd)
+        }
     }
 
     private func projectName(_ cwd: String) -> String {
