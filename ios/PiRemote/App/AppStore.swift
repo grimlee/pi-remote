@@ -643,13 +643,21 @@ final class AppStore {
             snapshot.liveMessage
         )
 
+        let tpsVisible = snapshot.decodeTokensPerSecond != nil
+        let statsVisible = snapshot.sessionStats != nil
+
         return [
+            "event=\(snapshot.diagnosticEvent ?? "none")",
             "stream=\(streaming ? 1 : 0)",
             "live=\(snapshot.liveMessage == nil ? 0 : 1)",
             "role=\(liveRole)",
             "types=\(liveTypes)",
             "rev=\(snapshot.messageRevision)",
-            "m=\(snapshot.messages.count)"
+            "m=\(snapshot.messages.count)",
+            "pr=\(snapshot.presentationRevision)",
+            "chars=\(snapshot.liveCharacterCount)",
+            "stats=\(statsVisible ? 1 : 0)",
+            "tps=\(tpsVisible ? 1 : 0)"
         ].joined(separator: "|")
     }
 
