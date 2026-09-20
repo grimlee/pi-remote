@@ -1,201 +1,234 @@
 # Tailcat Quick Connect transport
 
-This document describes Pi Remote's Tailcat-backed **Quick Connect** transport. Tailcat is an underlay only; the Relay protocol, Pi RPC semantics, pairing identity, authorization, replay/resume, and E2EE model remain owned by Pi Remote.
+Pi Remote uses Tailcat as the preferred **Quick Connect** underlay.
+
+Tailcat solves reachability. It does not replace Pi Remote's machine identity, pairing, authorization, encrypted Pi RPC transport, replay, or session semantics.
 
 ## Goal
 
-Remove Cloudflare Tunnel, DNS, public-IP, and inbound-port setup from the Pi Remote
-first-run path while preserving the existing Pi Remote security model.
+The original Pi Remote prototype required a public Relay endpoint, typically behind Cloudflare Tunnel.
 
-Tailcat is used only as a userspace network underlay. Pi Remote still owns:
+That worked reliably, but it raised the setup cost:
 
-- machine and device identity;
-- pairing and revocation;
-- control-request authorization;
-- end-to-end encryption for Pi RPC traffic;
-- session replay and reconciliation.
+- domain/DNS configuration;
+- tunnel configuration;
+- a public WSS endpoint;
+- more infrastructure concepts exposed to the user.
 
-A Tailcat address is a secret bearer capability and must not be written to public
-logs, committed to the repository, or published in DNS.
+Quick Connect keeps the same Pi Remote trust model while reducing first-run setup to:
 
-## Phase 1 architecture
+~~~text
+Host: npm start
+Phone: scan QR once
+Later: npm start + open app
+~~~
 
-```text
-Host
-  pi-remote-relay on 127.0.0.1:8780
-          ^
-          | local WebSocket
-          |
-  pi-remote-host
-          |
-          +-- tailcat serve 8780
-                  |
-                  | WireGuard / direct UDP when possible
-                  | DERP fallback otherwise
-                  |
-               iPhone
-```
+## Topology
 
-The Relay protocol remains WebSocket-based. Tailcat transports the TCP connection
-to the Host loopback Relay. This keeps Tailcat isolated from Pi RPC, pairing,
-authorization, and replay logic.
+~~~text
+iPhone
+  |
+  | RelayClient -> loopback WebSocket
+  v
+PiRemoteTailcat.xcframework
+  |
+  | Tailcat direct path when possible
+  | DERP fallback otherwise
+  v
+Host Tailcat sidecar
+  |
+  | loopback TCP
+  v
+Pi Remote Relay
+  |
+  v
+pi-remote-host
+  |
+  v
+Pi RPC
+~~~
 
-## Host experiment
+The Relay remains WebSocket-based. Tailcat transports the connection to the Host-local Relay.
 
-Pi Remote includes a one-command Quick Connect launcher:
+## One-command launcher
 
-```bash
-cd pi-remote
+From the repository root:
+
+~~~bash
+npm start
+~~~
+
+The root package also exposes equivalent aliases:
+
+~~~bash
+npm run quick-connect
 npm run tailcat
-```
+~~~
 
 The launcher:
 
+- checks for Pi and Node/npm dependencies;
 - installs missing Host/Relay Node dependencies;
-- uses a repo-local pinned Tailcat v0.6.0 binary, downloading and SHA-256
-  verifying it when Tailcat is not already available;
-- creates or reuses the persistent `piremote-test` Tailcat key;
-- starts the Relay on both IPv4 and IPv6 loopback at port 8791;
-- starts the Host against that local Relay;
-- enables PC-side transport/RPC tracing by default;
-- writes Relay and Host logs to `.runtime/relay-trace.log` and
-  `.runtime/host-trace.log`;
-- waits until the Relay and Host pairing socket are ready;
-- renders a 10-minute pairing QR using a compressed bootstrap;
-- on Omarchy's default Foot terminal, renders the QR as a small inline Sixel
-  image so the symbol keeps true square pixels while staying inside the same
-  terminal;
-- keeps the half-block text QR available as compatibility mode when Sixel is
-  unavailable or when running through a terminal multiplexer;
-- keeps verbose Host/Relay/Tailcat output in the trace files instead of
-  continuously scrolling the interactive terminal.
+- uses a pinned Tailcat v0.6.0 binary;
+- downloads and SHA-256 verifies the Linux binary when necessary;
+- creates/reuses a persistent Tailcat key;
+- starts the local Relay;
+- starts pi-remote-host in Tailcat mode;
+- writes Host/Relay traces under \`.runtime/\`;
+- waits for the pairing IPC socket;
+- shows a QR automatically when no active paired device exists.
 
-The QR payload is intentionally not copied into the trace log files. The Tailcat
-address remains redacted from routine Host logs.
+Automatic Tailcat download currently supports Linux x86_64 and arm64. On other Host platforms Tailcat must be supplied separately and the path is not yet part of the normal test matrix.
 
-While the launcher is running:
+## Pairing UX
 
-```text
-p           create a fresh inline pairing QR
-s           show the text compatibility QR
-q           stop Host and Relay
-Ctrl+C      stop Host and Relay
-```
+First use:
 
-On an interactive TTY, `p`, `s`, and `q` are single-key controls and do
-not require Enter. Re-rendering a QR clears the launcher screen first, so the
-active QR and status remain visible while background logs continue to be
-recorded on disk. The launcher detects direct Foot sessions for Sixel output and
-falls back to the text QR elsewhere.
+~~~text
+npm start
+    |
+QR appears
+    |
+scan in Pi Remote
+    |
+paired
+~~~
 
-Advanced overrides remain available through environment variables:
+Later use:
 
-- `PI_REMOTE_TAILCAT_RELAY_PORT`: local Relay/Tailcat port; defaults to 8791.
-- `PI_REMOTE_TAILCAT_KEY`: saved Tailcat key name; defaults to
-  `piremote-test` by default.
-- `PI_REMOTE_PAIR_TTL_SECONDS`: QR pairing lifetime; defaults to 600.
-- `PI_REMOTE_TRACE`: defaults to `1`; set to `0` to disable verbose PC
-  tracing.
+~~~text
+npm start
+    |
+existing paired device detected
+    |
+QR stays hidden
+    |
+open Pi Remote -> reconnect
+~~~
 
-The underlying architecture is unchanged: the Host still uses a local WebSocket
-Relay, while Tailcat is only the userspace transport underlay.
+Launcher controls:
 
-## iOS status
+~~~text
+p   show a fresh pairing QR / pair another device
+s   force the compatibility terminal QR
+q   stop Host and Relay
+~~~
 
-The iOS data plane is implemented by the integrated native Tailcat bridge.
+On a compatible terminal the launcher may use Sixel to render a compact square QR. Otherwise it falls back to the text QR.
 
-`native/tailcat-ios` pins Tailcat `v0.6.0` and builds a small Go/C bridge as a
-static `PiRemoteTailcat.xcframework`. The bridge intentionally exposes only a
-minimal API: start a Tailcat TCP forwarder, return its loopback port, stop it,
-and report the latest native startup error.
+## Runtime files
 
-`TailcatTransport.swift` presents that bridge to the existing app as a local
-WebSocket endpoint:
+Local experiment/runtime data is kept out of the repository:
 
-```text
+~~~text
+.runtime/   Host/Relay trace logs and pairing socket
+.tools/     repo-local Tailcat binary/cache
+~~~
+
+Both paths are gitignored.
+
+The launcher avoids copying the QR payload into routine trace logs.
+
+## iOS bridge
+
+The native bridge lives under:
+
+~~~text
+native/tailcat-ios/
+~~~
+
+It builds a static \`PiRemoteTailcat.xcframework\`.
+
+The Swift side sees a local WebSocket endpoint:
+
+~~~text
 RelayClient
     |
 ws://127.0.0.1:<ephemeral>/v0/client
     |
 PiRemoteTailcat.xcframework
     |
-tailcat.Client.DialTCPPort
+Tailcat TCP dial
     |
-Tailcat direct UDP / DERP
-    |
-Host local Relay
-```
+Host-local Relay
+~~~
 
-The paired Tailcat address is stored with the host profile in the iOS Keychain.
-Cold start and foreground resume recreate or reuse the native bridge without
-changing Pi RPC identity. A failed pairing tears the bridge down.
+The bridge intentionally exposes a small API: start the forwarder, return its local port, stop it, and expose limited diagnostics.
 
-Pairing is camera-first on iOS. The PC launcher renders a compressed
-`piremote-pair-v1z` QR bootstrap; Pi Remote scans it with AVFoundation and
-starts pairing immediately. The parser remains backwards-compatible with the
-original `piremote-pair-v1` payload, and manual paste remains available as a
-fallback.
-
-Tailcat diagnostics are intentionally no longer shown in the normal iOS UI.
-Experiment diagnostics stay on the PC in the Relay/Host trace logs so transport
-debugging does not complicate the mobile experience.
-
-Build the full device+simulator XCFramework with:
-
-```bash
-sh native/tailcat-ios/build-xcframework.sh
-```
-
-For a device-only local build:
-
-```bash
-PI_REMOTE_TAILCAT_DEVICE_ONLY=1 \
-  sh native/tailcat-ios/build-xcframework.sh
-```
-
-The dedicated `Tailcat iOS Experiment` GitHub Actions workflow verifies the
-native framework, PiRemoteCore tests, Xcode project generation, unsigned
-`iphoneos` build, and sideload IPA packaging.
+The app stores paired transport coordinates with the Host profile in Keychain.
 
 ## Identity continuity
 
-The historical Tailcat PoC used a separate iOS identity so it could coexist with main during experimentation. The integrated product deliberately does **not** keep that split:
+Quick Connect uses the same Pi Remote identity as the backup public Relay path.
 
-- bundle identifier remains `top.grimlee.piremote`;
-- display name remains `Pi Remote`;
-- the existing Pi Remote Keychain identity and machine grants are reused.
+The app keeps:
 
-This lets a host move between Quick Connect and the backup Relay path without creating a second device identity.
+~~~text
+bundle id:   top.grimlee.piremote
+display:     Pi Remote
+~~~
 
-## Security and lifecycle
+Machine identity, iPhone device identity, and Host grants do not change when the underlying reachability path changes.
 
-A Tailcat address is treated as a sensitive reachability capability, not as Pi Remote authorization. Possessing the address may allow a peer to reach the local Relay transport, but control still requires the existing Pi Remote device identity, signed grant, Host authorization snapshot, and per-channel E2EE capability.
+That means transport migration should not create a second logical Pi Remote device.
 
-Routine logs and diagnostics must never contain the Tailcat address or private key. The Host sidecar and native iOS diagnostics redact strings matching Tailcat bearer capabilities, launcher trace files are created with mode `0600`, and the launcher enforces mode `0600` on the persistent Tailcat private key. Pairing QR output is intentionally shown only in the interactive terminal and is not copied into routine Host/Relay trace logs.
+## Security boundary
 
-Device revocation continues to use Pi Remote's existing authorized-device store. Revoking a device invalidates its authorization even if that device still knows the Tailcat address.
+A Tailcat address is sensitive reachability information, but it is not Pi Remote authorization.
 
-Tailcat key/address rotation is an explicit Host operation. Rotating the persistent Tailcat key changes the reachability address and invalidates stored Tailcat transport coordinates on phones. The machine identity and Pi Remote device identities do not rotate with it; affected phones only need a fresh transport bootstrap/QR to learn the new address. Automatic address rotation is intentionally deferred until there is a safe signed transport-update protocol.
+Control still requires:
 
-The integrated launcher uses the normal Pi Remote Host configuration rather than the PoC's repo-local identity store. This keeps the same machine identity and device grants available to both Quick Connect and the backup Relay path.
+- authenticated device identity;
+- Host-signed MachineGrant;
+- live Host authorization;
+- signed control requests;
+- encrypted per-session Pi RPC capability.
 
-## Compatibility
+Device revocation remains a Pi Remote Host operation.
 
-`PI_REMOTE_TRANSPORT` defaults to `relay`. Existing WSS/Cloudflare behavior is
-unchanged unless `PI_REMOTE_TRANSPORT=tailcat` is explicitly selected.
+Routine diagnostics must not print the Tailcat private key or full bearer address.
 
-The pairing format remains version 1. The optional `transport` field is ignored
-by older decoders, while the integrated app treats a missing field as the existing
-public Relay transport.
+## Background/foreground
 
-## Exit criteria before considering merge to main
+The Tailcat bridge lives inside the iOS process, so iOS suspension can pause the mobile side.
 
-Before Tailcat is treated as merge-ready, all of these must be true:
+The Pi RPC process itself stays on the Host and is not owned by the Tailcat bridge.
 
-- native iOS transport works on a real device;
-- direct-path and DERP fallback are both verified;
-- background/foreground reconnect does not recreate a healthy Pi RPC process;
-- Tailcat address rotation and device revocation have a defined lifecycle;
-- no Tailcat secret is emitted through routine logs or diagnostics;
-- existing WSS Relay transport remains a tested fallback;
-- Tailcat API/wire-format changes are pinned to a known-compatible version.
+For short background intervals the existing transport may remain healthy enough to reuse directly. If the transport is genuinely lost, Pi Remote's normal session resume/replay/reconciliation path applies.
+
+Do not force a reconnect solely because a streaming turn was backgrounded; transport recovery should respond to real connectivity loss.
+
+## Backup connection
+
+An existing public WSS Relay/Cloudflare endpoint can be stored as a backup when migrating a paired Host to Quick Connect.
+
+Quick Connect is preferred for normal first-run use because it removes the domain/tunnel requirement. The public path remains useful for testing and as an independent fallback.
+
+## Build
+
+Build the full device+simulator Tailcat XCFramework:
+
+~~~bash
+sh native/tailcat-ios/build-xcframework.sh
+~~~
+
+Device-only local build:
+
+~~~bash
+PI_REMOTE_TAILCAT_DEVICE_ONLY=1 \
+  sh native/tailcat-ios/build-xcframework.sh
+~~~
+
+The normal iOS GitHub Actions workflow builds this framework before compiling Pi Remote and packaging the unsigned IPA.
+
+## Current validation
+
+The integrated transport has been exercised on a real iPhone across:
+
+- repeated Host launcher restarts without rescanning;
+- Wi-Fi/mobile network changes;
+- proxy/VPN toggling;
+- direct Quick Connect usage alongside the older Cloudflare path;
+- iOS background/foreground cycles.
+
+This is still an early project, so broader devices, Host platforms, NATs, and networks remain valuable community test coverage.
