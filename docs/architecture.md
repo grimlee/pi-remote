@@ -1,245 +1,279 @@
 # Architecture
 
-## Goal
+## Product goal
 
-Pi Remote should feel like a native remote-agent product, not a remote network utility.
+Pi Remote is a native iPhone workspace for Pi Agent.
 
-The user should think in terms of:
+The user-facing model is:
 
-```text
-Trusted machine -> active sessions -> task
-```
+~~~text
+trusted Host -> workspace -> session -> conversation
+~~~
 
 not:
 
-```text
-VPN -> hostname -> port -> server
-```
+~~~text
+VPN -> hostname -> port -> terminal
+~~~
 
-The host computer owns Pi and all machine access. The iPhone owns presentation and user interaction. A lightweight Pi Remote Relay provides rendezvous, presence, authentication, and control-message routing.
+The Host computer owns Pi, tools, credentials, files, and model execution. The iPhone owns presentation and user interaction.
 
-## Three components, two planes
+## Components
 
-### Components
+### Pi Remote iOS
 
-1. **Pi Remote iOS**
-   - native SwiftUI control surface
-   - trusted machine/session list
-   - Pi Collab client
-   - local Keychain identity
+The SwiftUI app owns:
 
-2. **pi-remote-host**
-   - runs beside Pi on the computer
-   - owns a stable machine identity
-   - maintains an outbound relay connection
-   - reads Pi's local Collab registry
-   - resolves generation-bound Collab links
-   - later starts/resumes/stops sessions
+- device identity and Host grants in Keychain;
+- session/workspace navigation;
+- local conversation presentation cache;
+- Pi RPC client state;
+- native Tailcat bridge for Quick Connect;
+- model/slash-command/composer UI;
+- foreground/background lifecycle handling.
 
-3. **Pi Remote Relay**
-   - public rendezvous/control service
-   - tracks authenticated machine presence
-   - routes narrow request/response messages
-   - never needs provider credentials or host filesystem access
-   - should not proxy normal Pi session content
+### pi-remote-host
 
-### Plane A: machine control plane
+The Host process owns:
 
-```text
-pi-remote-host ── outbound WSS ──► Pi Remote Relay ◄── WSS ── Pi Remote iOS
-```
+- stable machine identity;
+- paired-device authorization and revocation;
+- Pi session discovery;
+- generation-bound session linking;
+- Pi RPC subprocess lifecycle;
+- per-channel encryption keys;
+- bounded Host->phone replay buffers;
+- resume barriers and sequence reconciliation.
 
-Responsibilities:
+A persisted session is opened through Pi's native RPC mode:
 
-- machine authentication and presence
-- paired-device/account authorization
-- session discovery
-- generation-bound Collab link requests
-- later: start/resume/stop and push metadata
+~~~bash
+pi --session <session-path> --mode rpc
+~~~
 
-### Plane B: Pi session data plane
+### Pi Remote Relay
 
-```text
-Pi session <==== E2EE Pi Collab ====> Collab relay <==== E2EE ====> iPhone
-```
+The Relay is a narrow authenticated router.
 
-Responsibilities remain upstream Pi Collab:
+It handles:
 
-- transcript snapshots and incremental state
-- assistant streaming
-- thinking/tool activity
-- prompt submission
-- interrupt
-- interactive questions
-- subagent state/control where supported
+- Host/device authentication;
+- machine presence;
+- signed control requests;
+- session list/link responses;
+- opaque encrypted Pi RPC frames.
 
-Pi Remote must not invent a second transcript protocol unless upstream Collab cannot express a required product feature.
+The Relay does not need provider credentials, Host filesystem access, or plaintext Pi conversation contents.
 
-## Why relay instead of direct host networking
+### Tailcat underlay
 
-Direct networking solutions such as LAN, Tailscale, SSH forwarding, or Cloudflare Tunnel can make a host reachable, but they expose infrastructure concepts to the user.
+Quick Connect uses Tailcat only to make the Host-local Relay reachable from the phone.
 
-Pi Remote's product abstraction is:
+Tailcat does **not** own:
 
-```text
-machineId = stable identity
-status = online/offline
-sessions = current Pi sessions
-```
+- Pi Remote machine identity;
+- pairing;
+- Host grants;
+- device revocation;
+- Pi session semantics;
+- Pi RPC encryption;
+- replay/resume.
 
-The host initiates the relay connection, so normal operation requires no public inbound port, static IP, VPN state, NAT traversal configuration, or hostname entry on the phone.
+That separation lets the same application semantics work over Tailcat or a public WSS Relay path.
 
-Tailscale/LAN/Cloudflare remain useful development and emergency transports and should stay behind a transport abstraction.
+## Preferred Quick Connect topology
 
-## Host lifecycle
+~~~text
+iPhone
+  |
+  | RelayClient
+  v
+PiRemoteTailcat.xcframework
+  |
+  | Tailcat direct path / DERP
+  v
+Host Tailcat sidecar
+  |
+  | loopback TCP
+  v
+local Pi Remote Relay
+  |
+  v
+pi-remote-host
+  |
+  | JSONL stdin/stdout
+  v
+pi --session <session-path> --mode rpc
+~~~
 
-At startup:
+The Relay and Host normally run on the same computer for Quick Connect.
 
-1. load or create a stable machine identity;
-2. authenticate to Pi Remote Relay;
-3. open an outbound WebSocket;
-4. send machine metadata/capabilities;
-5. maintain heartbeat/presence;
-6. answer control requests by consulting Pi's local interfaces.
+## Optional public Relay topology
 
-If the connection drops, the host reconnects with bounded exponential backoff. Pi sessions continue running independently.
+~~~text
+Host computer -- outbound WSS --> public Pi Remote Relay <-- WSS -- iPhone
+~~~
+
+A Cloudflare Tunnel can expose the public Relay without opening an inbound Host port.
+
+This path remains useful as a backup or advanced self-hosted deployment, but it is no longer required for normal first-run setup.
+
+## Identity and pairing
+
+### Machine identity
+
+The Host keeps a stable machine signing/key-agreement identity.
+
+### Device identity
+
+The iPhone keeps its own signing/key-agreement identity in Keychain.
+
+### Pairing
+
+A short-lived QR bootstrap authorizes a new device.
+
+Pairing produces a Host-signed grant that binds the exact device identity to the exact Host identity. Later network reconnects reuse those identities; the user does not normally rescan a QR.
+
+Transport reachability is not authorization. Knowing a Tailcat address or Relay endpoint is insufficient to control a Host without a valid paired-device identity and grant.
 
 ## Session discovery
 
-The host should prefer supported Pi interfaces:
+The Host scans Pi's native session store, normally:
 
-- `omp collab list --json`
-- `omp collab link <instanceId> --json`
+~~~text
+~/.pi/agent/sessions/
+~~~
 
-A discovery response is metadata only. A Collab URL is capability-bearing secret material and is generated only after an authorized request for an exact session generation.
+Each JSONL session exposes metadata used by the iOS list:
 
-## Generation safety
+- immutable Pi session ID;
+- working directory (\`cwd\`);
+- explicit session name when present;
+- first-user-message fallback title;
+- model metadata;
+- immutable session start timestamp;
+- JSONL modification time as recent activity.
 
-A phone selects:
+The immutable Pi header timestamp is used for session generation identity. File modification time is **not** used for generation because Pi appends ordinary conversation turns to the JSONL file.
 
-```text
-(instanceId, generation)
-```
+## Workspaces
 
-not only `instanceId`.
+Pi Remote currently derives workspaces directly from Pi session \`cwd\`.
 
-If the Pi process rotates to a new room before link issuance, the request must fail with `stale_generation`. The client then refreshes the session list instead of silently attaching to a replacement session.
+~~~text
+same cwd -> same workspace section
+~~~
 
-## Relay routing model
+This is intentionally presentation-only grouping. Pi Remote does not create a second workspace database or change Pi's session format.
 
-The relay should route by opaque identities rather than network coordinates:
+Workspace and session ordering use recent activity. The underlying \`cwd\` remains authoritative.
 
-```text
-machineId
-deviceId / accountId
-requestId
-```
+## Pi RPC channel lifecycle
 
-A typical flow:
+When the phone opens a session:
 
-```text
-iPhone                    Relay                     Host
-  |                         |                         |
-  | sessions.list           |                         |
-  |------------------------>|                         |
-  |                         | control.request         |
-  |                         |------------------------>|
-  |                         |                         | omp collab list --json
-  |                         | control.response        |
-  |                         |<------------------------|
-  | sessions snapshot       |                         |
-  |<------------------------|                         |
-```
+1. iPhone sends a signed \`sessions.link(instanceId, generation)\` request.
+2. Host verifies the paired device and session generation.
+3. Host reuses a matching live RPC channel when possible, otherwise starts \`pi --session <path> --mode rpc\`.
+4. Host creates a random per-channel key.
+5. The channel capability is encrypted to the paired iPhone device identity.
+6. iPhone creates a \`PiRpcClient\`.
+7. Native Pi RPC commands request authoritative state/history/models/commands.
+8. Pi events stream back through encrypted \`rpc.frame\` messages.
 
-For a session link:
+A mobile WebSocket is not the owner of the Pi subprocess. The Host is.
 
-```text
-iPhone                    Relay                     Host
-  | link(instance,gen)      |                         |
-  |------------------------>|------------------------>|
-  |                         |                         | omp collab link ...
-  |                         |<------------------------|
-  | encrypted capability    |                         |
-  |<------------------------|                         |
-```
+## Encrypted RPC framing
 
-The long-term design should encrypt sensitive capability responses to the paired mobile device so the relay does not need plaintext Collab room material.
+Pi RPC payloads are encrypted between the Host and paired iPhone.
 
-## State ownership
+The Relay can observe routing metadata such as:
 
-The host/Pi environment is authoritative for:
+- machine ID;
+- device ID;
+- channel ID;
+- direction;
+- sequence number.
 
-- machine online state while connected
-- session existence
-- session generation
-- Pi runtime state
-- transcript contents
-- running/idle status
-- interactive requests
+It should not see plaintext prompts, assistant messages, tool arguments/results, or extension UI values.
 
-The relay is authoritative only for ephemeral routing/presence it directly observes.
+## Reliable command delivery
 
-The iOS app may cache presentation state but must reconcile after reconnect.
+Client commands carry monotonically increasing channel sequence numbers.
+
+The Host acknowledges accepted client sequence numbers. The iPhone keeps a bounded in-memory journal for commands where duplicate delivery would be harmful, such as prompt submission.
+
+On reconnect, the Host's authoritative next-client-sequence determines whether a command was already accepted or must be retried.
+
+## Host event replay
+
+Host->phone events also carry monotonically increasing sequence numbers.
+
+The Host keeps a bounded replay ring for each live RPC channel. On a real transport reconnect, the iPhone can request a link using its last applied Host sequence.
+
+If the requested sequence is still in the replay window:
+
+~~~text
+cursor -> replay missing frames -> resume ACK -> live frames continue
+~~~
+
+If the cursor is older than the retained ring, Pi Remote reconciles from authoritative Pi state rather than applying an incomplete delta history.
+
+## Resume barriers
+
+During session linking/resume the Host temporarily holds post-barrier live frames until the iPhone acknowledges the resume target.
+
+This prevents new live events from overtaking replay/state synchronization.
+
+Resume logic must preserve the existing Pi RPC subprocess whenever possible. Reconnect should repair transport, not recreate a healthy Pi task.
 
 ## Background behavior
 
-iOS may suspend the app and close sockets. Disconnect is normal:
+iOS can suspend application execution and UI rendering.
 
-1. iOS persists only appropriate cached presentation state and Keychain credentials;
-2. on foreground, reconnect to relay;
-3. refresh machine presence;
-4. refresh selected session generation;
-5. reconnect through Pi Collab;
-6. accept authoritative snapshot;
-7. reconcile/replace cached UI state.
+Correctness therefore cannot depend on the phone continuing to process frames while backgrounded.
 
-No correctness property may depend on the mobile WebSocket surviving background suspension.
+The intended behavior is:
 
-## Security boundary
+~~~text
+Pi keeps running on Host
+        |
+Host continues owning session/RPC state
+        |
+phone foregrounds
+        |
+reuse healthy transport OR reconnect/reconcile if transport was lost
+~~~
 
-Provider keys, SSH credentials, browser cookies, MCP credentials, filesystem contents, and arbitrary shell execution remain on the host.
+A short background interval may reuse the still-healthy transport. An actual transport loss uses the replay/reconciliation path.
 
-The relay receives only the minimum metadata necessary for routing/control. Pi Collab session content remains protected by upstream end-to-end encryption.
+## Presentation cache
 
-Pairing/device authentication is a separate protocol concern from machine/session resource semantics. The initial development relay may use a bootstrap token, but that is not a production identity design.
+The iOS conversation cache exists only to improve perceived startup time.
 
-## iOS architecture
+Cached completed conversation content can render immediately, but Host/Pi state remains authoritative. Reconnection must be able to replace/reconcile cached presentation state.
 
-Suggested modules:
+## Session title semantics
 
-```text
-PiRemoteApp
-  AppState
-  Identity
-  Pairing
-  Machines
-  Sessions
-  Conversation
-  Transport
-    RelayClient
-    FallbackHostTransport
-    CollabClient
-  Security
-    KeychainStore
-  UI
-    MachineListView
-    SessionListView
-    ConversationView
-    ComposerView
-```
+Pi Remote follows Pi's native behavior:
 
-Use Swift concurrency. WebSocket connection owners should be actors so reconnects, frame ordering, and lifecycle transitions are serialized.
+- explicit Pi session name wins;
+- otherwise the first user message is the fallback display title.
 
-## MVP boundary
+Renaming uses Pi's native \`set_session_name\` RPC command.
 
-First production-shaped vertical slice:
+## Current product boundary
 
-**paired iPhone -> relay -> online host -> discover active Pi session -> obtain exact-generation Collab capability -> connect through Collab -> render -> prompt -> interrupt -> reconnect**.
+Pi Remote currently focuses on:
 
-Explicitly excluded from the first slice:
+- one trusted Host;
+- persisted Pi sessions;
+- native conversation/session UI;
+- Quick Connect over Tailcat;
+- optional public Relay backup.
 
-- arbitrary remote shell
-- generic filesystem browsing
-- multi-user sharing
-- iOS background execution guarantees
-- running transcript traffic through Pi Remote Relay
+It intentionally does not expose a general remote shell.
+
+It also does not currently attach to an independently running interactive Pi TUI process; Pi Remote opens the persisted session through its own native Pi RPC process.
+
+See [roadmap.md](roadmap.md) for planned work.
