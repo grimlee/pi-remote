@@ -468,6 +468,31 @@ private struct PairingView: View {
 private struct SessionRow: View {
     let session: RemoteSession
 
+    private var activityLabel: String {
+        let seconds = max(
+            0,
+            Date().timeIntervalSince(session.activityAt)
+        )
+
+        if seconds < 3_600 {
+            return "<1h"
+        }
+
+        let hours = Int(seconds / 3_600)
+        if hours < 24 {
+            return "\(hours)h"
+        }
+
+        let days = Int(seconds / 86_400)
+        if days < 14 {
+            return "\(days)d"
+        }
+
+        return session.activityAt.formatted(
+            .dateTime.month(.abbreviated).day()
+        )
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(
@@ -493,7 +518,7 @@ private struct SessionRow: View {
                         )
                     Text(session.model ?? "No model")
                     Text("·")
-                    Text(session.activityAt, style: .relative)
+                    Text(activityLabel)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
