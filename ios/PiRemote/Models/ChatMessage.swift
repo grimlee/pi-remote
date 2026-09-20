@@ -8,7 +8,7 @@ enum ChatMessageRole: Sendable, Equatable {
     case system
 }
 
-enum ChatMessageBlock: Sendable {
+enum ChatMessageBlock: Sendable, Equatable {
     case text(String)
     case thinking(String)
     case toolCall(name: String, arguments: String)
@@ -16,7 +16,7 @@ enum ChatMessageBlock: Sendable {
     case raw(JSONValue)
 }
 
-struct ChatMessage: Sendable {
+struct ChatMessage: Sendable, Equatable {
     let role: ChatMessageRole
     let timestamp: Date?
     let blocks: [ChatMessageBlock]
