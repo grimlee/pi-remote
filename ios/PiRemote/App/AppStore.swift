@@ -174,7 +174,7 @@ final class AppStore {
                 machineId: machine.id
             )
             sessions = values
-                .sorted { $0.startedAt > $1.startedAt }
+                .sorted { $0.activityAt > $1.activityAt }
             sessionError = nil
 
             if let activeRpcSessionID,
