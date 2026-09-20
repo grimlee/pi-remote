@@ -30,6 +30,31 @@ The current integration build includes:
 
 ## Near term
 
+### P0 — Simple multimodal composer
+
+The next user-facing milestone is image + text input without turning the composer into a file manager.
+
+- Add an attachment button beside the message composer.
+- Pick images from the iPhone photo library.
+- Optionally capture a new image with the camera.
+- Show removable image thumbnails above the composer before send.
+- Send text plus images through Pi's native RPC `prompt.images` field.
+- Keep reliable prompt delivery/retry semantics intact when images are present.
+- Render sent user images in the transcript instead of reducing them to labels.
+- Apply explicit image-count and payload-size limits before transport.
+- Preserve the current text-only path when the selected model does not support image input.
+
+General document/file upload is a separate milestone. Pi RPC has a native image input field today, while arbitrary document attachments do not have the same first-class transport contract.
+
+### P1 — Voice dictation
+
+- Keep the normal iOS keyboard dictation path available automatically.
+- On iOS 26+, evaluate a dedicated composer microphone using Apple's on-device `SpeechAnalyzer` / `SpeechTranscriber`.
+- Dictation should fill/edit the composer text; it should not create a separate audio-message format.
+- Request microphone access only when the user taps the microphone.
+- Do not add a server-side speech service or upload microphone audio to the Pi Host just to implement dictation.
+- On older iOS versions, prefer the system keyboard's dictation unless a lightweight native fallback proves worthwhile.
+
 ### Session and workspace UX
 
 - Search across sessions.
@@ -45,13 +70,7 @@ The current integration build includes:
 - Preserve reading position during long streaming turns.
 - Better completion and notification UX when the app is backgrounded.
 - More deliberate treatment of long-running tool/subagent work.
-
-### Multimodal
-
-- Image attachment/input.
-- File attachment/input.
-- File/image output rendering.
-- Attachment lifecycle that keeps sensitive Host files under explicit user control.
+- Render file/image outputs cleanly when Pi/tool messages expose them.
 
 ### Reliability
 
