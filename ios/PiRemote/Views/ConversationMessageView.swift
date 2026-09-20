@@ -604,6 +604,9 @@ private struct ConversationMessageRow: View, Equatable {
                 .background(Color.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
             }
+            .contextMenu {
+                copyMenu
+            }
 
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
@@ -627,6 +630,9 @@ private struct ConversationMessageRow: View, Equatable {
                 maxWidth: .infinity,
                 alignment: .leading
             )
+            .contextMenu {
+                copyMenu
+            }
 
         case .tool:
             ToolResultCard(message: message)
@@ -645,6 +651,37 @@ private struct ConversationMessageRow: View, Equatable {
             .background(.quaternary)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
+    }
+
+    @ViewBuilder
+    private var copyMenu: some View {
+        if let copyText {
+            Button {
+                UIPasteboard.general.string = copyText
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+    }
+
+    private var copyText: String? {
+        guard message.role == .user || message.role == .assistant else {
+            return nil
+        }
+
+        let parts = message.blocks.compactMap { block -> String? in
+            switch block {
+            case let .text(text):
+                return text.isEmpty ? nil : text
+            case let .image(label):
+                return "[Image: \(label)]"
+            case .thinking, .toolCall, .raw:
+                return nil
+            }
+        }
+
+        let text = parts.joined(separator: "\n\n")
+        return text.isEmpty ? nil : text
     }
 
     private var hasVisibleContent: Bool {
