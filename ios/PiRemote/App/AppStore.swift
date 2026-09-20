@@ -562,6 +562,20 @@ final class AppStore {
         }
         isDeferringConversationPresentation = true
         deferredRpcSnapshot = nil
+
+        let at = diagnosticNowMs()
+        reportDiagnosticTiming(
+            stage: "drag.begin",
+            startedAtMs: at,
+            durationMs: 0
+        )
+        Task { [weak self] in
+            await self?.reportTailcatDiagnostics(
+                stage: "tailcat.drag.begin",
+                startedAtMs: at,
+                durationMs: 0
+            )
+        }
     }
 
     func endConversationInteraction() {
@@ -573,6 +587,20 @@ final class AppStore {
         if let deferredRpcSnapshot {
             self.deferredRpcSnapshot = nil
             rpcSnapshot = deferredRpcSnapshot
+        }
+
+        let at = diagnosticNowMs()
+        reportDiagnosticTiming(
+            stage: "drag.end",
+            startedAtMs: at,
+            durationMs: 0
+        )
+        Task { [weak self] in
+            await self?.reportTailcatDiagnostics(
+                stage: "tailcat.drag.end",
+                startedAtMs: at,
+                durationMs: 0
+            )
         }
     }
 
@@ -691,6 +719,117 @@ final class AppStore {
             machineId: machine.id,
             report: enriched
         )
+
+        await reportTailcatDiagnostics(
+            stage: "tailcat.perf",
+            startedAtMs: report.windowStartedAtMs,
+            durationMs: report.windowDurationMs
+        )
+    }
+
+    private func reportTailcatDiagnostics(
+        stage: String,
+        startedAtMs: Int64,
+        durationMs: Int
+    ) async {
+        guard !isUsingRelayFallback,
+              profile?.transport?.kind == .tailcat,
+              let machine = activeMachine,
+              let relayClient
+        else {
+            return
+        }
+
+        do {
+            // Never probe here: a DiscoPing would add traffic and could itself
+            // perturb the scroll-performance experiment. The native counters
+            // and recent event ring are read-only snapshots.
+            let value = try await tailcatTransport.diagnostics(
+                probe: false
+            )
+            let latest = value.events?.last
+            let latestEvent = latest.map { event in
+                let detail = event.detail.map {
+                    diagnosticSanitize($0, limit: 36)
+                } ?? ""
+                return detail.isEmpty
+                    ? diagnosticSanitize(event.event, limit: 24)
+                    : diagnosticSanitize(
+                        event.event,
+                        limit: 18
+                    ) + ":" + detail
+            } ?? "none"
+
+            let detail = [
+                "acc=\(value.acceptedConnections)",
+                "active=\(value.activeConnections)",
+                "ok=\(value.dialSuccesses)",
+                "fail=\(value.dialFailures)",
+                "tx=\(value.bytesToHost)",
+                "rx=\(value.bytesToPhone)",
+                "err=\(value.lastError == nil ? 0 : 1)",
+                "ev=\(latestEvent)"
+            ].joined(separator: "|")
+
+            let marker = "diag|stage=\(diagnosticSanitize(stage, limit: 48))"
+                + "|dur=\(max(0, durationMs))"
+                + "|at=\(startedAtMs)"
+                + "|\(diagnosticSanitize(detail, limit: 160))"
+
+            let report = ConversationPerformanceReport(
+                sessionId: String(marker.prefix(300)),
+                windowStartedAtMs: max(0, startedAtMs),
+                windowDurationMs: min(
+                    60_000,
+                    max(500, durationMs)
+                ),
+                displayFrames: 0,
+                slowFrames25Ms: 0,
+                slowFrames50Ms: 0,
+                dragFrames: 0,
+                dragSlowFrames25Ms: 0,
+                maxFrameGapMs: 0,
+                snapshotCount: 0,
+                liveCharacters: 0,
+                isStreaming: false
+            )
+
+            try? await relayClient.sendDiagnostics(
+                machineId: machine.id,
+                report: report
+            )
+        } catch {
+            let detail = "unavailable="
+                + diagnosticSanitize(
+                    error.localizedDescription,
+                    limit: 96
+                )
+            let marker = "diag|stage=\(diagnosticSanitize(stage, limit: 48))"
+                + "|dur=\(max(0, durationMs))"
+                + "|at=\(startedAtMs)|\(detail)"
+
+            let report = ConversationPerformanceReport(
+                sessionId: String(marker.prefix(300)),
+                windowStartedAtMs: max(0, startedAtMs),
+                windowDurationMs: min(
+                    60_000,
+                    max(500, durationMs)
+                ),
+                displayFrames: 0,
+                slowFrames25Ms: 0,
+                slowFrames50Ms: 0,
+                dragFrames: 0,
+                dragSlowFrames25Ms: 0,
+                maxFrameGapMs: 0,
+                snapshotCount: 0,
+                liveCharacters: 0,
+                isStreaming: false
+            )
+            try? await relayClient.sendDiagnostics(
+                machineId: machine.id,
+                report: report
+            )
+        }
     }
 
     func answerInteractiveRequest(
