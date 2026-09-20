@@ -9,38 +9,57 @@ struct ConversationTranscriptView: View {
 
     @State private var parsedMessages: [ChatMessage] = []
     @State private var parsedRevision = -1
+    @State private var retainedLiveEntry: TranscriptEntry?
+    @State private var retainedLiveRevision: Int?
 
     var body: some View {
         Group {
-            if let liveEntry {
-                if stableTurns.isEmpty {
-                    ActiveTranscriptTurnView(
-                        turn: TranscriptTurn(
-                            user: nil,
-                            responses: []
-                        ),
-                        liveEntry: liveEntry
-                    )
-                } else {
-                    StableTranscriptTurnsView(
-                        turns: Array(stableTurns.dropLast()),
-                        revision: parsedRevision
-                    )
-                    .equatable()
-
-                    if let currentTurn = stableTurns.last {
-                        ActiveTranscriptTurnView(
-                            turn: currentTurn,
-                            liveEntry: liveEntry
-                        )
-                    }
-                }
-            } else {
+            if !stableTurns.isEmpty {
                 StableTranscriptTurnsView(
-                    turns: stableTurns,
+                    turns: Array(stableTurns.dropLast()),
                     revision: parsedRevision
                 )
                 .equatable()
+
+                if let currentTurn = stableTurns.last {
+                    CurrentTranscriptTurnView(
+                        turn: currentTurn,
+                        liveEntry: presentationLiveEntry
+                    )
+                }
+            } else if let presentationLiveEntry {
+                CurrentTranscriptTurnView(
+                    turn: TranscriptTurn(
+                        user: nil,
+                        responses: []
+                    ),
+                    liveEntry: presentationLiveEntry
+                )
+            }
+        }
+        .onChange(
+            of: snapshot.liveMessage,
+            initial: true
+        ) { oldValue, newValue in
+            if let newValue,
+               let message = ChatMessageParser.parse(newValue) {
+                retainedLiveEntry = TranscriptEntry(
+                    message: message,
+                    isStreaming: true
+                )
+                retainedLiveRevision = snapshot.messageRevision
+            } else if let oldValue,
+                      let message = ChatMessageParser.parse(oldValue) {
+                // message_end moves the final assistant message from
+                // liveMessage into messages before the async history parse has
+                // caught up. Keep the last live renderer in place for that
+                // short handoff so ScrollView never observes a huge temporary
+                // content-height collapse.
+                retainedLiveEntry = TranscriptEntry(
+                    message: message,
+                    isStreaming: true
+                )
+                retainedLiveRevision = snapshot.messageRevision
             }
         }
         .task(id: snapshot.messageRevision) {
@@ -59,6 +78,20 @@ struct ConversationTranscriptView: View {
             message: message,
             isStreaming: true
         )
+    }
+
+    private var presentationLiveEntry: TranscriptEntry? {
+        if let liveEntry {
+            return liveEntry
+        }
+
+        guard parsedRevision != snapshot.messageRevision,
+              retainedLiveRevision == snapshot.messageRevision
+        else {
+            return nil
+        }
+
+        return retainedLiveEntry
     }
 
     private var stableTurns: [TranscriptTurn] {
@@ -96,6 +129,12 @@ struct ConversationTranscriptView: View {
 
         parsedMessages = parsed
         parsedRevision = revision
+
+        if snapshot.liveMessage == nil,
+           retainedLiveRevision == revision {
+            retainedLiveEntry = nil
+            retainedLiveRevision = nil
+        }
 
         let durationMs = max(
             0,
@@ -149,9 +188,9 @@ private struct StableTranscriptTurnsView: View, Equatable {
     }
 }
 
-private struct ActiveTranscriptTurnView: View {
+private struct CurrentTranscriptTurnView: View {
     let turn: TranscriptTurn
-    let liveEntry: TranscriptEntry
+    let liveEntry: TranscriptEntry?
 
     var body: some View {
         if let user = turn.user {
@@ -163,8 +202,15 @@ private struct ActiveTranscriptTurnView: View {
         }
 
         TurnResponseView(
-            responses: turn.responses + [liveEntry]
+            responses: turn.responses
+                + liveEntry.map { [$0] }.orEmpty
         )
+    }
+}
+
+private extension Optional where Wrapped == [TranscriptEntry] {
+    var orEmpty: [TranscriptEntry] {
+        self ?? []
     }
 }
 
