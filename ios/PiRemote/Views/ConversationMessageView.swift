@@ -29,20 +29,36 @@ struct ConversationTranscriptView: View {
                 TranscriptTurnRowView(
                     turn: turn,
                     liveEntry: index == turns.count - 1
-                        ? presentationLiveEntry
+                        ? presentationResponseEntry
                         : nil
                 )
                 .equatable()
             }
 
-            if turns.isEmpty,
-               let presentationLiveEntry {
+            if let presentationUserEntry {
+                // Pi streams the submitted user message through the same
+                // message_start/update/end channel as assistant messages. It
+                // must form a new turn. Treating it as the previous turn's
+                // response makes TurnResponseView hide the previous final
+                // assistant answer inside AgentActivityGroup, collapsing
+                // thousands of points of transcript height while ScrollView
+                // still holds the old bottom offset.
+                TranscriptTurnRowView(
+                    turn: TranscriptTurn(
+                        user: presentationUserEntry,
+                        responses: []
+                    ),
+                    liveEntry: nil
+                )
+                .equatable()
+            } else if turns.isEmpty,
+                      let presentationResponseEntry {
                 TranscriptTurnRowView(
                     turn: TranscriptTurn(
                         user: nil,
                         responses: []
                     ),
-                    liveEntry: presentationLiveEntry
+                    liveEntry: presentationResponseEntry
                 )
                 .equatable()
             }
@@ -102,6 +118,24 @@ struct ConversationTranscriptView: View {
         }
 
         return retainedLiveEntry
+    }
+
+    private var presentationUserEntry: TranscriptEntry? {
+        guard let entry = presentationLiveEntry,
+              entry.message.role == .user
+        else {
+            return nil
+        }
+        return entry
+    }
+
+    private var presentationResponseEntry: TranscriptEntry? {
+        guard let entry = presentationLiveEntry,
+              entry.message.role != .user
+        else {
+            return nil
+        }
+        return entry
     }
 
     private var stableTurns: [TranscriptTurn] {
