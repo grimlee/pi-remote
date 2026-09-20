@@ -636,6 +636,9 @@ final class AppStore {
         let streaming = snapshot.state?
             .objectValue?["isStreaming"]?
             .boolValue == true
+        let liveRole = snapshot.liveMessage?
+            .objectValue?["role"]?
+            .stringValue ?? "none"
         let liveTypes = diagnosticLiveBlockTypes(
             snapshot.liveMessage
         )
@@ -643,6 +646,7 @@ final class AppStore {
         return [
             "stream=\(streaming ? 1 : 0)",
             "live=\(snapshot.liveMessage == nil ? 0 : 1)",
+            "role=\(liveRole)",
             "types=\(liveTypes)",
             "rev=\(snapshot.messageRevision)",
             "m=\(snapshot.messages.count)"
