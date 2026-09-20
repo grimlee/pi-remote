@@ -685,6 +685,55 @@ private struct SessionDetailView: View {
                         .padding(.top, 8)
                 }
 
+                HStack(spacing: 10) {
+                    Button {
+                        showingModelPicker = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(currentModelLabel)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(
+                        isStreaming
+                            || store.isResumingSession
+                            || (store.rpcSnapshot?
+                                .availableModels.isEmpty ?? true)
+                    )
+
+                    Spacer(minLength: 8)
+
+                    if let contextUsageLabel {
+                        Button {
+                            Task {
+                                if let value = await store.fetchSessionStats() {
+                                    commandResult = PiCommandResultPayload(
+                                        title: "Session",
+                                        value: value
+                                    )
+                                }
+                            }
+                        } label: {
+                            Text(contextUsageLabel)
+                                .monospacedDigit()
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if isStreaming,
+                       let tps = store.rpcSnapshot?.decodeTokensPerSecond {
+                        Text(decodeSpeedLabel(tps))
+                            .monospacedDigit()
+                    }
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.top, 9)
+
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
                         "Message Pi",
@@ -732,32 +781,13 @@ private struct SessionDetailView: View {
                     )
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.top, 7)
+                .padding(.bottom, 10)
             }
             .background(.bar)
         }
         .navigationTitle(conversationTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingModelPicker = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cpu")
-                        Text(currentModelLabel)
-                            .lineLimit(1)
-                    }
-                }
-                .disabled(
-                    isStreaming
-                        || store.isResumingSession
-                        || (store.rpcSnapshot?
-                            .availableModels.isEmpty ?? true)
-                )
-            }
-
-        }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
         }
@@ -829,6 +859,41 @@ private struct SessionDetailView: View {
         return model["name"]?.stringValue
             ?? model["id"]?.stringValue
             ?? "Model"
+    }
+
+    private var contextUsageLabel: String? {
+        guard let context = store.rpcSnapshot?
+            .sessionStats?
+            .objectValue?["contextUsage"]?
+            .objectValue
+        else {
+            return nil
+        }
+
+        guard let percent = jsonNumber(context["percent"]) else {
+            return "— ctx"
+        }
+
+        return "\(Int(percent.rounded()))% ctx"
+    }
+
+    private func decodeSpeedLabel(_ value: Double) -> String {
+        if value < 10 {
+            return String(format: "⚡ %.1f/s", value)
+        }
+        return String(format: "⚡ %.0f/s", value)
+    }
+
+    private func jsonNumber(_ value: JSONValue?) -> Double? {
+        guard let value else { return nil }
+        switch value {
+        case let .integer(number):
+            return Double(number)
+        case let .number(number):
+            return number
+        default:
+            return nil
+        }
     }
 
     private var isStreaming: Bool {

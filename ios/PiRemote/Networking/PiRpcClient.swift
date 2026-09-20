@@ -16,6 +16,8 @@ struct PiRpcSnapshot: Sendable {
     var availableModels: [PiModelOption] = []
     var availableThinkingLevels: [String] = []
     var availableCommands: [PiSlashCommandOption] = []
+    var sessionStats: JSONValue?
+    var decodeTokensPerSecond: Double?
     var presentationRevision: Int = 0
     var liveCharacterCount: Int = 0
     var lastEvent: JSONValue?
@@ -70,6 +72,9 @@ actor PiRpcClient {
 
     private var snapshot: PiRpcSnapshot
     private var liveMutableCharacterCount = 0
+    private var decodeDeltaTimestamps: [TimeInterval] = []
+    private var lastDecodeDeltaAt: TimeInterval?
+    private let decodeWindowSeconds: TimeInterval = 1.0
     private var lastLiveSnapshotEmissionAt: TimeInterval = 0
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
@@ -224,6 +229,7 @@ actor PiRpcClient {
         emitSnapshot()
 
         try await refreshThinkingLevels(prefix: "model")
+        try await refreshSessionStats(prefix: "model")
     }
 
     func setThinkingLevel(_ level: String) async throws {
@@ -433,6 +439,10 @@ actor PiRpcClient {
             "id": .string("\(prefix)-commands-\(suffix)"),
             "type": .string("get_commands")
         ])
+        try await refreshSessionStats(
+            prefix: prefix,
+            suffix: suffix
+        )
     }
 
     private func refreshThinkingLevels(
@@ -442,6 +452,16 @@ actor PiRpcClient {
         try await sendCommand([
             "id": .string("\(prefix)-thinking-\(suffix)"),
             "type": .string("get_available_thinking_levels")
+        ])
+    }
+
+    private func refreshSessionStats(
+        prefix: String,
+        suffix: String = UUID().uuidString
+    ) async throws {
+        try await sendCommand([
+            "id": .string("\(prefix)-stats-\(suffix)"),
+            "type": .string("get_session_stats")
         ])
     }
 
@@ -658,6 +678,10 @@ actor PiRpcClient {
                             $1.name
                         ) == .orderedAscending
                     }
+            } else if success,
+                      command == "get_session_stats",
+                      let data = object["data"] {
+                snapshot.sessionStats = data
             } else {
                 snapshot.lastEvent = value
             }
@@ -674,6 +698,7 @@ actor PiRpcClient {
 
         case "message_update":
             applyMessageUpdate(object)
+            recordDecodeDeltaIfNeeded(object)
             snapshot.lastEvent = value
 
         case "message_end":
@@ -687,12 +712,21 @@ actor PiRpcClient {
             snapshot.lastEvent = value
 
         case "agent_start":
+            resetDecodeSpeed()
             setStreaming(true)
             snapshot.lastEvent = value
 
         case "agent_end":
             setStreaming(false)
             snapshot.lastEvent = value
+
+        case "agent_settled":
+            snapshot.lastEvent = value
+            Task { [weak self] in
+                try? await self?.refreshSessionStats(
+                    prefix: "settled"
+                )
+            }
 
         case "extension_ui_request":
             let method = object["method"]?.stringValue ?? ""
@@ -892,6 +926,41 @@ actor PiRpcClient {
         key: String
     ) -> String {
         value.objectValue?[key]?.stringValue ?? ""
+    }
+
+    private func recordDecodeDeltaIfNeeded(
+        _ object: [String: JSONValue]
+    ) {
+        guard let update = object["assistantMessageEvent"]?.objectValue,
+              let type = update["type"]?.stringValue,
+              type == "text_delta" || type == "thinking_delta"
+        else {
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let previous = lastDecodeDeltaAt
+        lastDecodeDeltaAt = now
+
+        decodeDeltaTimestamps.append(now)
+        let cutoff = now - decodeWindowSeconds
+        decodeDeltaTimestamps.removeAll { $0 < cutoff }
+
+        if decodeDeltaTimestamps.count >= 2,
+           let first = decodeDeltaTimestamps.first {
+            let span = max(0.1, now - first)
+            snapshot.decodeTokensPerSecond =
+                Double(decodeDeltaTimestamps.count - 1) / span
+        } else if let previous {
+            let span = max(0.1, min(decodeWindowSeconds, now - previous))
+            snapshot.decodeTokensPerSecond = 1.0 / span
+        }
+    }
+
+    private func resetDecodeSpeed() {
+        decodeDeltaTimestamps.removeAll(keepingCapacity: true)
+        lastDecodeDeltaAt = nil
+        snapshot.decodeTokensPerSecond = nil
     }
 
     private func setStreaming(_ streaming: Bool) {
