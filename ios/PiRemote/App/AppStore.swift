@@ -1101,6 +1101,12 @@ final class AppStore {
             do {
                 try await rpcClient.receive(frame)
             } catch let error as PiRpcClient.ClientError {
+                reportDiagnosticTiming(
+                    stage: "rpc.receive.error",
+                    startedAtMs: diagnosticNowMs(),
+                    durationMs: 0,
+                    detail: "ch=\(diagnosticShortID(frame.channelId))|seq=\(frame.seq)|e=\(error.localizedDescription)"
+                )
                 switch error {
                 case .sequenceGap(_, _):
                     if !needsRpcTransportResume {
@@ -1114,6 +1120,12 @@ final class AppStore {
                     sessionError = error.localizedDescription
                 }
             } catch {
+                reportDiagnosticTiming(
+                    stage: "rpc.receive.error",
+                    startedAtMs: diagnosticNowMs(),
+                    durationMs: 0,
+                    detail: "ch=\(diagnosticShortID(frame.channelId))|seq=\(frame.seq)|e=\(error.localizedDescription)"
+                )
                 sessionError = error.localizedDescription
             }
 
@@ -1257,6 +1269,13 @@ final class AppStore {
             else {
                 return
             }
+
+            reportDiagnosticTiming(
+                stage: "rpc.messages",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "rev=\(snapshot.messageRevision)|m=\(snapshot.messages.count)"
+            )
 
             lastCachedMessageRevision = snapshot.messageRevision
             try? await conversationCache.save(
