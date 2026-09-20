@@ -317,6 +317,10 @@ actor PiRpcClient {
         lastHostSequence
     }
 
+    func ownsChannel(_ channelId: String) -> Bool {
+        capability.channelId == channelId
+    }
+
     func sendPrompt(_ text: String) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
