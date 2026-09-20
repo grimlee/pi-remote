@@ -433,6 +433,38 @@ private struct SessionRow: View {
     }
 }
 
+private struct ConversationScrollActivityModifier: ViewModifier {
+    let onActivityChanged: (Bool) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { oldPhase, newPhase in
+                let wasScrolling = oldPhase.isScrolling
+                let isScrolling = newPhase.isScrolling
+
+                guard wasScrolling != isScrolling else {
+                    return
+                }
+                onActivityChanged(isScrolling)
+            }
+        } else {
+            // iOS 17 does not expose ScrollPhase. Keep the previous gesture
+            // fallback only on that OS; modern iOS uses native scroll state so
+            // the detector does not participate in gesture arbitration.
+            content.simultaneousGesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { _ in
+                        onActivityChanged(true)
+                    }
+                    .onEnded { _ in
+                        onActivityChanged(false)
+                    }
+            )
+        }
+    }
+}
+
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -499,23 +531,16 @@ private struct SessionDetailView: View {
                     dismissKeyboard()
                 }
             )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 2)
-                    .onChanged { _ in
+            .modifier(
+                ConversationScrollActivityModifier { isScrolling in
+                    if isScrolling {
                         performanceMonitor.beginDragging()
                         store.beginConversationInteraction()
-                    }
-                    .onEnded { _ in
+                    } else {
                         performanceMonitor.endDragging()
-                        Task { @MainActor in
-                            // Let the scroll gesture settle for one run-loop
-                            // turn before publishing the latest deferred live
-                            // snapshot. Transport and RPC delivery were never
-                            // paused.
-                            await Task.yield()
-                            store.endConversationInteraction()
-                        }
+                        store.endConversationInteraction()
                     }
+                }
             )
             .onAppear {
                 performanceMonitor.start { report in
