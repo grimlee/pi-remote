@@ -263,23 +263,46 @@ private struct TranscriptTurn: Equatable {
 }
 
 private struct TurnResponseView: View {
+    @Environment(AppStore.self) private var store
+
     let responses: [TranscriptEntry]
 
     var body: some View {
-        if !activityEntries.isEmpty {
-            AgentActivityGroup(
-                entries: activityEntries,
-                isStreaming: isStreaming
-            )
-            .equatable()
-        }
+        Group {
+            if !activityEntries.isEmpty {
+                AgentActivityGroup(
+                    entries: activityEntries,
+                    isStreaming: isStreaming
+                )
+                .equatable()
+            }
 
-        if let finalEntry {
-            ConversationMessageRow(
-                message: finalEntry.message,
-                isStreaming: finalEntry.isStreaming
+            if let finalEntry {
+                ConversationMessageRow(
+                    message: finalEntry.message,
+                    isStreaming: finalEntry.isStreaming
+                )
+                .equatable()
+            }
+        }
+        .onChange(
+            of: diagnosticLaneSignature,
+            initial: true
+        ) { oldValue, newValue in
+            guard oldValue.contains("stream=1")
+                || newValue.contains("stream=1")
+            else {
+                return
+            }
+
+            store.reportDiagnosticTiming(
+                stage: "transcript.lanes",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: newValue
             )
-            .equatable()
         }
     }
 
@@ -351,6 +374,24 @@ private struct TurnResponseView: View {
 
     private var isStreaming: Bool {
         responses.contains(where: \.isStreaming)
+    }
+
+    private var diagnosticLaneSignature: String {
+        let finalText = finalEntry?.message.blocks.contains {
+            block in
+            if case let .text(text) = block {
+                return !text.isEmpty
+            }
+            return false
+        } ?? false
+
+        return [
+            "stream=\(isStreaming ? 1 : 0)",
+            "activity=\(activityEntries.count)",
+            "final=\(finalEntry == nil ? 0 : 1)",
+            "text=\(finalText ? 1 : 0)",
+            "responses=\(responses.count)"
+        ].joined(separator: "|")
     }
 
     private func visibleAssistantBlocks(
