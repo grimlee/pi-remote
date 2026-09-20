@@ -329,6 +329,10 @@ Please read [docs/security.md](docs/security.md) before exposing a Relay publicl
 
 Provider keys, browser cookies, SSH credentials, MCP credentials, and Host environment secrets should remain on the Host.
 
+## License
+
+Pi Remote is released under the [MIT License](LICENSE).
+
 ---
 
 Pi Remote is an independent community project built around Pi Agent and Tailcat. It is not an official Pi Agent, Tailcat, Tailscale, or Apple product.
