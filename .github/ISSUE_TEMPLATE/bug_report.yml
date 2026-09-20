@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible Pi Remote problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Pi Remote. Please remove secrets before posting logs or screenshots.
+  - type: input
+    id: host
+    attributes:
+      label: Host environment
+      description: OS, architecture, and Pi Agent version
+      placeholder: "Omarchy / x86_64 / Pi 0.x"
+    validations:
+      required: true
+  - type: input
+    id: ios
+    attributes:
+      label: iPhone environment
+      description: iPhone model and iOS version
+      placeholder: "iPhone ... / iOS ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - Quick Connect (Tailcat)
+        - Public Relay / Cloudflare
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Please provide the smallest sequence that reproduces the issue.
+      placeholder: |
+        1. Open ...
+        2. Send ...
+        3. Background ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Optional. Redact pairing payloads, Tailcat addresses/keys, credentials, private paths/content, and session data before posting.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I reviewed attached logs/screenshots and removed secrets or private session content.
+          required: true
