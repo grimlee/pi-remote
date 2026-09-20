@@ -99,13 +99,28 @@ struct ConversationTranscriptView: View {
 
     private var stableTurns: [TranscriptTurn] {
         makeTranscriptTurns(
-            parsedMessages.map {
+            presentationMessages.map {
                 TranscriptEntry(
                     message: $0,
                     isStreaming: false
                 )
             }
         )
+    }
+
+    private var presentationMessages: [ChatMessage] {
+        // Historical sessions can enter this view with a populated disk cache
+        // while the async parse task has not run yet. Rendering an empty
+        // transcript in that window gives LazyVStack no content to realize,
+        // which can prevent the task-driven path from ever becoming visible.
+        // Seed the first presentation synchronously from the snapshot; normal
+        // revision-driven detached parsing takes over immediately afterward.
+        if parsedRevision < 0,
+           !snapshot.messages.isEmpty {
+            return ChatMessageParser.parseAll(snapshot.messages)
+        }
+
+        return parsedMessages
     }
 
     private func refreshParsedHistory() async {
