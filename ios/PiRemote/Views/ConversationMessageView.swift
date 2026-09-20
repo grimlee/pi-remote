@@ -203,14 +203,8 @@ private struct CurrentTranscriptTurnView: View {
 
         TurnResponseView(
             responses: turn.responses
-                + liveEntry.map { [$0] }.orEmpty
+                + (liveEntry.map { [$0] } ?? [])
         )
-    }
-}
-
-private extension Optional where Wrapped == [TranscriptEntry] {
-    var orEmpty: [TranscriptEntry] {
-        self ?? []
     }
 }
 
