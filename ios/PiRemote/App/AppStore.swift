@@ -77,7 +77,6 @@ final class AppStore {
     private var sessionListReconciliationTask: Task<Void, Never>?
     private var sessionListReconciliationID: String?
     private var backgroundedAt: Date?
-    private var backgroundedWhileStreaming = false
     private var diagnosticLastRpcSnapshotSignature: String?
     private let backgroundGraceInterval: TimeInterval = 3 * 60
 
@@ -913,12 +912,6 @@ final class AppStore {
     func suspend() async {
         let now = Date()
         backgroundedAt = now
-        backgroundedWhileStreaming =
-            rpcSnapshot?.liveMessage != nil
-            || rpcSnapshot?.state?
-                .objectValue?["isStreaming"]?
-                .boolValue == true
-
         reportDiagnosticTiming(
             stage: "lifecycle.background",
             startedAtMs: diagnosticNowMs(),
@@ -946,12 +939,7 @@ final class AppStore {
         let elapsed = backgroundedAt.map {
             Date().timeIntervalSince($0)
         }
-        let shouldReconcileBackgroundStream =
-            backgroundedWhileStreaming
-            && rpcClient != nil
-            && selectedSessionID != nil
         backgroundedAt = nil
-        backgroundedWhileStreaming = false
 
         reportDiagnosticTiming(
             stage: "lifecycle.resume.begin",
@@ -981,8 +969,7 @@ final class AppStore {
             // Reconnect into a no-op.
             if connected,
                !wasDisconnected,
-               !exceededBackgroundGrace,
-               !shouldReconcileBackgroundStream {
+               !exceededBackgroundGrace {
                 reportDiagnosticTiming(
                     stage: "lifecycle.resume.reuse",
                     startedAtMs: diagnosticNowMs(),
@@ -992,17 +979,6 @@ final class AppStore {
                     )
                 )
                 return
-            }
-
-            if shouldReconcileBackgroundStream {
-                reportDiagnosticTiming(
-                    stage: "lifecycle.resume.replay",
-                    startedAtMs: diagnosticNowMs(),
-                    durationMs: 0,
-                    detail: lifecycleDiagnosticDetail(
-                        elapsed: elapsed
-                    )
-                )
             }
 
             if rpcClient != nil, selectedSessionID != nil {
@@ -1064,7 +1040,6 @@ final class AppStore {
         return "elapsed=\(elapsedMs)"
             + "|phase=\(phase)"
             + "|stream=\(streaming ? 1 : 0)"
-            + "|bgstream=\(backgroundedWhileStreaming ? 1 : 0)"
             + "|rpc=\(rpcClient == nil ? 0 : 1)"
             + "|relay=\(relayClient == nil ? 0 : 1)"
             + "|resume=\(needsRpcTransportResume ? 1 : 0)"
