@@ -503,9 +503,18 @@ private struct SessionDetailView: View {
                 DragGesture(minimumDistance: 2)
                     .onChanged { _ in
                         performanceMonitor.beginDragging()
+                        store.beginConversationInteraction()
                     }
                     .onEnded { _ in
                         performanceMonitor.endDragging()
+                        Task { @MainActor in
+                            // Let the scroll gesture settle for one run-loop
+                            // turn before publishing the latest deferred live
+                            // snapshot. Transport and RPC delivery were never
+                            // paused.
+                            await Task.yield()
+                            store.endConversationInteraction()
+                        }
                     }
             )
             .onAppear {
@@ -515,6 +524,7 @@ private struct SessionDetailView: View {
             }
             .onDisappear {
                 performanceMonitor.stop()
+                store.endConversationInteraction()
             }
             .onChange(
                 of: store.rpcSnapshot?.presentationRevision
