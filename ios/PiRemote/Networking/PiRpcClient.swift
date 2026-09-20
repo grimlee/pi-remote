@@ -18,6 +18,7 @@ struct PiRpcSnapshot: Sendable {
     var availableCommands: [PiSlashCommandOption] = []
     var sessionStats: JSONValue?
     var decodeTokensPerSecond: Double?
+    var diagnosticEvent: String?
     var presentationRevision: Int = 0
     var liveCharacterCount: Int = 0
     var lastEvent: JSONValue?
@@ -620,12 +621,15 @@ actor PiRpcClient {
             return
 
         case "ready":
+            snapshot.diagnosticEvent = "ready"
             snapshot.phase = .live
             snapshot.lastEvent = value
 
         case "response":
             let command = object["command"]?.stringValue
             let success = object["success"]?.boolValue ?? false
+            snapshot.diagnosticEvent =
+                "response." + (command ?? "unknown")
 
             if success,
                command == "get_state",
@@ -689,6 +693,10 @@ actor PiRpcClient {
             completePendingResponse(object)
 
         case "message_start":
+            snapshot.diagnosticEvent = "message_start."
+                + (object["message"]?
+                    .objectValue?["role"]?
+                    .stringValue ?? "unknown")
             liveMutableCharacterCount = 0
             snapshot.liveCharacterCount = 0
             if let message = object["message"] {
@@ -697,11 +705,20 @@ actor PiRpcClient {
             snapshot.lastEvent = value
 
         case "message_update":
+            let updateType = object["assistantMessageEvent"]?
+                .objectValue?["type"]?
+                .stringValue ?? "unknown"
+            snapshot.diagnosticEvent =
+                "message_update." + updateType
             applyMessageUpdate(object)
             recordDecodeDeltaIfNeeded(object)
             snapshot.lastEvent = value
 
         case "message_end":
+            snapshot.diagnosticEvent = "message_end."
+                + (object["message"]?
+                    .objectValue?["role"]?
+                    .stringValue ?? "unknown")
             if let message = object["message"] {
                 snapshot.messages.append(message)
                 snapshot.messageRevision += 1
@@ -712,15 +729,18 @@ actor PiRpcClient {
             snapshot.lastEvent = value
 
         case "agent_start":
+            snapshot.diagnosticEvent = "agent_start"
             resetDecodeSpeed()
             setStreaming(true)
             snapshot.lastEvent = value
 
         case "agent_end":
+            snapshot.diagnosticEvent = "agent_end"
             setStreaming(false)
             snapshot.lastEvent = value
 
         case "agent_settled":
+            snapshot.diagnosticEvent = "agent_settled"
             snapshot.lastEvent = value
             Task { [weak self] in
                 try? await self?.refreshSessionStats(
@@ -730,6 +750,8 @@ actor PiRpcClient {
 
         case "extension_ui_request":
             let method = object["method"]?.stringValue ?? ""
+            snapshot.diagnosticEvent =
+                "extension_ui_request." + method
             if ["select", "confirm", "input", "editor"].contains(method) {
                 snapshot.uiRequest = value
             } else {
@@ -737,6 +759,7 @@ actor PiRpcClient {
             }
 
         case "piremote.channel_closed":
+            snapshot.diagnosticEvent = "piremote.channel_closed"
             isClosed = true
             failPending(ClientError.closed)
             snapshot.phase = .closed
@@ -748,6 +771,7 @@ actor PiRpcClient {
             return
 
         default:
+            snapshot.diagnosticEvent = type
             snapshot.lastEvent = value
         }
 
