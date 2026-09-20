@@ -1,3 +1,4 @@
+import Combine
 import PiRemoteCore
 import SwiftUI
 import UIKit
@@ -593,6 +594,15 @@ private struct SessionDetailView: View {
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(
                 TapGesture().onEnded {
+                    store.reportDiagnosticTiming(
+                        stage: "conversation.tap",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "focus=\(composerFocused ? 1 : 0)"
+                            + "|scroll=\(conversationIsScrolling ? 1 : 0)"
+                    )
                     dismissKeyboard()
                 }
             )
@@ -788,6 +798,46 @@ private struct SessionDetailView: View {
                     + "|epoch=\(composerFieldEpoch)"
             )
         }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillShowNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.willShow"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardDidShowNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.didShow"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillHideNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.willHide"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardDidHideNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.didHide"
+            )
+        }
         .navigationTitle(conversationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -851,6 +901,32 @@ private struct SessionDetailView: View {
             to: nil,
             from: nil,
             for: nil
+        )
+    }
+
+    private func reportKeyboardNotification(
+        _ note: Notification,
+        stage: String
+    ) {
+        let frame = (
+            note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue
+        )?.cgRectValue
+        let duration = (
+            note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
+                as? NSNumber
+        )?.doubleValue ?? 0
+
+        store.reportDiagnosticTiming(
+            stage: stage,
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: Int((duration * 1_000).rounded()),
+            detail: "h=\(Int((frame?.height ?? 0).rounded()))"
+                + "|focus=\(composerFocused ? 1 : 0)"
+                + "|scroll=\(conversationIsScrolling ? 1 : 0)"
+                + "|epoch=\(composerFieldEpoch)"
         )
     }
 
