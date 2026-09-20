@@ -121,7 +121,7 @@ private struct StableTranscriptTurnsView: View, Equatable {
     let turns: [TranscriptTurn]
     let revision: Int
 
-    static func == (
+    nonisolated static func == (
         lhs: StableTranscriptTurnsView,
         rhs: StableTranscriptTurnsView
     ) -> Bool {
@@ -324,7 +324,7 @@ private struct AgentActivityGroup: View, Equatable {
 
     @State private var isExpanded = false
 
-    static func == (
+    nonisolated static func == (
         lhs: AgentActivityGroup,
         rhs: AgentActivityGroup
     ) -> Bool {
