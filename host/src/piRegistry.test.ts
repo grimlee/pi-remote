@@ -69,6 +69,7 @@ test("lists persisted Pi sessions from the native session store", async () => {
   assert.equal(sessions[0]?.cwd, "/home/testuser/pi-workspace");
   assert.equal(sessions[0]?.model, "antigravity/gemini-3.8-flash");
   assert.equal(sessions[0]?.startedAt, "2026-09-16T14:27:16.927Z");
+  assert.ok(Date.parse(sessions[0]?.updatedAt ?? "") > 0);
   assert.equal(sessions[0]?.access, "control");
   assert.ok((sessions[0]?.generation ?? 0) > 0);
 });
@@ -140,6 +141,10 @@ test("keeps generation stable when Pi appends messages to a session", async () =
   assert.ok(after);
   assert.equal(after.instanceId, before.instanceId);
   assert.equal(after.generation, before.generation);
+  assert.ok(
+    Date.parse(after.updatedAt) > Date.parse(before.updatedAt),
+    "session activity time should follow JSONL modification time",
+  );
 
   await assert.rejects(
     registry.createLink(
