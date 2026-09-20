@@ -353,6 +353,159 @@ process.stdin.on("data", chunk => {
 });
 
 
+test("rebinds a live RPC channel after Pi switches to a new session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-rebind-"));
+  await writeSession(root, "old.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01OLDSESSION",
+      timestamp: "2026-09-19T10:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi-rebind.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node
+let sessionId="01OLDSESSION";
+let buffer="";
+process.stdout.write(JSON.stringify({type:"ready",protocolVersion:1})+"\\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0,index);
+    buffer = buffer.slice(index+1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    if (command.type === "switch_test_session") {
+      sessionId = "01NEWSESSION";
+    }
+    if (command.type === "get_state") {
+      process.stdout.write(JSON.stringify({
+        id: command.id,
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: { sessionId, isStreaming: true }
+      })+"\\n");
+    }
+  }
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+  });
+  const [oldSession] = await registry.listSessions();
+  assert.ok(oldSession);
+
+  let key: Buffer | null = null;
+  const outbound: Array<Record<string, unknown>> = [];
+  registry.setOutboundFrameHandler(frame => {
+    if (!key) return;
+    outbound.push(
+      JSON.parse(
+        decryptRpcPayload(frame, key).toString("utf8"),
+      ) as Record<string, unknown>,
+    );
+  });
+
+  const link = await registry.createLink(
+    oldSession.instanceId,
+    oldSession.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const capability = JSON.parse(link.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+  };
+  key = Buffer.from(capability.key, "base64url");
+
+  let clientSeq = capability.nextClientSeq;
+  const send = (value: Record<string, unknown>) => {
+    registry.handleRpcFrame(encryptRpcPayload(
+      {
+        machineId: "machine_test",
+        deviceId: "device_test",
+        channelId: capability.channelId,
+        direction: "client",
+        seq: clientSeq++,
+      },
+      Buffer.from(JSON.stringify(value)),
+      key!,
+    ));
+  };
+
+  send({
+    type: "piremote.resume_ack",
+    resumeToken: capability.resumeToken,
+    hostSeq: capability.resumeTargetHostSeq,
+  });
+  send({ type: "switch_test_session" });
+  send({ id: "state-after-switch", type: "get_state" });
+
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const state = outbound.find(value =>
+      value.type === "response"
+      && value.command === "get_state"
+      && (value.data as Record<string, unknown> | undefined)?.sessionId
+        === "01NEWSESSION"
+    );
+    if (state) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  assert.ok(
+    outbound.some(value =>
+      value.type === "response"
+      && value.command === "get_state"
+      && (value.data as Record<string, unknown> | undefined)?.sessionId
+        === "01NEWSESSION"
+    ),
+  );
+
+  await writeSession(root, "new.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01NEWSESSION",
+      timestamp: "2026-09-19T10:01:00.000Z",
+      cwd: root,
+    },
+  ]);
+  const sessions = await registry.listSessions();
+  const newSession = sessions.find(
+    session => session.instanceId === "01NEWSESSION",
+  );
+  assert.ok(newSession);
+
+  const reboundLink = await registry.createLink(
+    newSession.instanceId,
+    newSession.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const reboundCapability = JSON.parse(reboundLink.collabUrl) as {
+    channelId: string;
+    key: string;
+  };
+
+  assert.equal(reboundCapability.channelId, capability.channelId);
+  assert.equal(reboundCapability.key, capability.key);
+
+  registry.stop();
+});
+
+
 test("replays missed RPC frames before releasing post-resume live output", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-replay-"));
   await writeSession(root, "session.jsonl", [
