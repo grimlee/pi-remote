@@ -163,10 +163,12 @@ struct ConversationTranscriptView: View {
     }
 
     private var diagnosticTranscriptSignature: String {
-        let retainedRole = retainedLiveEntry?
-            .message.role.rawValue ?? "none"
-        let liveRole = presentationLiveEntry?
-            .message.role.rawValue ?? "none"
+        let retainedRole = retainedLiveEntry.map {
+            diagnosticRole($0.message.role)
+        } ?? "none"
+        let liveRole = presentationLiveEntry.map {
+            diagnosticRole($0.message.role)
+        } ?? "none"
 
         return [
             "turns=\(stableTurns.count)",
@@ -179,6 +181,21 @@ struct ConversationTranscriptView: View {
             "ret=\(retainedRole)",
             "retrev=\(retainedLiveRevision.map(String.init) ?? "none")"
         ].joined(separator: "|")
+    }
+
+    private func diagnosticRole(
+        _ role: ChatMessageRole
+    ) -> String {
+        switch role {
+        case .user:
+            return "user"
+        case .assistant:
+            return "assistant"
+        case .tool:
+            return "tool"
+        case .system:
+            return "system"
+        }
     }
 
     private var presentationMessages: [ChatMessage] {
