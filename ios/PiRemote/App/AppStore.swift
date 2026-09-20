@@ -1207,6 +1207,23 @@ final class AppStore {
 
         case let .rpcFrame(frame):
             guard let rpcClient else { return }
+
+            // The Relay can briefly deliver tail frames from the previous
+            // Pi RPC channel after the UI has already switched to a newly
+            // linked session. This is expected multiplexing/race behavior,
+            // especially on higher-latency mobile networks. A frame for a
+            // different channel is not a cryptographic failure of the active
+            // session, so ignore it instead of surfacing "invalid frame".
+            guard await rpcClient.ownsChannel(frame.channelId) else {
+                reportDiagnosticTiming(
+                    stage: "rpc.frame.stale",
+                    startedAtMs: diagnosticNowMs(),
+                    durationMs: 0,
+                    detail: "ch=\(diagnosticShortID(frame.channelId))|seq=\(frame.seq)"
+                )
+                return
+            }
+
             do {
                 try await rpcClient.receive(frame)
             } catch let error as PiRpcClient.ClientError {
