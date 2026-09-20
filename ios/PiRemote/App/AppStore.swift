@@ -562,20 +562,6 @@ final class AppStore {
         }
         isDeferringConversationPresentation = true
         deferredRpcSnapshot = nil
-
-        let at = diagnosticNowMs()
-        reportDiagnosticTiming(
-            stage: "drag.begin",
-            startedAtMs: at,
-            durationMs: 0
-        )
-        Task { [weak self] in
-            await self?.reportTailcatDiagnostics(
-                stage: "tailcat.drag.begin",
-                startedAtMs: at,
-                durationMs: 0
-            )
-        }
     }
 
     func endConversationInteraction() {
@@ -587,20 +573,6 @@ final class AppStore {
         if let deferredRpcSnapshot {
             self.deferredRpcSnapshot = nil
             rpcSnapshot = deferredRpcSnapshot
-        }
-
-        let at = diagnosticNowMs()
-        reportDiagnosticTiming(
-            stage: "drag.end",
-            startedAtMs: at,
-            durationMs: 0
-        )
-        Task { [weak self] in
-            await self?.reportTailcatDiagnostics(
-                stage: "tailcat.drag.end",
-                startedAtMs: at,
-                durationMs: 0
-            )
         }
     }
 
