@@ -77,6 +77,7 @@ final class AppStore {
     private var sessionListReconciliationTask: Task<Void, Never>?
     private var sessionListReconciliationID: String?
     private var backgroundedAt: Date?
+    private var diagnosticLastRpcSnapshotSignature: String?
     private let backgroundGraceInterval: TimeInterval = 3 * 60
 
     func start() async {
@@ -525,6 +526,13 @@ final class AppStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let rpcClient else { return false }
 
+        reportDiagnosticTiming(
+            stage: "prompt.submit",
+            startedAtMs: diagnosticNowMs(),
+            durationMs: 0,
+            detail: "chars=\(trimmed.count)|sid=\(diagnosticShortID(activeRpcSessionID ?? ""))"
+        )
+
         do {
             try await rpcClient.sendPrompt(trimmed)
             sessionError = nil
@@ -620,6 +628,44 @@ final class AppStore {
                 report: report
             )
         }
+    }
+
+    private func diagnosticRpcSnapshotSignature(
+        _ snapshot: PiRpcSnapshot
+    ) -> String {
+        let streaming = snapshot.state?
+            .objectValue?["isStreaming"]?
+            .boolValue == true
+        let liveTypes = diagnosticLiveBlockTypes(
+            snapshot.liveMessage
+        )
+
+        return [
+            "stream=\(streaming ? 1 : 0)",
+            "live=\(snapshot.liveMessage == nil ? 0 : 1)",
+            "types=\(liveTypes)",
+            "rev=\(snapshot.messageRevision)",
+            "m=\(snapshot.messages.count)"
+        ].joined(separator: "|")
+    }
+
+    private func diagnosticLiveBlockTypes(
+        _ value: JSONValue?
+    ) -> String {
+        guard let content = value?
+            .objectValue?["content"]?
+            .arrayValue
+        else {
+            return "none"
+        }
+
+        let types = content.compactMap {
+            $0.objectValue?["type"]?.stringValue
+        }
+        guard !types.isEmpty else {
+            return "empty"
+        }
+        return types.joined(separator: ".")
     }
 
     private func diagnosticNowMs() -> Int64 {
@@ -1216,6 +1262,20 @@ final class AppStore {
                 || snapshot.state?
                     .objectValue?["isStreaming"]?
                     .boolValue == true
+
+            let diagnosticSignature = diagnosticRpcSnapshotSignature(
+                snapshot
+            )
+            if diagnosticSignature != diagnosticLastRpcSnapshotSignature {
+                diagnosticLastRpcSnapshotSignature = diagnosticSignature
+                reportDiagnosticTiming(
+                    stage: "rpc.snapshot",
+                    startedAtMs: diagnosticNowMs(),
+                    durationMs: 0,
+                    detail: diagnosticSignature
+                        + "|def=\(isDeferringConversationPresentation ? 1 : 0)"
+                )
+            }
 
             if isDeferringConversationPresentation,
                isStreamingPresentation {
