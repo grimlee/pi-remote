@@ -316,7 +316,7 @@ A successful link response contains only an encrypted capability envelope:
 }
 ```
 
-The plaintext `collabUrl` is never placed in the Relay response.
+The plaintext Pi RPC channel capability is never placed in the Relay response.
 
 The Host derives an X25519 shared secret using its machine key-agreement private key and the authorized device's stored X25519 public key. It then derives an AES-256 key with HKDF-SHA256 using a fresh 32-byte salt.
 
@@ -335,7 +335,7 @@ The iPhone decrypts only after finding a locally verified MachineGrant whose mac
 
 Consequences:
 
-- Relay cannot read the Collab URL, room key, or write token;
+- Relay cannot read the Pi RPC channel key or resume capability;
 - Relay cannot alter machine/device/request/session/access context without authentication failure;
 - a different paired device cannot decrypt the envelope;
 - replay into a different request or generation is rejected by context checks and AEAD.
