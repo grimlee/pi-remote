@@ -290,7 +290,19 @@ private struct TurnResponseView: View {
             return nil
         }
 
-        let visible = visibleAssistantBlocks(last.message.blocks)
+        var visible = visibleAssistantBlocks(last.message.blocks)
+
+        // Mount the final-response renderer as soon as a live assistant
+        // message exists, before its first visible text token arrives. Pi can
+        // spend a long time emitting thinking/tool activity first. Inserting a
+        // brand-new UITextView-backed row only when the first final text delta
+        // arrives can make LazyVStack briefly invalidate the scroll geometry
+        // and leave the viewport in empty space. An empty text block keeps the
+        // same renderer identity alive through that boundary.
+        if visible.isEmpty, last.isStreaming {
+            visible = [.text("")]
+        }
+
         guard !visible.isEmpty else {
             return nil
         }
@@ -310,9 +322,11 @@ private struct TurnResponseView: View {
     private var activityEntries: [TranscriptEntry] {
         var activity = responses
 
+        // Always split the newest assistant message into its activity and
+        // final-response lanes. This keeps the activity subtree unchanged when
+        // the first visible response token appears after thinking/tool calls.
         if let last = responses.last,
-           last.message.role == .assistant,
-           !visibleAssistantBlocks(last.message.blocks).isEmpty {
+           last.message.role == .assistant {
             activity.removeLast()
 
             let hidden = activityAssistantBlocks(last.message.blocks)
@@ -475,7 +489,7 @@ private struct ConversationMessageRow: View, Equatable {
                     isStreaming: isStreaming
                 )
 
-                if isStreaming {
+                if isStreaming, hasVisibleContent {
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.mini)
@@ -506,6 +520,19 @@ private struct ConversationMessageRow: View, Equatable {
             )
             .background(.quaternary)
             .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var hasVisibleContent: Bool {
+        message.blocks.contains { block in
+            switch block {
+            case let .text(text):
+                return !text.isEmpty
+            case let .thinking(text):
+                return !text.isEmpty
+            case .toolCall, .image, .raw:
+                return true
+            }
         }
     }
 }
