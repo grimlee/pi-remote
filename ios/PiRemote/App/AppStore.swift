@@ -1273,8 +1273,22 @@ final class AppStore {
         isResumingSession = true
         var shouldReopen = false
 
+        reportDiagnosticTiming(
+            stage: "resume.transport.begin",
+            startedAtMs: diagnosticNowMs(),
+            durationMs: 0,
+            detail: "sid=\(diagnosticShortID(session.instanceId))"
+        )
+
         do {
             let resumeFromHostSeq = await rpcClient.hostSequenceCursor()
+            reportDiagnosticTiming(
+                stage: "resume.transport.cursor",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "seq=\(resumeFromHostSeq)"
+            )
+
             let link = try await relayClient.requestSessionLink(
                 machine: machine,
                 instanceId: session.instanceId,
@@ -1282,11 +1296,30 @@ final class AppStore {
                 access: session.access,
                 resumeFromHostSeq: resumeFromHostSeq
             )
+            reportDiagnosticTiming(
+                stage: "resume.transport.link",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "seq=\(resumeFromHostSeq)"
+            )
+
+            reportDiagnosticTiming(
+                stage: "resume.transport.rpc.begin",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "seq=\(resumeFromHostSeq)"
+            )
             let resumed = try await rpcClient.resumeTransport(
                 capabilityString: link.collabUrl
             ) { frame in
                 try await relayClient.sendRpcFrame(frame)
             }
+            reportDiagnosticTiming(
+                stage: "resume.transport.rpc.end",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "ok=\(resumed ? 1 : 0)"
+            )
 
             if resumed {
                 needsRpcTransportResume = false
@@ -1297,6 +1330,13 @@ final class AppStore {
                 shouldReopen = true
             }
         } catch {
+            reportDiagnosticTiming(
+                stage: "resume.transport.error",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: "e=\(error.localizedDescription)"
+            )
+
             // A second transport failure during recovery must not destroy the
             // live PiRpcClient: it owns the reliable-command journal. Keep the
             // session in resume mode and let the next Relay connection retry.
