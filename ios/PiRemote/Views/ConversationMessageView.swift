@@ -794,7 +794,9 @@ private struct StreamingPlainTextView: UIViewRepresentable {
 private final class StreamingChunkContainerView: UIView {
     // Keep live layout work bounded. Completed chunks never change again;
     // only the final ~2K-character chunk is remeasured as deltas arrive.
-    private let chunkCharacterLimit = 2_048
+    private let targetChunkCharacters = 2_048
+    private let minimumChunkCharacters = 1_024
+    private let chunkLookaheadCharacters = 4_096
     private let boundarySampleUTF16Length = 64
 
     private var chunkTexts: [String] = []
@@ -911,11 +913,9 @@ private final class StreamingChunkContainerView: UIView {
             + delta
         var index = chunkTexts.count - 1
 
-        while pending.count > chunkCharacterLimit {
-            let split = pending.index(
-                pending.startIndex,
-                offsetBy: chunkCharacterLimit
-            )
+        while let split = splitIndexIfAvailable(
+            in: pending
+        ) {
             let fixed = String(pending[..<split])
             pending = String(pending[split...])
 
@@ -936,20 +936,59 @@ private final class StreamingChunkContainerView: UIView {
         chunkHeights.removeAll(keepingCapacity: true)
         measuredWidth = nil
 
-        var start = text.startIndex
-        while start < text.endIndex {
-            let end = text.index(
-                start,
-                offsetBy: chunkCharacterLimit,
-                limitedBy: text.endIndex
-            ) ?? text.endIndex
-            appendChunk(String(text[start..<end]))
-            start = end
+        var remaining = text
+        while let split = splitIndexIfAvailable(
+            in: remaining
+        ) {
+            appendChunk(String(remaining[..<split]))
+            remaining = String(remaining[split...])
         }
 
-        if text.isEmpty {
-            appendChunk("")
+        if !remaining.isEmpty || text.isEmpty {
+            appendChunk(remaining)
         }
+    }
+
+    private func splitIndexIfAvailable(
+        in text: String
+    ) -> String.Index? {
+        guard text.count > targetChunkCharacters else {
+            return nil
+        }
+
+        let target = text.index(
+            text.startIndex,
+            offsetBy: targetChunkCharacters,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        let minimum = text.index(
+            text.startIndex,
+            offsetBy: minimumChunkCharacters,
+            limitedBy: target
+        ) ?? text.startIndex
+
+        if minimum < target,
+           let newline = text[minimum..<target]
+            .lastIndex(of: "\n") {
+            return text.index(after: newline)
+        }
+
+        let lookahead = text.index(
+            text.startIndex,
+            offsetBy: chunkLookaheadCharacters,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+
+        if target < lookahead,
+           let newline = text[target..<lookahead]
+            .firstIndex(of: "\n") {
+            return text.index(after: newline)
+        }
+
+        // Keep a long unbroken line intact rather than introducing a visual
+        // line break that does not exist in Pi's output. Natural-language and
+        // code responses normally reach a real newline within the lookahead.
+        return nil
     }
 
     private func appendChunk(_ text: String) {
