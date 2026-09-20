@@ -253,6 +253,12 @@ actor RelayClient {
         disconnect()
 
         let socket = session.webSocketTask(with: configuration.url)
+        // URLSessionWebSocketTask defaults to a relatively small inbound
+        // message limit. Pi can legitimately return a large encrypted RPC
+        // frame when restoring long histories or carrying large tool output.
+        // Keep an explicit bounded ceiling so those frames are accepted
+        // without turning the client into an unbounded receiver.
+        socket.maximumMessageSize = 16 * 1024 * 1024
         self.socket = socket
         socket.resume()
 
