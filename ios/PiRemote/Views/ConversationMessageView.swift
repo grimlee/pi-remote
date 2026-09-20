@@ -540,7 +540,8 @@ private struct ConversationMessageRow: View, Equatable {
     let isStreaming: Bool
 
     var body: some View {
-        switch message.role {
+        Group {
+            switch message.role {
         case .user:
             HStack(alignment: .bottom) {
                 Spacer(minLength: 48)
@@ -595,6 +596,7 @@ private struct ConversationMessageRow: View, Equatable {
             )
             .background(.quaternary)
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
         }
         .contextMenu {
             if let copyText {
