@@ -8,6 +8,7 @@ export interface RemoteSession {
   cwd: string;
   model: string | null;
   startedAt: string;
+  updatedAt: string;
   participantCount: number;
   relayConnected: boolean;
   inputRequired: boolean;

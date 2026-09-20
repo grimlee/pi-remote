@@ -112,6 +112,8 @@ Host identity and authorized-device records are owner-only.
 
 iOS private keys and MachineGrants use Keychain.
 
-## Next layer
+## Capability delivery
 
-The same paired X25519 keys will be used to protect sensitive Host-to-device capability delivery, especially Pi Collab control links.
+The same paired X25519 identities are used to encrypt sensitive Host-to-device Pi RPC channel capabilities.
+
+A session link is therefore delivered only to the exact paired iPhone identity and is cryptographically bound to the Host, device, request, session generation, and access context.

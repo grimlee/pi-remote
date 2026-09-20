@@ -38,6 +38,7 @@ interface SessionRecord {
   name: string | null;
   model: string | null;
   startedAt: string;
+  updatedAt: string;
 }
 
 interface ReplayEntry {
@@ -134,7 +135,10 @@ async function collectSessionFiles(root: string, output: string[]): Promise<void
   }));
 }
 
-async function parseSessionFile(file: string, generation: number): Promise<SessionRecord | null> {
+async function parseSessionFile(
+  file: string,
+  updatedAt: string,
+): Promise<SessionRecord | null> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
@@ -193,6 +197,14 @@ async function parseSessionFile(file: string, generation: number): Promise<Sessi
     return null;
   }
 
+  // generation identifies the persisted session incarnation, not its
+  // mutable contents. Pi appends every user/assistant turn to the JSONL file,
+  // so using file mtime here makes an ordinary conversation look stale.
+  const startedAtMs = Date.parse(header.timestamp);
+  const generation = Number.isSafeInteger(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : 1;
+
   return {
     instanceId: header.id,
     generation,
@@ -202,6 +214,7 @@ async function parseSessionFile(file: string, generation: number): Promise<Sessi
     name: name ?? firstMessage?.slice(0, 96) ?? null,
     model,
     startedAt: header.timestamp,
+    updatedAt,
   };
 }
 
@@ -257,7 +270,10 @@ export class PiRegistry {
       .slice(0, this.#maxSessions);
 
     const parsed = await Promise.all(recent.map(item =>
-      parseSessionFile(item.file, Math.max(1, Math.floor(item.info.mtimeMs))),
+      parseSessionFile(
+        item.file,
+        item.info.mtime.toISOString(),
+      ),
     ));
 
     this.#sessions.clear();
@@ -273,6 +289,7 @@ export class PiRegistry {
         cwd: session.cwd,
         model: session.model,
         startedAt: session.startedAt,
+        updatedAt: session.updatedAt,
         participantCount: 0,
         relayConnected: true,
         inputRequired: false,
@@ -686,8 +703,36 @@ export class PiRegistry {
     } catch {
       return;
     }
-    if (!asRecord(value)) return;
-    this.#sendHostPayload(channel, value as Record<string, unknown>);
+    const record = asRecord(value);
+    if (!record) return;
+
+    this.#trackSessionIdentity(channel, record);
+    this.#sendHostPayload(channel, record);
+  }
+
+  #trackSessionIdentity(
+    channel: RpcChannel,
+    value: Record<string, unknown>,
+  ): void {
+    if (value.type !== "response"
+      || value.command !== "get_state"
+      || value.success !== true) {
+      return;
+    }
+
+    const data = asRecord(value.data);
+    const sessionId = data?.sessionId;
+    if (typeof sessionId !== "string"
+      || !sessionId
+      || sessionId === channel.instanceId) {
+      return;
+    }
+
+    const previous = channel.instanceId;
+    channel.instanceId = sessionId;
+    console.log(
+      `Pi RPC session rebind [${channel.channelId}] ${previous} -> ${sessionId}`,
+    );
   }
 
   #sendHostPayload(channel: RpcChannel, value: Record<string, unknown>): void {

@@ -5,15 +5,21 @@ import Security
 struct PairedHostProfile: Codable, Hashable, Sendable {
     let version: Int
     let relayURL: String
+    let transport: PairingTransport?
+    let fallbackRelayURL: String?
     let machine: PairingMachineIdentity
 
     init(
         version: Int = 1,
         relayURL: String,
+        transport: PairingTransport? = nil,
+        fallbackRelayURL: String? = nil,
         machine: PairingMachineIdentity
     ) {
         self.version = version
         self.relayURL = relayURL
+        self.transport = transport
+        self.fallbackRelayURL = fallbackRelayURL
         self.machine = machine
     }
 }
@@ -37,6 +43,13 @@ actor PairedHostProfileStore {
     private let account = "paired-host-profile-v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+
+    private static func validFallbackRelayURL(_ value: String?) -> Bool {
+        guard let value else { return true }
+        guard let url = URL(string: value) else { return false }
+        return url.scheme?.lowercased() == "wss"
+            && url.host != nil
+    }
 
     func load() throws -> PairedHostProfile? {
         let query: [CFString: Any] = [
@@ -62,7 +75,8 @@ actor PairedHostProfileStore {
               ),
               profile.version == 1,
               profile.machine.id.hasPrefix("machine_"),
-              URL(string: profile.relayURL) != nil
+              URL(string: profile.relayURL) != nil,
+              Self.validFallbackRelayURL(profile.fallbackRelayURL)
         else {
             throw PairedHostProfileStoreError.invalidProfile
         }
@@ -72,7 +86,8 @@ actor PairedHostProfileStore {
     func save(_ profile: PairedHostProfile) throws {
         guard profile.version == 1,
               profile.machine.id.hasPrefix("machine_"),
-              URL(string: profile.relayURL) != nil
+              URL(string: profile.relayURL) != nil,
+              Self.validFallbackRelayURL(profile.fallbackRelayURL)
         else {
             throw PairedHostProfileStoreError.invalidProfile
         }

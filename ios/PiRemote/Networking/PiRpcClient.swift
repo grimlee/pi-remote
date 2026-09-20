@@ -16,6 +16,9 @@ struct PiRpcSnapshot: Sendable {
     var availableModels: [PiModelOption] = []
     var availableThinkingLevels: [String] = []
     var availableCommands: [PiSlashCommandOption] = []
+    var sessionStats: JSONValue?
+    var decodeTokensPerSecond: Double?
+    var diagnosticEvent: String?
     var presentationRevision: Int = 0
     var liveCharacterCount: Int = 0
     var lastEvent: JSONValue?
@@ -70,6 +73,9 @@ actor PiRpcClient {
 
     private var snapshot: PiRpcSnapshot
     private var liveMutableCharacterCount = 0
+    private var decodeDeltaTimestamps: [TimeInterval] = []
+    private var lastDecodeDeltaAt: TimeInterval?
+    private let decodeWindowSeconds: TimeInterval = 1.0
     private var lastLiveSnapshotEmissionAt: TimeInterval = 0
     private var nextClientSequence: Int64 = 1
     private var lastHostSequence: Int64 = 0
@@ -224,6 +230,7 @@ actor PiRpcClient {
         emitSnapshot()
 
         try await refreshThinkingLevels(prefix: "model")
+        try await refreshSessionStats(prefix: "model")
     }
 
     func setThinkingLevel(_ level: String) async throws {
@@ -310,18 +317,28 @@ actor PiRpcClient {
         lastHostSequence
     }
 
+    func ownsChannel(_ channelId: String) -> Bool {
+        capability.channelId == channelId
+    }
+
     func sendPrompt(_ text: String) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         var command: [String: JSONValue] = [
+            "id": .string(UUID().uuidString),
             "type": .string("prompt"),
             "message": .string(trimmed)
         ]
         if snapshot.state?.objectValue?["isStreaming"]?.boolValue == true {
             command["streamingBehavior"] = .string("followUp")
         }
-        _ = try await sendRequest(command)
+
+        // Prompt completion is delivered by the agent/message event stream.
+        // Waiting for a terminal Pi response keeps the composer occupied even
+        // after the assistant has finished. The reliable-command journal plus
+        // Host client ACK still guarantees retry-safe delivery.
+        try await sendReliableCommand(command)
     }
 
     func abort() async throws {
@@ -427,6 +444,10 @@ actor PiRpcClient {
             "id": .string("\(prefix)-commands-\(suffix)"),
             "type": .string("get_commands")
         ])
+        try await refreshSessionStats(
+            prefix: prefix,
+            suffix: suffix
+        )
     }
 
     private func refreshThinkingLevels(
@@ -436,6 +457,16 @@ actor PiRpcClient {
         try await sendCommand([
             "id": .string("\(prefix)-thinking-\(suffix)"),
             "type": .string("get_available_thinking_levels")
+        ])
+    }
+
+    private func refreshSessionStats(
+        prefix: String,
+        suffix: String = UUID().uuidString
+    ) async throws {
+        try await sendCommand([
+            "id": .string("\(prefix)-stats-\(suffix)"),
+            "type": .string("get_session_stats")
         ])
     }
 
@@ -594,12 +625,15 @@ actor PiRpcClient {
             return
 
         case "ready":
+            snapshot.diagnosticEvent = "ready"
             snapshot.phase = .live
             snapshot.lastEvent = value
 
         case "response":
             let command = object["command"]?.stringValue
             let success = object["success"]?.boolValue ?? false
+            snapshot.diagnosticEvent =
+                "response." + (command ?? "unknown")
 
             if success,
                command == "get_state",
@@ -652,6 +686,10 @@ actor PiRpcClient {
                             $1.name
                         ) == .orderedAscending
                     }
+            } else if success,
+                      command == "get_session_stats",
+                      let data = object["data"] {
+                snapshot.sessionStats = data
             } else {
                 snapshot.lastEvent = value
             }
@@ -659,6 +697,10 @@ actor PiRpcClient {
             completePendingResponse(object)
 
         case "message_start":
+            snapshot.diagnosticEvent = "message_start."
+                + (object["message"]?
+                    .objectValue?["role"]?
+                    .stringValue ?? "unknown")
             liveMutableCharacterCount = 0
             snapshot.liveCharacterCount = 0
             if let message = object["message"] {
@@ -667,10 +709,20 @@ actor PiRpcClient {
             snapshot.lastEvent = value
 
         case "message_update":
+            let updateType = object["assistantMessageEvent"]?
+                .objectValue?["type"]?
+                .stringValue ?? "unknown"
+            snapshot.diagnosticEvent =
+                "message_update." + updateType
             applyMessageUpdate(object)
+            recordDecodeDeltaIfNeeded(object)
             snapshot.lastEvent = value
 
         case "message_end":
+            snapshot.diagnosticEvent = "message_end."
+                + (object["message"]?
+                    .objectValue?["role"]?
+                    .stringValue ?? "unknown")
             if let message = object["message"] {
                 snapshot.messages.append(message)
                 snapshot.messageRevision += 1
@@ -681,15 +733,29 @@ actor PiRpcClient {
             snapshot.lastEvent = value
 
         case "agent_start":
+            snapshot.diagnosticEvent = "agent_start"
+            resetDecodeSpeed()
             setStreaming(true)
             snapshot.lastEvent = value
 
         case "agent_end":
+            snapshot.diagnosticEvent = "agent_end"
             setStreaming(false)
             snapshot.lastEvent = value
 
+        case "agent_settled":
+            snapshot.diagnosticEvent = "agent_settled"
+            snapshot.lastEvent = value
+            Task { [weak self] in
+                try? await self?.refreshSessionStats(
+                    prefix: "settled"
+                )
+            }
+
         case "extension_ui_request":
             let method = object["method"]?.stringValue ?? ""
+            snapshot.diagnosticEvent =
+                "extension_ui_request." + method
             if ["select", "confirm", "input", "editor"].contains(method) {
                 snapshot.uiRequest = value
             } else {
@@ -697,6 +763,7 @@ actor PiRpcClient {
             }
 
         case "piremote.channel_closed":
+            snapshot.diagnosticEvent = "piremote.channel_closed"
             isClosed = true
             failPending(ClientError.closed)
             snapshot.phase = .closed
@@ -708,6 +775,7 @@ actor PiRpcClient {
             return
 
         default:
+            snapshot.diagnosticEvent = type
             snapshot.lastEvent = value
         }
 
@@ -886,6 +954,41 @@ actor PiRpcClient {
         key: String
     ) -> String {
         value.objectValue?[key]?.stringValue ?? ""
+    }
+
+    private func recordDecodeDeltaIfNeeded(
+        _ object: [String: JSONValue]
+    ) {
+        guard let update = object["assistantMessageEvent"]?.objectValue,
+              let type = update["type"]?.stringValue,
+              type == "text_delta" || type == "thinking_delta"
+        else {
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let previous = lastDecodeDeltaAt
+        lastDecodeDeltaAt = now
+
+        decodeDeltaTimestamps.append(now)
+        let cutoff = now - decodeWindowSeconds
+        decodeDeltaTimestamps.removeAll { $0 < cutoff }
+
+        if decodeDeltaTimestamps.count >= 2,
+           let first = decodeDeltaTimestamps.first {
+            let span = max(0.1, now - first)
+            snapshot.decodeTokensPerSecond =
+                Double(decodeDeltaTimestamps.count - 1) / span
+        } else if let previous {
+            let span = max(0.1, min(decodeWindowSeconds, now - previous))
+            snapshot.decodeTokensPerSecond = 1.0 / span
+        }
+    }
+
+    private func resetDecodeSpeed() {
+        decodeDeltaTimestamps.removeAll(keepingCapacity: true)
+        lastDecodeDeltaAt = nil
+        snapshot.decodeTokensPerSecond = nil
     }
 
     private func setStreaming(_ streaming: Bool) {

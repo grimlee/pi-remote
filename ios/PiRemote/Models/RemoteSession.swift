@@ -15,10 +15,15 @@ struct RemoteSession: Identifiable, Codable, Hashable, Sendable {
     let cwd: String
     let model: String?
     let startedAt: Date
+    let updatedAt: Date?
     let participantCount: Int
     let relayConnected: Bool
     let inputRequired: Bool
     let access: Access
+
+    var activityAt: Date {
+        updatedAt ?? startedAt
+    }
 }
 
 struct SessionListResponse: Codable {

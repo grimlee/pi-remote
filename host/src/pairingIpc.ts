@@ -7,6 +7,7 @@ import {
   encodePairingBootstrap,
   relayClientUrl,
   type PairingBootstrap,
+  type PairingTransport,
 } from "./pairingBootstrap.js";
 
 function runtimeRoot(): string {
@@ -53,6 +54,7 @@ export class PairingIpcServer {
     private readonly pairing: PairingService,
     private readonly relayHostUrl: string,
     private readonly socketPath = defaultPairingSocketPath(),
+    private readonly transport?: PairingTransport,
   ) {}
 
   async start(): Promise<void> {
@@ -122,6 +124,7 @@ export class PairingIpcServer {
     const bootstrap: PairingBootstrap = {
       version: 1,
       relayUrl: relayClientUrl(this.relayHostUrl),
+      ...(this.transport ? { transport: this.transport } : {}),
       invitation,
     };
 

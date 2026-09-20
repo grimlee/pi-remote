@@ -5,15 +5,21 @@ on:
     branches: [main]
     paths:
       - "ios/**"
+      - "native/tailcat-ios/**"
       - ".github/workflows/ios-build.yml"
   pull_request:
     paths:
       - "ios/**"
+      - "native/tailcat-ios/**"
       - ".github/workflows/ios-build.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ios-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -25,11 +31,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: false
+
       - name: Show toolchain
         run: |
           sw_vers
           xcodebuild -version
           swift --version
+          go version
+
+      - name: Build Tailcat XCFramework
+        run: sh native/tailcat-ios/build-xcframework.sh
+
+      - name: Verify Tailcat XCFramework
+        run: test -d ios/Vendor/PiRemoteTailcat.xcframework
 
       - name: Test PiRemoteCore
         working-directory: ios/PiRemoteCore

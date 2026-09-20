@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,6 +69,7 @@ test("lists persisted Pi sessions from the native session store", async () => {
   assert.equal(sessions[0]?.cwd, "/home/testuser/pi-workspace");
   assert.equal(sessions[0]?.model, "antigravity/gemini-3.8-flash");
   assert.equal(sessions[0]?.startedAt, "2026-09-16T14:27:16.927Z");
+  assert.ok(Date.parse(sessions[0]?.updatedAt ?? "") > 0);
   assert.equal(sessions[0]?.access, "control");
   assert.ok((sessions[0]?.generation ?? 0) > 0);
 });
@@ -99,6 +100,66 @@ test("uses the first user message as a fallback session title", async () => {
   const [session] = await new PiRegistry({ sessionDir: root }).listSessions();
   assert.equal(session?.name, "Fix the native Pi RPC bridge");
 });
+
+test("keeps generation stable when Pi appends messages to a session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-live-generation-"));
+  const file = await writeSession(root, "session.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01LIVEGENERATION",
+      timestamp: "2026-09-19T13:00:00.000Z",
+      cwd: "/tmp/project",
+    },
+  ]);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: "/definitely/not/used/pi",
+  });
+  const [before] = await registry.listSessions();
+  assert.ok(before);
+
+  await appendFile(file, JSON.stringify({
+    type: "message",
+    id: "m1",
+    parentId: null,
+    timestamp: "2026-09-19T13:00:01.000Z",
+    message: {
+      role: "user",
+      content: "hello",
+      timestamp: 1,
+    },
+  }) + "\n");
+
+  // Force a clearly different mtime so this test fails if generation ever
+  // regresses to using mutable file metadata.
+  const future = new Date(Date.now() + 10_000);
+  await utimes(file, future, future);
+
+  const [after] = await registry.listSessions();
+  assert.ok(after);
+  assert.equal(after.instanceId, before.instanceId);
+  assert.equal(after.generation, before.generation);
+  assert.ok(
+    Date.parse(after.updatedAt) > Date.parse(before.updatedAt),
+    "session activity time should follow JSONL modification time",
+  );
+
+  await assert.rejects(
+    registry.createLink(
+      before.instanceId,
+      before.generation,
+      "control",
+      { machineId: "machine_test", deviceId: "device_test" },
+    ),
+    (error: unknown) =>
+      error instanceof PiRegistryError && error.code === "pi_command_failed",
+  );
+
+  registry.stop();
+});
+
 
 test("rejects a stale generation before spawning Pi", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-stale-"));
@@ -287,6 +348,159 @@ process.stdin.on("data", chunk => {
   assert.equal(resumedCapability.key, capability.key);
   assert.equal(resumedCapability.nextClientSeq, 3);
   assert.ok(resumedCapability.lastHostSeq >= capability.lastHostSeq);
+
+  registry.stop();
+});
+
+
+test("rebinds a live RPC channel after Pi switches to a new session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-remote-pi-rebind-"));
+  await writeSession(root, "old.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01OLDSESSION",
+      timestamp: "2026-09-19T10:00:00.000Z",
+      cwd: root,
+    },
+  ]);
+
+  const fakePi = path.join(root, "fake-pi-rebind.mjs");
+  await writeFile(fakePi, `#!/usr/bin/env node
+let sessionId="01OLDSESSION";
+let buffer="";
+process.stdout.write(JSON.stringify({type:"ready",protocolVersion:1})+"\\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0,index);
+    buffer = buffer.slice(index+1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    if (command.type === "switch_test_session") {
+      sessionId = "01NEWSESSION";
+    }
+    if (command.type === "get_state") {
+      process.stdout.write(JSON.stringify({
+        id: command.id,
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: { sessionId, isStreaming: true }
+      })+"\\n");
+    }
+  }
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const registry = new PiRegistry({
+    sessionDir: root,
+    executable: fakePi,
+    idleTimeoutMs: 5_000,
+  });
+  const [oldSession] = await registry.listSessions();
+  assert.ok(oldSession);
+
+  let key: Buffer | null = null;
+  const outbound: Array<Record<string, unknown>> = [];
+  registry.setOutboundFrameHandler(frame => {
+    if (!key) return;
+    outbound.push(
+      JSON.parse(
+        decryptRpcPayload(frame, key).toString("utf8"),
+      ) as Record<string, unknown>,
+    );
+  });
+
+  const link = await registry.createLink(
+    oldSession.instanceId,
+    oldSession.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const capability = JSON.parse(link.collabUrl) as {
+    channelId: string;
+    key: string;
+    nextClientSeq: number;
+    resumeToken: string;
+    resumeTargetHostSeq: number;
+  };
+  key = Buffer.from(capability.key, "base64url");
+
+  let clientSeq = capability.nextClientSeq;
+  const send = (value: Record<string, unknown>) => {
+    registry.handleRpcFrame(encryptRpcPayload(
+      {
+        machineId: "machine_test",
+        deviceId: "device_test",
+        channelId: capability.channelId,
+        direction: "client",
+        seq: clientSeq++,
+      },
+      Buffer.from(JSON.stringify(value)),
+      key!,
+    ));
+  };
+
+  send({
+    type: "piremote.resume_ack",
+    resumeToken: capability.resumeToken,
+    hostSeq: capability.resumeTargetHostSeq,
+  });
+  send({ type: "switch_test_session" });
+  send({ id: "state-after-switch", type: "get_state" });
+
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const state = outbound.find(value =>
+      value.type === "response"
+      && value.command === "get_state"
+      && (value.data as Record<string, unknown> | undefined)?.sessionId
+        === "01NEWSESSION"
+    );
+    if (state) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  assert.ok(
+    outbound.some(value =>
+      value.type === "response"
+      && value.command === "get_state"
+      && (value.data as Record<string, unknown> | undefined)?.sessionId
+        === "01NEWSESSION"
+    ),
+  );
+
+  await writeSession(root, "new.jsonl", [
+    {
+      type: "session",
+      version: 3,
+      id: "01NEWSESSION",
+      timestamp: "2026-09-19T10:01:00.000Z",
+      cwd: root,
+    },
+  ]);
+  const sessions = await registry.listSessions();
+  const newSession = sessions.find(
+    session => session.instanceId === "01NEWSESSION",
+  );
+  assert.ok(newSession);
+
+  const reboundLink = await registry.createLink(
+    newSession.instanceId,
+    newSession.generation,
+    "control",
+    { machineId: "machine_test", deviceId: "device_test" },
+  );
+  const reboundCapability = JSON.parse(reboundLink.collabUrl) as {
+    channelId: string;
+    key: string;
+  };
+
+  assert.equal(reboundCapability.channelId, capability.channelId);
+  assert.equal(reboundCapability.key, capability.key);
 
   registry.stop();
 });

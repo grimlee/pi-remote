@@ -17,11 +17,14 @@ targets:
       - PiRemote
     dependencies:
       - package: PiRemoteCore
+      - framework: Vendor/PiRemoteTailcat.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.grimlee.piremote
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Pi Remote
+        INFOPLIST_KEY_NSCameraUsageDescription: "Scan Pi Remote pairing QR codes."
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

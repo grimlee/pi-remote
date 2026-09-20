@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an improvement to the Pi Remote workflow
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Pi Remote is intended to stay session/conversation-first rather than becoming a terminal or mobile IDE.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the workflow or friction before proposing the UI/implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or examples
+      description: Optional links, screenshots, or examples from other apps are welcome.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Session / workspace UX
+        - Conversation UX
+        - Quick Connect / networking
+        - Reliability / reconnect
+        - Multimodal / files
+        - Notifications / background
+        - Host platform support
+        - Other

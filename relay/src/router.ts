@@ -19,8 +19,21 @@ import type {
 import { PROTOCOL_VERSION } from "./protocol.js";
 
 export interface RelayPeer {
+  id?: string;
   send(text: string): void;
   close(code?: number, reason?: string): void;
+}
+
+const TRACE = process.env.PI_REMOTE_TRACE === "1";
+
+function trace(event: string, fields: Record<string, unknown> = {}): void {
+  if (!TRACE) return;
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    component: "relay-router",
+    event,
+    ...fields,
+  }));
 }
 
 interface HostRecord {
@@ -146,6 +159,22 @@ export class RelayRouter {
     device: ClientHello["device"],
   ): void {
     this.removeClient(peer);
+
+    for (const existing of [...this.#clients.values()]) {
+      const sameIdentity = existing.principal.id === principal.id
+        && existing.principal.signingPublicKey === principal.signingPublicKey
+        && existing.device.keyAgreementPublicKey === device.keyAgreementPublicKey;
+      if (!sameIdentity || existing.peer === peer) continue;
+
+      trace("client.replaced", {
+        deviceId: device.id,
+        oldConnectionId: existing.peer.id ?? null,
+        newConnectionId: peer.id ?? null,
+      });
+      existing.peer.close(4001, "device connection replaced");
+      this.removeClient(existing.peer);
+    }
+
     const record: ClientRecord = {
       peer,
       principal,
@@ -154,6 +183,11 @@ export class RelayRouter {
       visible: new Map(),
     };
     this.#clients.set(peer, record);
+    trace("client.registered", {
+      deviceId: device.id,
+      connectionId: peer.id ?? null,
+      activeClients: this.#clients.size,
+    });
     this.#sendSnapshot(record);
   }
 
@@ -174,7 +208,13 @@ export class RelayRouter {
   }
 
   removeClient(peer: RelayPeer): void {
-    this.#clients.delete(peer);
+    const removed = this.#clients.delete(peer);
+    if (removed) {
+      trace("client.removed", {
+        connectionId: peer.id ?? null,
+        activeClients: this.#clients.size,
+      });
+    }
     for (const [requestId, pending] of this.#pending) {
       if (pending.client !== peer) continue;
       clearTimeout(pending.timer);
@@ -385,6 +425,14 @@ export class RelayRouter {
       if (!client
         || client.principal.id !== frame.deviceId
         || client.device.id !== frame.deviceId) {
+        trace("rpc.drop", {
+          direction: frame.direction,
+          reason: "unknown_client",
+          connectionId: peer.id ?? null,
+          deviceId: frame.deviceId,
+          channelId: frame.channelId,
+          seq: frame.seq,
+        });
         return;
       }
 
@@ -393,6 +441,16 @@ export class RelayRouter {
       const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
       const host = this.#hosts.get(key);
       if (!host || !authorizationSnapshotAllows(host.authorizedDevices, grant)) return;
+
+      trace("rpc.forward", {
+        direction: "client->host",
+        sourceConnectionId: peer.id ?? null,
+        targetConnectionId: host.peer.id ?? null,
+        deviceId: frame.deviceId,
+        machineId: frame.machineId,
+        channelId: frame.channelId,
+        seq: frame.seq,
+      });
       host.peer.send(JSON.stringify(frame));
       return;
     }
@@ -405,6 +463,7 @@ export class RelayRouter {
     const hostDevice = host.authorizedDevices.find(item => item.id === frame.deviceId);
     if (!hostDevice) return;
 
+    const targets: ClientRecord[] = [];
     for (const client of this.#clients.values()) {
       if (client.principal.id !== frame.deviceId || client.device.id !== frame.deviceId) continue;
       const grant = client.grants.find(item =>
@@ -414,6 +473,21 @@ export class RelayRouter {
       if (!grant) continue;
       const key = hostKey(grant.machine.id, grant.machine.signingPublicKey);
       if (key !== host.key || !authorizationSnapshotAllows(host.authorizedDevices, grant)) continue;
+      targets.push(client);
+    }
+
+    trace("rpc.forward", {
+      direction: "host->client",
+      sourceConnectionId: peer.id ?? null,
+      targetConnectionIds: targets.map(client => client.peer.id ?? null),
+      targetCount: targets.length,
+      deviceId: frame.deviceId,
+      machineId: frame.machineId,
+      channelId: frame.channelId,
+      seq: frame.seq,
+    });
+
+    for (const client of targets) {
       client.peer.send(JSON.stringify(frame));
     }
   }

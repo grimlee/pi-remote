@@ -1,3 +1,4 @@
+import Combine
 import PiRemoteCore
 import SwiftUI
 import UIKit
@@ -7,10 +8,24 @@ private enum SessionRoute: Hashable {
     case fresh(RemoteSession)
 }
 
+private struct SessionProject: Identifiable {
+    let cwd: String
+    let sessions: [RemoteSession]
+
+    var id: String { cwd }
+
+    var latestActivity: Date {
+        sessions.first?.activityAt ?? .distantPast
+    }
+}
+
 struct RootView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var path: [SessionRoute] = []
+    @State private var collapsedProjects: Set<String> = []
+    @State private var showingQuickConnectScanner = false
+    @State private var quickConnectScannerError: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -59,6 +74,14 @@ struct RootView: View {
         .task {
             await store.start()
         }
+        .onChange(of: path) { oldPath, newPath in
+            guard !oldPath.isEmpty, newPath.isEmpty else {
+                return
+            }
+            Task {
+                await store.refreshSessionsForList()
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             Task {
                 switch phase {
@@ -72,6 +95,47 @@ struct RootView: View {
                     break
                 }
             }
+        }
+        .sheet(isPresented: $showingQuickConnectScanner) {
+            NavigationStack {
+                QRCodeScannerView { code in
+                    store.pairingPayload = code
+                    showingQuickConnectScanner = false
+                    Task {
+                        await store.pairFromPayload()
+                    }
+                } onError: { message in
+                    quickConnectScannerError = message
+                    showingQuickConnectScanner = false
+                }
+                .ignoresSafeArea()
+                .navigationTitle("Set Up Quick Connect")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            showingQuickConnectScanner = false
+                        }
+                    }
+                }
+            }
+        }
+        .alert(
+            "Quick Connect",
+            isPresented: Binding(
+                get: { quickConnectScannerError != nil },
+                set: { presented in
+                    if !presented {
+                        quickConnectScannerError = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                quickConnectScannerError = nil
+            }
+        } message: {
+            Text(quickConnectScannerError ?? "Could not scan the pairing code.")
         }
     }
 
@@ -106,20 +170,79 @@ struct RootView: View {
                             await store.refreshSessions()
                         }
                     }
+
+                    if store.canSetUpQuickConnect {
+                        Button("Set Up Quick Connect") {
+                            quickConnectScannerError = nil
+                            showingQuickConnectScanner = true
+                        }
+                        .disabled(store.isPairing)
+                    }
                 }
             } else {
                 List {
-                    Section {
-                        ForEach(store.sessions) { session in
-                            NavigationLink(
-                                value: SessionRoute.existing(session)
-                            ) {
-                                SessionRow(session: session)
+                    ForEach(projectGroups) { project in
+                        Section {
+                            if !collapsedProjects.contains(project.cwd) {
+                                ForEach(project.sessions) { session in
+                                    NavigationLink(
+                                        value: SessionRoute.existing(session)
+                                    ) {
+                                        SessionRow(session: session)
+                                    }
+                                }
+                            }
+                        } header: {
+                            Button {
+                                withAnimation(.snappy(duration: 0.18)) {
+                                    toggleProject(project.cwd)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder")
+                                    Text(projectName(project.cwd))
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    Text("\(project.sessions.count)")
+                                        .foregroundStyle(.tertiary)
+                                        .monospacedDigit()
+
+                                    Image(
+                                        systemName: collapsedProjects
+                                            .contains(project.cwd)
+                                            ? "chevron.right"
+                                            : "chevron.down"
+                                    )
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        } footer: {
+                            if !collapsedProjects.contains(project.cwd) {
+                                Text(project.cwd)
+                                    .lineLimit(1)
                             }
                         }
                     }
 
                     Section {
+                        if store.canSetUpQuickConnect {
+                            Button {
+                                quickConnectScannerError = nil
+                                showingQuickConnectScanner = true
+                            } label: {
+                                Label(
+                                    "Set Up Quick Connect",
+                                    systemImage: "qrcode.viewfinder"
+                                )
+                            }
+                            .disabled(store.isPairing)
+                        }
+
                         Button(
                             "Forget Host",
                             role: .destructive
@@ -154,6 +277,30 @@ struct RootView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
+                if store.canSetUpQuickConnect {
+                    Button("Set Up Quick Connect") {
+                        quickConnectScannerError = nil
+                        showingQuickConnectScanner = true
+                    }
+                    .disabled(store.isPairing)
+                }
+
+                if store.hasRelayFallback {
+                    Button(
+                        store.isUsingRelayFallback
+                            ? "Try Quick Connect"
+                            : "Use Backup Connection"
+                    ) {
+                        Task {
+                            if store.isUsingRelayFallback {
+                                await store.usePreferredConnection()
+                            } else {
+                                await store.useBackupConnection()
+                            }
+                        }
+                    }
+                }
+
                 Button(
                     "Forget Host",
                     role: .destructive
@@ -166,10 +313,30 @@ struct RootView: View {
         }
     }
 
+    private var projectGroups: [SessionProject] {
+        Dictionary(grouping: store.sessions, by: \.cwd)
+            .map { cwd, sessions in
+                SessionProject(
+                    cwd: cwd,
+                    sessions: sessions.sorted {
+                        $0.activityAt > $1.activityAt
+                    }
+                )
+            }
+            .sorted {
+                $0.latestActivity > $1.latestActivity
+            }
+    }
+
     private var projectSessions: [RemoteSession] {
-        var seen = Set<String>()
-        return store.sessions.filter { session in
-            seen.insert(session.cwd).inserted
+        projectGroups.compactMap(\.sessions.first)
+    }
+
+    private func toggleProject(_ cwd: String) {
+        if collapsedProjects.contains(cwd) {
+            collapsedProjects.remove(cwd)
+        } else {
+            collapsedProjects.insert(cwd)
         }
     }
 
@@ -182,6 +349,8 @@ struct RootView: View {
 
 private struct PairingView: View {
     @Environment(AppStore.self) private var store
+    @State private var showingScanner = false
+    @State private var scannerError: String?
 
     var body: some View {
         @Bindable var store = store
@@ -189,24 +358,24 @@ private struct PairingView: View {
         Form {
             Section {
                 Text(
-                    "On the computer running pi-remote-host, run npm run pair, then paste the one-time payload below."
+                    "Start Pi Remote on your computer, then scan the pairing QR code shown in its terminal."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-                TextEditor(text: $store.pairingPayload)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 150)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Button("Paste from Clipboard") {
-                    if let value = UIPasteboard.general.string {
-                        store.pairingPayload = value
-                    }
+                Button {
+                    scannerError = nil
+                    showingScanner = true
+                } label: {
+                    Label(
+                        "Scan Pairing QR Code",
+                        systemImage: "qrcode.viewfinder"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isPairing)
             } header: {
-                Text("One-time pairing")
+                Text("Pair with your computer")
             }
 
             if let pairingError = store.pairingError {
@@ -216,7 +385,31 @@ private struct PairingView: View {
                 }
             }
 
-            Section {
+            if let scannerError {
+                Section {
+                    Text(scannerError)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Manual pairing") {
+                TextEditor(text: $store.pairingPayload)
+                    .font(
+                        .system(
+                            .caption,
+                            design: .monospaced
+                        )
+                    )
+                    .frame(minHeight: 100)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Button("Paste from Clipboard") {
+                    if let value = UIPasteboard.general.string {
+                        store.pairingPayload = value
+                    }
+                }
+
                 Button {
                     Task {
                         await store.pairFromPayload()
@@ -229,7 +422,7 @@ private struct PairingView: View {
                         Text(
                             store.isPairing
                                 ? "Pairing…"
-                                : "Pair this iPhone"
+                                : "Pair using code"
                         )
                     }
                 }
@@ -243,11 +436,62 @@ private struct PairingView: View {
                 )
             }
         }
+        .sheet(isPresented: $showingScanner) {
+            NavigationStack {
+                QRCodeScannerView { code in
+                    store.pairingPayload = code
+                    showingScanner = false
+                    Task {
+                        await store.pairFromPayload()
+                    }
+                } onError: { message in
+                    scannerError = message
+                    showingScanner = false
+                }
+                .ignoresSafeArea()
+                .navigationTitle("Scan Pairing QR")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(
+                        placement: .cancellationAction
+                    ) {
+                        Button("Cancel") {
+                            showingScanner = false
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 private struct SessionRow: View {
     let session: RemoteSession
+
+    private var activityLabel: String {
+        let seconds = max(
+            0,
+            Date().timeIntervalSince(session.activityAt)
+        )
+
+        if seconds < 3_600 {
+            return "<1h"
+        }
+
+        let hours = Int(seconds / 3_600)
+        if hours < 24 {
+            return "\(hours)h"
+        }
+
+        let days = Int(seconds / 86_400)
+        if days < 14 {
+            return "\(days)d"
+        }
+
+        return session.activityAt.formatted(
+            .dateTime.month(.abbreviated).day()
+        )
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -274,14 +518,109 @@ private struct SessionRow: View {
                         )
                     Text(session.model ?? "No model")
                     Text("·")
-                    Text(session.cwd)
-                        .lineLimit(1)
+                    Text(activityLabel)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct ConversationScrollActivityModifier: ViewModifier {
+    let onActivityChanged: (Bool) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { oldPhase, newPhase in
+                let wasScrolling = oldPhase.isScrolling
+                let isScrolling = newPhase.isScrolling
+
+                guard wasScrolling != isScrolling else {
+                    return
+                }
+                onActivityChanged(isScrolling)
+            }
+        } else {
+            // iOS 17 does not expose ScrollPhase. Keep the previous gesture
+            // fallback only on that OS; modern iOS uses native scroll state so
+            // the detector does not participate in gesture arbitration.
+            content.simultaneousGesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { _ in
+                        onActivityChanged(true)
+                    }
+                    .onEnded { _ in
+                        onActivityChanged(false)
+                    }
+            )
+        }
+    }
+}
+
+private struct ConversationScrollGeometrySample: Equatable {
+    let offsetY: Int
+    let contentHeight: Int
+    let viewportHeight: Int
+
+    init(
+        offsetY: CGFloat,
+        contentHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) {
+        self.offsetY = Self.quantize(offsetY)
+        self.contentHeight = Self.quantize(contentHeight)
+        self.viewportHeight = Self.quantize(viewportHeight)
+    }
+
+    private static func quantize(_ value: CGFloat) -> Int {
+        Int((value / 32).rounded()) * 32
+    }
+}
+
+private struct ConversationScrollGeometryModifier: ViewModifier {
+    let onGeometryChanged: (
+        ConversationScrollGeometrySample,
+        ConversationScrollGeometrySample
+    ) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(
+                for: ConversationScrollGeometrySample.self
+            ) { geometry in
+                ConversationScrollGeometrySample(
+                    offsetY: geometry.contentOffset.y,
+                    contentHeight: geometry.contentSize.height,
+                    viewportHeight: geometry.containerSize.height
+                )
+            } action: { oldValue, newValue in
+                onGeometryChanged(oldValue, newValue)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct ConversationComposerGeometryModifier: ViewModifier {
+    let onHeightChanged: (Int, Int) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onGeometryChange(for: Int.self) { geometry in
+                Int((geometry.size.height / 8).rounded()) * 8
+            } action: { oldValue, newValue in
+                guard oldValue != newValue else { return }
+                onHeightChanged(oldValue, newValue)
+            }
+        } else {
+            content
+        }
     }
 }
 
@@ -292,11 +631,17 @@ private struct SessionDetailView: View {
     let startFresh: Bool
 
     @State private var editorResponse = ""
+    @State private var composerText = ""
+    @State private var composerFieldEpoch = 0
+    @FocusState private var composerFocused: Bool
     @State private var showingModelPicker = false
     @State private var showingThinkingPicker = false
     @State private var showingCommands = false
+    @State private var showingRenameSession = false
+    @State private var sessionNameDraft = ""
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
+    @State private var conversationIsScrolling = false
     @State private var performanceMonitor =
         ConversationPerformanceMonitor()
 
@@ -309,7 +654,7 @@ private struct SessionDetailView: View {
             Divider()
 
             ScrollView {
-                LazyVStack(
+                VStack(
                     alignment: .leading,
                     spacing: 12
                 ) {
@@ -345,17 +690,85 @@ private struct SessionDetailView: View {
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(
                 TapGesture().onEnded {
+                    store.reportDiagnosticTiming(
+                        stage: "conversation.tap",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "focus=\(composerFocused ? 1 : 0)"
+                            + "|scroll=\(conversationIsScrolling ? 1 : 0)"
+                    )
                     dismissKeyboard()
                 }
             )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 2)
-                    .onChanged { _ in
+            .modifier(
+                ConversationScrollActivityModifier { isScrolling in
+                    guard conversationIsScrolling != isScrolling else {
+                        return
+                    }
+                    conversationIsScrolling = isScrolling
+                    store.reportDiagnosticTiming(
+                        stage: "scroll.phase",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: isScrolling ? "scrolling=1" : "scrolling=0"
+                    )
+
+                    if isScrolling {
                         performanceMonitor.beginDragging()
-                    }
-                    .onEnded { _ in
+                        store.beginConversationInteraction()
+                    } else {
                         performanceMonitor.endDragging()
+                        store.endConversationInteraction()
                     }
+                }
+            )
+            .modifier(
+                ConversationScrollGeometryModifier {
+                    oldValue,
+                    newValue in
+
+                    let offsetDelta = abs(
+                        newValue.offsetY - oldValue.offsetY
+                    )
+                    let heightDelta = abs(
+                        newValue.contentHeight - oldValue.contentHeight
+                    )
+                    let viewportDelta = abs(
+                        newValue.viewportHeight - oldValue.viewportHeight
+                    )
+
+                    guard offsetDelta >= 64
+                        || heightDelta >= 64
+                        || viewportDelta >= 64
+                    else {
+                        return
+                    }
+
+                    let oldGap = oldValue.contentHeight
+                        - oldValue.viewportHeight
+                        - oldValue.offsetY
+                    let newGap = newValue.contentHeight
+                        - newValue.viewportHeight
+                        - newValue.offsetY
+
+                    store.reportDiagnosticTiming(
+                        stage: "scroll.geometry",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "y=\(oldValue.offsetY)>\(newValue.offsetY)"
+                            + "|h=\(oldValue.contentHeight)>\(newValue.contentHeight)"
+                            + "|v=\(oldValue.viewportHeight)>\(newValue.viewportHeight)"
+                            + "|g=\(oldGap)>\(newGap)"
+                            + "|s=\(conversationIsScrolling ? 1 : 0)"
+                            + "|f=\(composerFocused ? 1 : 0)"
+                    )
+                }
             )
             .onAppear {
                 performanceMonitor.start { report in
@@ -364,6 +777,7 @@ private struct SessionDetailView: View {
             }
             .onDisappear {
                 performanceMonitor.stop()
+                store.endConversationInteraction()
             }
             .onChange(
                 of: store.rpcSnapshot?.presentationRevision
@@ -401,12 +815,63 @@ private struct SessionDetailView: View {
                         .padding(.top, 8)
                 }
 
+                HStack(spacing: 10) {
+                    Button {
+                        showingModelPicker = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(currentModelLabel)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(
+                        isStreaming
+                            || store.isResumingSession
+                            || (store.rpcSnapshot?
+                                .availableModels.isEmpty ?? true)
+                    )
+
+                    Spacer(minLength: 8)
+
+                    if let contextUsageLabel {
+                        Button {
+                            Task {
+                                if let value = await store.fetchSessionStats() {
+                                    commandResult = PiCommandResultPayload(
+                                        title: "Session",
+                                        value: value
+                                    )
+                                }
+                            }
+                        } label: {
+                            Text(contextUsageLabel)
+                                .monospacedDigit()
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if isStreaming,
+                       let tps = store.rpcSnapshot?.decodeTokensPerSecond {
+                        Text(decodeSpeedLabel(tps))
+                            .monospacedDigit()
+                    }
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.top, 9)
+
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
                         "Message Pi",
-                        text: $store.composerText,
+                        text: $composerText,
                         axis: .vertical
                     )
+                    .id(composerFieldEpoch)
+                    .focused($composerFocused)
                     .lineLimit(1...6)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -416,12 +881,12 @@ private struct SessionDetailView: View {
                     )
 
                     Button {
-                        Task {
-                            if sendButtonIsAbort {
+                        if sendButtonIsAbort {
+                            Task {
                                 await store.abort()
-                            } else {
-                                await submitComposer()
                             }
+                        } else {
+                            submitComposer()
                         }
                     } label: {
                         Image(
@@ -446,31 +911,125 @@ private struct SessionDetailView: View {
                     )
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.top, 7)
+                .padding(.bottom, 10)
             }
             .background(.bar)
+            .modifier(
+                ConversationComposerGeometryModifier {
+                    oldHeight,
+                    newHeight in
+
+                    store.reportDiagnosticTiming(
+                        stage: "composer.geometry",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "h=\(oldHeight)>\(newHeight)"
+                            + "|focus=\(composerFocused ? 1 : 0)"
+                            + "|epoch=\(composerFieldEpoch)"
+                    )
+                }
+            )
+        }
+        .onChange(of: composerFocused) { oldValue, newValue in
+            store.reportDiagnosticTiming(
+                stage: "composer.focus",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: "f=\(oldValue ? 1 : 0)>\(newValue ? 1 : 0)"
+                    + "|epoch=\(composerFieldEpoch)"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillShowNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.willShow"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardDidShowNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.didShow"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillHideNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.willHide"
+            )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIResponder.keyboardDidHideNotification
+            )
+        ) { note in
+            reportKeyboardNotification(
+                note,
+                stage: "keyboard.didHide"
+            )
         }
         .navigationTitle(conversationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingModelPicker = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cpu")
-                        Text(currentModelLabel)
-                            .lineLimit(1)
+                Menu {
+                    Button {
+                        sessionNameDraft = conversationTitle
+                        showingRenameSession = true
+                    } label: {
+                        Label(
+                            "Rename Session",
+                            systemImage: "pencil"
+                        )
                     }
+                    .disabled(store.rpcSnapshot == nil)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-                .disabled(
-                    isStreaming
-                        || store.isResumingSession
-                        || (store.rpcSnapshot?
-                            .availableModels.isEmpty ?? true)
-                )
+                .accessibilityLabel("Session actions")
             }
-
+        }
+        .alert(
+            "Rename Session",
+            isPresented: $showingRenameSession
+        ) {
+            TextField("Session name", text: $sessionNameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let name = sessionNameDraft
+                    .trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                guard !name.isEmpty else { return }
+                Task {
+                    _ = await store.setSessionName(name)
+                }
+            }
+            .disabled(
+                sessionNameDraft
+                    .trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    .isEmpty
+            )
+        } message: {
+            Text("Pi stores this as the session display name.")
         }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
@@ -517,6 +1076,32 @@ private struct SessionDetailView: View {
         )
     }
 
+    private func reportKeyboardNotification(
+        _ note: Notification,
+        stage: String
+    ) {
+        let frame = (
+            note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue
+        )?.cgRectValue
+        let duration = (
+            note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
+                as? NSNumber
+        )?.doubleValue ?? 0
+
+        store.reportDiagnosticTiming(
+            stage: stage,
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: Int((duration * 1_000).rounded()),
+            detail: "h=\(Int((frame?.height ?? 0).rounded()))"
+                + "|focus=\(composerFocused ? 1 : 0)"
+                + "|scroll=\(conversationIsScrolling ? 1 : 0)"
+                + "|epoch=\(composerFieldEpoch)"
+        )
+    }
+
     private var conversationTitle: String {
         if let name = store.rpcSnapshot?
             .state?
@@ -545,6 +1130,41 @@ private struct SessionDetailView: View {
             ?? "Model"
     }
 
+    private var contextUsageLabel: String? {
+        guard let context = store.rpcSnapshot?
+            .sessionStats?
+            .objectValue?["contextUsage"]?
+            .objectValue
+        else {
+            return nil
+        }
+
+        guard let percent = jsonNumber(context["percent"]) else {
+            return "— ctx"
+        }
+
+        return "\(Int(percent.rounded()))% ctx"
+    }
+
+    private func decodeSpeedLabel(_ value: Double) -> String {
+        if value < 10 {
+            return String(format: "⚡ %.1f/s", value)
+        }
+        return String(format: "⚡ %.0f/s", value)
+    }
+
+    private func jsonNumber(_ value: JSONValue?) -> Double? {
+        guard let value else { return nil }
+        switch value {
+        case let .integer(number):
+            return Double(number)
+        case let .number(number):
+            return number
+        default:
+            return nil
+        }
+    }
+
     private var isStreaming: Bool {
         store.rpcSnapshot?
             .state?
@@ -563,7 +1183,7 @@ private struct SessionDetailView: View {
 
     private var canSend: Bool {
         canWrite
-            && !store.composerText
+            && !composerText
                 .trimmingCharacters(
                     in: .whitespacesAndNewlines
                 )
@@ -575,7 +1195,7 @@ private struct SessionDetailView: View {
     }
 
     private var composerIsSlashCommand: Bool {
-        store.composerText
+        composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .hasPrefix("/")
     }
@@ -605,7 +1225,7 @@ private struct SessionDetailView: View {
     }
 
     private var slashSuggestions: [PiSlashCommandOption] {
-        let text = store.composerText
+        let text = composerText
         guard text.hasPrefix("/") else { return [] }
 
         let body = String(text.dropFirst())
@@ -628,20 +1248,44 @@ private struct SessionDetailView: View {
         _ command: PiSlashCommandOption
     ) {
         commandNotice = nil
-        store.composerText = command.invocation + " "
+        composerText = command.invocation + " "
     }
 
-    private func submitComposer() async {
-        let text = store.composerText
+    private func submitComposer() {
+        let text = composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
+        store.reportDiagnosticTiming(
+            stage: "composer.submit",
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: 0,
+            detail: "chars=\(text.count)|scroll=\(conversationIsScrolling ? 1 : 0)"
+        )
+
         guard text.hasPrefix("/") else {
             commandNotice = nil
-            await store.sendPrompt()
+            let originalDraft = composerText
+
+            resetComposerAfterSend()
+
+            Task {
+                let accepted = await store.sendPrompt(text)
+                if !accepted && composerText.isEmpty {
+                    composerText = originalDraft
+                }
+            }
             return
         }
 
+        Task {
+            await submitSlashCommand(text)
+        }
+    }
+
+    private func submitSlashCommand(_ text: String) async {
         let commandText = String(text.dropFirst())
         let pieces = commandText.split(
             maxSplits: 1,
@@ -665,19 +1309,19 @@ private struct SessionDetailView: View {
 
             switch name {
             case "model":
-                store.composerText = ""
+                composerText = ""
                 commandNotice = nil
                 showingModelPicker = true
 
             case "thinking":
                 if arguments.isEmpty {
-                    store.composerText = ""
+                    composerText = ""
                     commandNotice = nil
                     showingThinkingPicker = true
                 } else if store.rpcSnapshot?
                     .availableThinkingLevels
                     .contains(arguments) == true {
-                    store.composerText = ""
+                    composerText = ""
                     await store.setThinkingLevel(arguments)
                     commandNotice = "Thinking level: \(arguments)"
                 } else {
@@ -690,7 +1334,7 @@ private struct SessionDetailView: View {
                 }
 
             case "compact":
-                store.composerText = ""
+                composerText = ""
                 let result = await store.compactContext(
                     arguments.isEmpty ? nil : arguments
                 )
@@ -703,13 +1347,13 @@ private struct SessionDetailView: View {
                     commandNotice = "Usage: /name <session name>"
                     return
                 }
-                store.composerText = ""
+                composerText = ""
                 if await store.setSessionName(arguments) {
                     commandNotice = "Session renamed."
                 }
 
             case "session":
-                store.composerText = ""
+                composerText = ""
                 if let value = await store.fetchSessionStats() {
                     commandResult = PiCommandResultPayload(
                         title: "Session",
@@ -718,7 +1362,7 @@ private struct SessionDetailView: View {
                 }
 
             case "copy":
-                store.composerText = ""
+                composerText = ""
                 if let value = await store.fetchLastAssistantText(),
                    !value.isEmpty {
                     UIPasteboard.general.string = value
@@ -728,16 +1372,16 @@ private struct SessionDetailView: View {
                 }
 
             case "resume":
-                store.composerText = ""
+                composerText = ""
                 dismiss()
 
             case "new":
-                store.composerText = ""
+                composerText = ""
                 await store.createNewSession(from: session)
                 commandNotice = "Started a fresh Pi session."
 
             case "commands", "help":
-                store.composerText = ""
+                composerText = ""
                 commandNotice = nil
                 showingCommands = true
 
@@ -756,7 +1400,47 @@ private struct SessionDetailView: View {
         // Pi's get_commands RPC and intentionally pass through as /... prompt
         // text so Pi performs its own expansion/dispatch.
         commandNotice = nil
-        await store.sendPrompt()
+        let originalDraft = composerText
+        resetComposerAfterSend()
+        let accepted = await store.sendPrompt(text)
+        if !accepted && composerText.isEmpty {
+            composerText = originalDraft
+        }
+    }
+
+    private func resetComposerAfterSend() {
+        store.reportDiagnosticTiming(
+            stage: "composer.reset.begin",
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: 0,
+            detail: "focus=\(composerFocused ? 1 : 0)"
+                + "|epoch=\(composerFieldEpoch)"
+        )
+
+        composerText = ""
+
+        // Recreate the underlying UITextField. SwiftUI may otherwise let an
+        // active CJK IME/marked-text transaction write the just-submitted
+        // value back after the binding has been cleared.
+        composerFieldEpoch &+= 1
+
+        // Keep the chat-like UX: replace the field, then restore focus on the
+        // next main-actor turn so the keyboard remains ready for the next
+        // message instead of forcing another tap.
+        Task { @MainActor in
+            await Task.yield()
+            composerFocused = true
+            store.reportDiagnosticTiming(
+                stage: "composer.reset.focus",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: "focus=1|epoch=\(composerFieldEpoch)"
+            )
+        }
     }
 
     @ViewBuilder

@@ -3,120 +3,388 @@ import SwiftUI
 import UIKit
 
 struct ConversationTranscriptView: View {
+    @Environment(AppStore.self) private var store
+
     let snapshot: PiRpcSnapshot
 
-    @State private var parsedMessages: [ChatMessage]
-    @State private var parsedRevision: Int
-
-    init(snapshot: PiRpcSnapshot) {
-        self.snapshot = snapshot
-        _parsedMessages = State(
-            initialValue: ChatMessageParser.parseAll(
-                snapshot.messages
-            )
-        )
-        _parsedRevision = State(
-            initialValue: snapshot.messageRevision
-        )
-    }
+    @State private var parsedMessages: [ChatMessage] = []
+    @State private var parsedRevision = -1
+    @State private var retainedLiveEntry: TranscriptEntry?
+    @State private var retainedLiveRevision: Int?
 
     var body: some View {
-        Group {
-            ForEach(
-                Array(transcriptTurns.enumerated()),
-                id: \.offset
-            ) { _, turn in
-                if let user = turn.user {
-                    ConversationMessageRow(
-                        message: user.message,
-                        isStreaming: false
-                    )
-                }
+        let turns = stableTurns
 
-                TurnResponseView(
-                    responses: turn.responses
+        Group {
+            // Keep every persisted turn at one stable ForEach position. The
+            // previous implementation moved the last completed turn between
+            // a "current" subtree and a "stable history" subtree whenever a
+            // new user message arrived. With long history that re-parenting
+            // could transiently collapse LazyVStack content and leave the
+            // ScrollView viewport beyond its valid content range.
+            ForEach(
+                Array(turns.enumerated()),
+                id: \.offset
+            ) { index, turn in
+                TranscriptTurnRowView(
+                    turn: turn,
+                    liveEntry: index == turns.count - 1
+                        ? presentationResponseEntry
+                        : nil
                 )
+                .equatable()
+            }
+
+            if let presentationUserEntry {
+                // Pi streams the submitted user message through the same
+                // message_start/update/end channel as assistant messages. It
+                // must form a new turn. Treating it as the previous turn's
+                // response makes TurnResponseView hide the previous final
+                // assistant answer inside AgentActivityGroup, collapsing
+                // thousands of points of transcript height while ScrollView
+                // still holds the old bottom offset.
+                TranscriptTurnRowView(
+                    turn: TranscriptTurn(
+                        user: presentationUserEntry,
+                        responses: []
+                    ),
+                    liveEntry: nil
+                )
+                .equatable()
+            } else if turns.isEmpty,
+                      let presentationResponseEntry {
+                TranscriptTurnRowView(
+                    turn: TranscriptTurn(
+                        user: nil,
+                        responses: []
+                    ),
+                    liveEntry: presentationResponseEntry
+                )
+                .equatable()
             }
         }
-        .onChange(of: snapshot.messageRevision) { _, revision in
-            guard parsedRevision != revision else { return }
-
-            parsedMessages = ChatMessageParser.parseAll(
-                snapshot.messages
+        .onChange(
+            of: snapshot.liveMessage,
+            initial: true
+        ) { oldValue, newValue in
+            if let newValue,
+               let message = ChatMessageParser.parse(newValue) {
+                retainedLiveEntry = TranscriptEntry(
+                    message: message,
+                    isStreaming: true
+                )
+                retainedLiveRevision = snapshot.messageRevision
+            } else if let oldValue,
+                      let message = ChatMessageParser.parse(oldValue) {
+                // message_end moves the final assistant message from
+                // liveMessage into messages before the async history parse has
+                // caught up. Keep the last live renderer in place for that
+                // short handoff so ScrollView never observes a huge temporary
+                // content-height collapse.
+                retainedLiveEntry = TranscriptEntry(
+                    message: message,
+                    isStreaming: true
+                )
+                retainedLiveRevision = snapshot.messageRevision
+            }
+        }
+        .task(id: snapshot.messageRevision) {
+            await refreshParsedHistory()
+        }
+        .onChange(
+            of: diagnosticTranscriptSignature,
+            initial: true
+        ) { _, newValue in
+            store.reportDiagnosticTiming(
+                stage: "transcript.state",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: newValue
             )
-            parsedRevision = revision
         }
     }
 
-    private var transcriptTurns: [TranscriptTurn] {
-        var entries = parsedMessages.map {
-            TranscriptEntry(message: $0, isStreaming: false)
+    private var liveEntry: TranscriptEntry? {
+        guard let live = snapshot.liveMessage,
+              let message = ChatMessageParser.parse(live)
+        else {
+            return nil
         }
 
-        if let live = snapshot.liveMessage,
-           let message = ChatMessageParser.parse(live) {
-            entries.append(
-                TranscriptEntry(message: message, isStreaming: true)
-            )
+        return TranscriptEntry(
+            message: message,
+            isStreaming: true
+        )
+    }
+
+    private var presentationLiveEntry: TranscriptEntry? {
+        if let liveEntry {
+            return liveEntry
         }
 
-        var turns: [TranscriptTurn] = []
-        var currentUser: TranscriptEntry?
-        var currentResponses: [TranscriptEntry] = []
+        guard parsedRevision != snapshot.messageRevision,
+              retainedLiveRevision == snapshot.messageRevision
+        else {
+            return nil
+        }
 
-        func flush() {
-            guard currentUser != nil || !currentResponses.isEmpty else {
-                return
-            }
-            turns.append(
-                TranscriptTurn(
-                    user: currentUser,
-                    responses: currentResponses
+        return retainedLiveEntry
+    }
+
+    private var presentationUserEntry: TranscriptEntry? {
+        guard let entry = presentationLiveEntry,
+              entry.message.role == .user
+        else {
+            return nil
+        }
+        return entry
+    }
+
+    private var presentationResponseEntry: TranscriptEntry? {
+        guard let entry = presentationLiveEntry,
+              entry.message.role != .user
+        else {
+            return nil
+        }
+        return entry
+    }
+
+    private var stableTurns: [TranscriptTurn] {
+        makeTranscriptTurns(
+            presentationMessages.map {
+                TranscriptEntry(
+                    message: $0,
+                    isStreaming: false
                 )
-            )
-            currentUser = nil
-            currentResponses = []
-        }
-
-        for entry in entries {
-            if entry.message.role == .user {
-                flush()
-                currentUser = entry
-            } else {
-                currentResponses.append(entry)
             }
+        )
+    }
+
+    private var diagnosticTranscriptSignature: String {
+        let retainedRole = retainedLiveEntry.map {
+            diagnosticRole($0.message.role)
+        } ?? "none"
+        let liveRole = presentationLiveEntry.map {
+            diagnosticRole($0.message.role)
+        } ?? "none"
+
+        return [
+            "turns=\(stableTurns.count)",
+            "parsed=\(parsedRevision)",
+            "rev=\(snapshot.messageRevision)",
+            "m=\(snapshot.messages.count)",
+            "live=\(liveRole)",
+            "user=\(presentationUserEntry == nil ? 0 : 1)",
+            "resp=\(presentationResponseEntry == nil ? 0 : 1)",
+            "ret=\(retainedRole)",
+            "retrev=\(retainedLiveRevision.map(String.init) ?? "none")"
+        ].joined(separator: "|")
+    }
+
+    private func diagnosticRole(
+        _ role: ChatMessageRole
+    ) -> String {
+        switch role {
+        case .user:
+            return "user"
+        case .assistant:
+            return "assistant"
+        case .tool:
+            return "tool"
+        case .system:
+            return "system"
+        }
+    }
+
+    private var presentationMessages: [ChatMessage] {
+        // Historical sessions can enter this view with a populated disk cache
+        // while the async parse task has not run yet. Rendering an empty
+        // transcript in that window gives LazyVStack no content to realize,
+        // which can prevent the task-driven path from ever becoming visible.
+        // Seed the first presentation synchronously from the snapshot; normal
+        // revision-driven detached parsing takes over immediately afterward.
+        if parsedRevision < 0,
+           !snapshot.messages.isEmpty {
+            return ChatMessageParser.parseAll(snapshot.messages)
         }
 
-        flush()
-        return turns
+        return parsedMessages
+    }
+
+    private func refreshParsedHistory() async {
+        let revision = snapshot.messageRevision
+        guard revision != parsedRevision else {
+            return
+        }
+
+        let values = snapshot.messages
+        let startedAtMs = Int64(
+            Date().timeIntervalSince1970 * 1_000
+        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        let parsed = await Task.detached(
+            priority: .userInitiated
+        ) {
+            ChatMessageParser.parseAll(values)
+        }.value
+
+        guard !Task.isCancelled else {
+            return
+        }
+
+        parsedMessages = parsed
+        parsedRevision = revision
+
+        if snapshot.liveMessage == nil,
+           retainedLiveRevision == revision {
+            retainedLiveEntry = nil
+            retainedLiveRevision = nil
+        }
+
+        let durationMs = max(
+            0,
+            Int(
+                (
+                    (
+                        ProcessInfo.processInfo.systemUptime
+                            - startedAt
+                    ) * 1_000
+                ).rounded()
+            )
+        )
+        let parsedTurnCount = makeTranscriptTurns(
+            parsed.map {
+                TranscriptEntry(
+                    message: $0,
+                    isStreaming: false
+                )
+            }
+        ).count
+
+        store.reportDiagnosticTiming(
+            stage: "transcript.history",
+            startedAtMs: startedAtMs,
+            durationMs: durationMs,
+            detail: "raw=\(values.count)|parsed=\(parsed.count)|turns=\(parsedTurnCount)|rev=\(revision)"
+        )
     }
 }
 
-private struct TranscriptEntry {
+private struct TranscriptTurnRowView: View, Equatable {
+    let turn: TranscriptTurn
+    let liveEntry: TranscriptEntry?
+
+    nonisolated static func == (
+        lhs: TranscriptTurnRowView,
+        rhs: TranscriptTurnRowView
+    ) -> Bool {
+        lhs.turn == rhs.turn
+            && lhs.liveEntry == rhs.liveEntry
+    }
+
+    var body: some View {
+        if let user = turn.user {
+            ConversationMessageRow(
+                message: user.message,
+                isStreaming: false
+            )
+            .equatable()
+        }
+
+        TurnResponseView(
+            responses: turn.responses
+                + (liveEntry.map { [$0] } ?? [])
+        )
+    }
+}
+
+private func makeTranscriptTurns(
+    _ entries: [TranscriptEntry]
+) -> [TranscriptTurn] {
+    var turns: [TranscriptTurn] = []
+    var currentUser: TranscriptEntry?
+    var currentResponses: [TranscriptEntry] = []
+
+    func flush() {
+        guard currentUser != nil || !currentResponses.isEmpty else {
+            return
+        }
+        turns.append(
+            TranscriptTurn(
+                user: currentUser,
+                responses: currentResponses
+            )
+        )
+        currentUser = nil
+        currentResponses = []
+    }
+
+    for entry in entries {
+        if entry.message.role == .user {
+            flush()
+            currentUser = entry
+        } else {
+            currentResponses.append(entry)
+        }
+    }
+
+    flush()
+    return turns
+}
+
+private struct TranscriptEntry: Equatable {
     let message: ChatMessage
     let isStreaming: Bool
 }
 
-private struct TranscriptTurn {
+private struct TranscriptTurn: Equatable {
     let user: TranscriptEntry?
     let responses: [TranscriptEntry]
 }
 
 private struct TurnResponseView: View {
+    @Environment(AppStore.self) private var store
+
     let responses: [TranscriptEntry]
 
     var body: some View {
-        if !activityEntries.isEmpty {
-            AgentActivityGroup(
-                entries: activityEntries,
-                isStreaming: isStreaming
-            )
-        }
+        Group {
+            if !activityEntries.isEmpty {
+                AgentActivityGroup(
+                    entries: activityEntries,
+                    isStreaming: isStreaming
+                )
+                .equatable()
+            }
 
-        if let finalEntry {
-            ConversationMessageRow(
-                message: finalEntry.message,
-                isStreaming: finalEntry.isStreaming
+            if let finalEntry {
+                ConversationMessageRow(
+                    message: finalEntry.message,
+                    isStreaming: finalEntry.isStreaming
+                )
+                .equatable()
+            }
+        }
+        .onChange(
+            of: diagnosticLaneSignature,
+            initial: true
+        ) { oldValue, newValue in
+            guard oldValue.contains("stream=1")
+                || newValue.contains("stream=1")
+            else {
+                return
+            }
+
+            store.reportDiagnosticTiming(
+                stage: "transcript.lanes",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: newValue
             )
         }
     }
@@ -128,7 +396,19 @@ private struct TurnResponseView: View {
             return nil
         }
 
-        let visible = visibleAssistantBlocks(last.message.blocks)
+        var visible = visibleAssistantBlocks(last.message.blocks)
+
+        // Mount the final-response renderer as soon as a live assistant
+        // message exists, before its first visible text token arrives. Pi can
+        // spend a long time emitting thinking/tool activity first. Inserting a
+        // brand-new UITextView-backed row only when the first final text delta
+        // arrives can make LazyVStack briefly invalidate the scroll geometry
+        // and leave the viewport in empty space. An empty text block keeps the
+        // same renderer identity alive through that boundary.
+        if visible.isEmpty, last.isStreaming {
+            visible = [.text("")]
+        }
+
         guard !visible.isEmpty else {
             return nil
         }
@@ -148,9 +428,11 @@ private struct TurnResponseView: View {
     private var activityEntries: [TranscriptEntry] {
         var activity = responses
 
+        // Always split the newest assistant message into its activity and
+        // final-response lanes. This keeps the activity subtree unchanged when
+        // the first visible response token appears after thinking/tool calls.
         if let last = responses.last,
-           last.message.role == .assistant,
-           !visibleAssistantBlocks(last.message.blocks).isEmpty {
+           last.message.role == .assistant {
             activity.removeLast()
 
             let hidden = activityAssistantBlocks(last.message.blocks)
@@ -175,6 +457,24 @@ private struct TurnResponseView: View {
 
     private var isStreaming: Bool {
         responses.contains(where: \.isStreaming)
+    }
+
+    private var diagnosticLaneSignature: String {
+        let finalText = finalEntry?.message.blocks.contains {
+            block in
+            if case let .text(text) = block {
+                return !text.isEmpty
+            }
+            return false
+        } ?? false
+
+        return [
+            "stream=\(isStreaming ? 1 : 0)",
+            "activity=\(activityEntries.count)",
+            "final=\(finalEntry == nil ? 0 : 1)",
+            "text=\(finalText ? 1 : 0)",
+            "responses=\(responses.count)"
+        ].joined(separator: "|")
     }
 
     private func visibleAssistantBlocks(
@@ -206,11 +506,19 @@ private struct TurnResponseView: View {
     }
 }
 
-private struct AgentActivityGroup: View {
+private struct AgentActivityGroup: View, Equatable {
     let entries: [TranscriptEntry]
     let isStreaming: Bool
 
     @State private var isExpanded = false
+
+    nonisolated static func == (
+        lhs: AgentActivityGroup,
+        rhs: AgentActivityGroup
+    ) -> Bool {
+        lhs.entries == rhs.entries
+            && lhs.isStreaming == rhs.isStreaming
+    }
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -276,7 +584,7 @@ private struct AgentActivityGroup: View {
     }
 }
 
-private struct ConversationMessageRow: View {
+private struct ConversationMessageRow: View, Equatable {
     let message: ChatMessage
     let isStreaming: Bool
 
@@ -296,6 +604,9 @@ private struct ConversationMessageRow: View {
                 .background(Color.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
             }
+            .contextMenu {
+                copyMenu
+            }
 
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
@@ -305,7 +616,7 @@ private struct ConversationMessageRow: View {
                     isStreaming: isStreaming
                 )
 
-                if isStreaming {
+                if isStreaming, hasVisibleContent {
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.mini)
@@ -319,6 +630,9 @@ private struct ConversationMessageRow: View {
                 maxWidth: .infinity,
                 alignment: .leading
             )
+            .contextMenu {
+                copyMenu
+            }
 
         case .tool:
             ToolResultCard(message: message)
@@ -336,6 +650,50 @@ private struct ConversationMessageRow: View {
             )
             .background(.quaternary)
             .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    @ViewBuilder
+    private var copyMenu: some View {
+        if let copyText {
+            Button {
+                UIPasteboard.general.string = copyText
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+    }
+
+    private var copyText: String? {
+        guard message.role == .user || message.role == .assistant else {
+            return nil
+        }
+
+        let parts = message.blocks.compactMap { block -> String? in
+            switch block {
+            case let .text(text):
+                return text.isEmpty ? nil : text
+            case let .image(label):
+                return "[Image: \(label)]"
+            case .thinking, .toolCall, .raw:
+                return nil
+            }
+        }
+
+        let text = parts.joined(separator: "\n\n")
+        return text.isEmpty ? nil : text
+    }
+
+    private var hasVisibleContent: Bool {
+        message.blocks.contains { block in
+            switch block {
+            case let .text(text):
+                return !text.isEmpty
+            case let .thinking(text):
+                return !text.isEmpty
+            case .toolCall, .image, .raw:
+                return true
+            }
         }
     }
 }
@@ -482,30 +840,105 @@ private struct MarkdownMessageText: View {
             // while the user scrolls through a long response.
             StreamingPlainTextView(text: text)
         } else {
-            Group {
-                if let attributed = try? AttributedString(
-                    markdown: text,
-                    options: AttributedString.MarkdownParsingOptions(
-                        interpretedSyntax: .inlineOnlyPreservingWhitespace
-                    )
-                ) {
-                    Text(attributed)
-                } else {
-                    Text(text)
-                }
-            }
-            .foregroundStyle(foreground)
-            .textSelection(.enabled)
+            CompletedMarkdownText(
+                text: text,
+                foreground: foreground
+            )
         }
     }
 }
 
-private struct StreamingPlainTextView: UIViewRepresentable {
+private struct CompletedMarkdownText: View {
+    @Environment(AppStore.self) private var store
+
     let text: String
+    let foreground: Color
+
+    private let attributed: AttributedString?
+    private let parseStartedAtMs: Int64
+    private let parseDurationMs: Int
+    private let constructedAt: TimeInterval
+    private let characterCount: Int
+
+    init(
+        text: String,
+        foreground: Color
+    ) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let startedAtMs = Int64(
+            Date().timeIntervalSince1970 * 1_000
+        )
+        let attributed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        )
+        let durationMs = max(
+            0,
+            Int(
+                (
+                    (
+                        ProcessInfo.processInfo.systemUptime
+                            - startedAt
+                    ) * 1_000
+                ).rounded()
+            )
+        )
+
+        self.text = text
+        self.foreground = foreground
+        self.attributed = attributed
+        self.parseStartedAtMs = startedAtMs
+        self.parseDurationMs = durationMs
+        self.constructedAt = startedAt
+        self.characterCount = text.utf16.count
+    }
+
+    var body: some View {
+        CompletedTextKitView(
+            text: text,
+            attributed: attributed,
+            foreground: foreground
+        )
+        .onAppear {
+            let appearDurationMs = max(
+                0,
+                Int(
+                    (
+                        (
+                            ProcessInfo.processInfo.systemUptime
+                                - constructedAt
+                        ) * 1_000
+                    ).rounded()
+                )
+            )
+
+            guard characterCount >= 500
+                || parseDurationMs >= 5
+                || appearDurationMs >= 50
+            else {
+                return
+            }
+
+            store.reportDiagnosticTiming(
+                stage: "markdown.appear",
+                startedAtMs: parseStartedAtMs,
+                durationMs: appearDurationMs,
+                detail: "parse=\(parseDurationMs)|chars=\(characterCount)"
+            )
+        }
+    }
+}
+
+private struct CompletedTextKitView: UIViewRepresentable {
+    let text: String
+    let attributed: AttributedString?
+    let foreground: Color
 
     final class Coordinator {
         var renderedText = ""
-        var renderedUTF16Length = 0
+        var renderedForeground: UIColor?
     }
 
     func makeCoordinator() -> Coordinator {
@@ -516,14 +949,12 @@ private struct StreamingPlainTextView: UIViewRepresentable {
         let view = UITextView()
         view.backgroundColor = .clear
         view.isEditable = false
-        view.isSelectable = false
+        view.isSelectable = true
         view.isScrollEnabled = false
-        view.isUserInteractionEnabled = false
+        view.isUserInteractionEnabled = true
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
-        view.font = UIFont.preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
-        view.textColor = .label
         view.setContentCompressionResistancePriority(
             .defaultLow,
             for: .horizontal
@@ -539,35 +970,53 @@ private struct StreamingPlainTextView: UIViewRepresentable {
         _ uiView: UITextView,
         context: Context
     ) {
+        let resolvedForeground = UIColor(foreground)
         let coordinator = context.coordinator
-        let newText = text as NSString
-        let oldLength = coordinator.renderedUTF16Length
 
-        if oldLength > 0,
-           newText.length >= oldLength,
-           newText.substring(to: oldLength)
-                == coordinator.renderedText {
-            let delta = newText.substring(from: oldLength)
-            if !delta.isEmpty {
-                uiView.textStorage.append(
-                    NSAttributedString(
-                        string: delta,
-                        attributes: textAttributes(for: uiView)
-                    )
-                )
-                coordinator.renderedText += delta
-                coordinator.renderedUTF16Length = newText.length
-                uiView.invalidateIntrinsicContentSize()
-            }
+        guard coordinator.renderedText != text
+            || coordinator.renderedForeground != resolvedForeground
+        else {
             return
         }
 
-        uiView.attributedText = NSAttributedString(
-            string: text,
-            attributes: textAttributes(for: uiView)
+        let rendered: NSMutableAttributedString
+        if let attributed {
+            rendered = NSMutableAttributedString(
+                attributedString: NSAttributedString(attributed)
+            )
+        } else {
+            rendered = NSMutableAttributedString(string: text)
+        }
+
+        let fullRange = NSRange(
+            location: 0,
+            length: rendered.length
         )
+        if fullRange.length > 0 {
+            rendered.addAttribute(
+                .foregroundColor,
+                value: resolvedForeground,
+                range: fullRange
+            )
+            rendered.enumerateAttribute(
+                .font,
+                in: fullRange
+            ) { value, range, _ in
+                if value == nil {
+                    rendered.addAttribute(
+                        .font,
+                        value: UIFont.preferredFont(
+                            forTextStyle: .body
+                        ),
+                        range: range
+                    )
+                }
+            }
+        }
+
+        uiView.attributedText = rendered
         coordinator.renderedText = text
-        coordinator.renderedUTF16Length = newText.length
+        coordinator.renderedForeground = resolvedForeground
         uiView.invalidateIntrinsicContentSize()
     }
 
@@ -592,6 +1041,343 @@ private struct StreamingPlainTextView: UIViewRepresentable {
         return CGSize(
             width: width,
             height: ceil(measured.height)
+        )
+    }
+}
+
+private struct StreamingPlainTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(
+        context: Context
+    ) -> StreamingChunkContainerView {
+        let view = StreamingChunkContainerView()
+        view.apply(text: text)
+        return view
+    }
+
+    func updateUIView(
+        _ uiView: StreamingChunkContainerView,
+        context: Context
+    ) {
+        uiView.apply(text: text)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: StreamingChunkContainerView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width,
+              width.isFinite,
+              width > 0
+        else {
+            return nil
+        }
+
+        return CGSize(
+            width: width,
+            height: uiView.measuredHeight(for: width)
+        )
+    }
+}
+
+private final class StreamingChunkContainerView: UIView {
+    // Keep live layout work bounded. Completed chunks never change again;
+    // only the final ~2K-character chunk is remeasured as deltas arrive.
+    private let targetChunkCharacters = 2_048
+    private let minimumChunkCharacters = 1_024
+    private let chunkLookaheadCharacters = 4_096
+    private let boundarySampleUTF16Length = 64
+
+    private var chunkTexts: [String] = []
+    private var chunkViews: [UITextView] = []
+    private var chunkHeights: [CGFloat?] = []
+    private var renderedUTF16Length = 0
+    private var renderedBoundarySample = ""
+    private var measuredWidth: CGFloat?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        setContentHuggingPriority(
+            .defaultLow,
+            for: .horizontal
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(text: String) {
+        let newText = text as NSString
+        let oldLength = renderedUTF16Length
+
+        if oldLength > 0,
+           newText.length >= oldLength,
+           boundaryStillMatches(in: newText) {
+            let delta = newText.substring(from: oldLength)
+            if !delta.isEmpty {
+                append(delta: delta)
+            }
+        } else if newText.length != oldLength
+                    || !boundaryStillMatches(in: newText) {
+            rebuild(from: text)
+        }
+
+        renderedUTF16Length = newText.length
+        renderedBoundarySample = boundarySample(from: newText)
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+    }
+
+    func measuredHeight(for width: CGFloat) -> CGFloat {
+        guard width.isFinite, width > 0 else {
+            return 0
+        }
+
+        if measuredWidth.map({
+            abs($0 - width) > 0.5
+        }) ?? true {
+            measuredWidth = width
+            chunkHeights = Array(
+                repeating: nil,
+                count: chunkViews.count
+            )
+        }
+
+        var total: CGFloat = 0
+        for index in chunkViews.indices {
+            if let cached = chunkHeights[index] {
+                total += cached
+                continue
+            }
+
+            let measured = chunkViews[index].sizeThatFits(
+                CGSize(
+                    width: width,
+                    height: .greatestFiniteMagnitude
+                )
+            )
+            let height = ceil(measured.height)
+            chunkHeights[index] = height
+            total += height
+        }
+        return total
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let width = bounds.width
+        guard width.isFinite, width > 0 else {
+            return
+        }
+
+        _ = measuredHeight(for: width)
+
+        var y: CGFloat = 0
+        for index in chunkViews.indices {
+            let height = chunkHeights[index] ?? 0
+            chunkViews[index].frame = CGRect(
+                x: 0,
+                y: y,
+                width: width,
+                height: height
+            )
+            y += height
+        }
+    }
+
+    private func append(delta: String) {
+        if chunkTexts.isEmpty {
+            appendChunk("")
+        }
+
+        var pending = chunkTexts[chunkTexts.count - 1]
+            + delta
+        var index = chunkTexts.count - 1
+
+        while let split = splitIndexIfAvailable(
+            in: pending
+        ) {
+            let fixed = String(pending[..<split])
+            pending = String(pending[split...])
+
+            setChunk(fixed, at: index)
+            appendChunk("")
+            index += 1
+        }
+
+        setChunk(pending, at: index)
+    }
+
+    private func rebuild(from text: String) {
+        for view in chunkViews {
+            view.removeFromSuperview()
+        }
+        chunkTexts.removeAll(keepingCapacity: true)
+        chunkViews.removeAll(keepingCapacity: true)
+        chunkHeights.removeAll(keepingCapacity: true)
+        measuredWidth = nil
+
+        var remaining = text
+        while let split = splitIndexIfAvailable(
+            in: remaining
+        ) {
+            appendChunk(String(remaining[..<split]))
+            remaining = String(remaining[split...])
+        }
+
+        if !remaining.isEmpty || text.isEmpty {
+            appendChunk(remaining)
+        }
+    }
+
+    private func splitIndexIfAvailable(
+        in text: String
+    ) -> String.Index? {
+        guard text.count > targetChunkCharacters else {
+            return nil
+        }
+
+        let target = text.index(
+            text.startIndex,
+            offsetBy: targetChunkCharacters,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        let minimum = text.index(
+            text.startIndex,
+            offsetBy: minimumChunkCharacters,
+            limitedBy: target
+        ) ?? text.startIndex
+
+        if minimum < target,
+           let newline = text[minimum..<target]
+            .lastIndex(of: "\n") {
+            return text.index(after: newline)
+        }
+
+        let lookahead = text.index(
+            text.startIndex,
+            offsetBy: chunkLookaheadCharacters,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+
+        if target < lookahead,
+           let newline = text[target..<lookahead]
+            .firstIndex(of: "\n") {
+            return text.index(after: newline)
+        }
+
+        // Keep a long unbroken line intact rather than introducing a visual
+        // line break that does not exist in Pi's output. Natural-language and
+        // code responses normally reach a real newline within the lookahead.
+        return nil
+    }
+
+    private func appendChunk(_ text: String) {
+        let view = makeChunkView()
+        addSubview(view)
+        chunkTexts.append(text)
+        chunkViews.append(view)
+        chunkHeights.append(nil)
+        setChunk(text, at: chunkTexts.count - 1)
+    }
+
+    private func setChunk(
+        _ text: String,
+        at index: Int
+    ) {
+        guard chunkTexts.indices.contains(index),
+              chunkViews.indices.contains(index)
+        else {
+            return
+        }
+
+        guard chunkTexts[index] != text
+            || chunkViews[index].text != text
+        else {
+            return
+        }
+
+        chunkTexts[index] = text
+        let view = chunkViews[index]
+        view.attributedText = NSAttributedString(
+            string: text,
+            attributes: textAttributes(for: view)
+        )
+        chunkHeights[index] = nil
+    }
+
+    private func makeChunkView() -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear
+        view.isEditable = false
+        view.isSelectable = false
+        view.isScrollEnabled = false
+        view.isUserInteractionEnabled = false
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.font = UIFont.preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = .label
+        view.setContentCompressionResistancePriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        view.setContentHuggingPriority(
+            .defaultLow,
+            for: .horizontal
+        )
+        return view
+    }
+
+    private func boundaryStillMatches(
+        in newText: NSString
+    ) -> Bool {
+        guard renderedUTF16Length > 0 else {
+            return true
+        }
+        guard newText.length >= renderedUTF16Length else {
+            return false
+        }
+
+        let sampleLength = min(
+            boundarySampleUTF16Length,
+            renderedUTF16Length
+        )
+        guard sampleLength > 0 else {
+            return true
+        }
+
+        let range = NSRange(
+            location: renderedUTF16Length - sampleLength,
+            length: sampleLength
+        )
+        return newText.substring(with: range)
+            == renderedBoundarySample
+    }
+
+    private func boundarySample(
+        from text: NSString
+    ) -> String {
+        let sampleLength = min(
+            boundarySampleUTF16Length,
+            text.length
+        )
+        guard sampleLength > 0 else {
+            return ""
+        }
+
+        return text.substring(
+            from: text.length - sampleLength
         )
     }
 
