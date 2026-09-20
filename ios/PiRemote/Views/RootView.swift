@@ -8,6 +8,17 @@ private enum SessionRoute: Hashable {
     case fresh(RemoteSession)
 }
 
+private struct SessionProject: Identifiable {
+    let cwd: String
+    let sessions: [RemoteSession]
+
+    var id: String { cwd }
+
+    var latestActivity: Date {
+        sessions.first?.activityAt ?? .distantPast
+    }
+}
+
 struct RootView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
@@ -169,13 +180,23 @@ struct RootView: View {
                 }
             } else {
                 List {
-                    Section {
-                        ForEach(store.sessions) { session in
-                            NavigationLink(
-                                value: SessionRoute.existing(session)
-                            ) {
-                                SessionRow(session: session)
+                    ForEach(projectGroups) { project in
+                        Section {
+                            ForEach(project.sessions) { session in
+                                NavigationLink(
+                                    value: SessionRoute.existing(session)
+                                ) {
+                                    SessionRow(session: session)
+                                }
                             }
+                        } header: {
+                            Label(
+                                projectName(project.cwd),
+                                systemImage: "folder"
+                            )
+                        } footer: {
+                            Text(project.cwd)
+                                .lineLimit(1)
                         }
                     }
 
@@ -263,11 +284,23 @@ struct RootView: View {
         }
     }
 
+    private var projectGroups: [SessionProject] {
+        Dictionary(grouping: store.sessions, by: \.cwd)
+            .map { cwd, sessions in
+                SessionProject(
+                    cwd: cwd,
+                    sessions: sessions.sorted {
+                        $0.activityAt > $1.activityAt
+                    }
+                )
+            }
+            .sorted {
+                $0.latestActivity > $1.latestActivity
+            }
+    }
+
     private var projectSessions: [RemoteSession] {
-        var seen = Set<String>()
-        return store.sessions.filter { session in
-            seen.insert(session.cwd).inserted
-        }
+        projectGroups.compactMap(\.sessions.first)
     }
 
     private func projectName(_ cwd: String) -> String {
@@ -423,8 +456,7 @@ private struct SessionRow: View {
                         )
                     Text(session.model ?? "No model")
                     Text("·")
-                    Text(session.cwd)
-                        .lineLimit(1)
+                    Text(session.activityAt, style: .relative)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -543,6 +575,8 @@ private struct SessionDetailView: View {
     @State private var showingModelPicker = false
     @State private var showingThinkingPicker = false
     @State private var showingCommands = false
+    @State private var showingRenameSession = false
+    @State private var sessionNameDraft = ""
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
     @State private var conversationIsScrolling = false
@@ -719,6 +753,55 @@ private struct SessionDetailView: View {
                         .padding(.top, 8)
                 }
 
+                HStack(spacing: 10) {
+                    Button {
+                        showingModelPicker = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(currentModelLabel)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(
+                        isStreaming
+                            || store.isResumingSession
+                            || (store.rpcSnapshot?
+                                .availableModels.isEmpty ?? true)
+                    )
+
+                    Spacer(minLength: 8)
+
+                    if let contextUsageLabel {
+                        Button {
+                            Task {
+                                if let value = await store.fetchSessionStats() {
+                                    commandResult = PiCommandResultPayload(
+                                        title: "Session",
+                                        value: value
+                                    )
+                                }
+                            }
+                        } label: {
+                            Text(contextUsageLabel)
+                                .monospacedDigit()
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if isStreaming,
+                       let tps = store.rpcSnapshot?.decodeTokensPerSecond {
+                        Text(decodeSpeedLabel(tps))
+                            .monospacedDigit()
+                    }
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.top, 9)
+
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
                         "Message Pi",
@@ -766,7 +849,8 @@ private struct SessionDetailView: View {
                     )
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.top, 7)
+                .padding(.bottom, 10)
             }
             .background(.bar)
             .modifier(
@@ -842,22 +926,48 @@ private struct SessionDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingModelPicker = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cpu")
-                        Text(currentModelLabel)
-                            .lineLimit(1)
+                Menu {
+                    Button {
+                        sessionNameDraft = conversationTitle
+                        showingRenameSession = true
+                    } label: {
+                        Label(
+                            "Rename Session",
+                            systemImage: "pencil"
+                        )
                     }
+                    .disabled(store.rpcSnapshot == nil)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-                .disabled(
-                    isStreaming
-                        || store.isResumingSession
-                        || (store.rpcSnapshot?
-                            .availableModels.isEmpty ?? true)
-                )
+                .accessibilityLabel("Session actions")
             }
+        }
+        .alert(
+            "Rename Session",
+            isPresented: $showingRenameSession
+        ) {
+            TextField("Session name", text: $sessionNameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let name = sessionNameDraft
+                    .trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                guard !name.isEmpty else { return }
+                Task {
+                    _ = await store.setSessionName(name)
+                }
+            }
+            .disabled(
+                sessionNameDraft
+                    .trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    .isEmpty
+            )
+        } message: {
+            Text("Pi stores this as the session display name.")
         }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerView()
