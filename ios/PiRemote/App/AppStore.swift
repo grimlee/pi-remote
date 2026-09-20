@@ -910,7 +910,14 @@ final class AppStore {
     }
 
     func suspend() async {
-        backgroundedAt = Date()
+        let now = Date()
+        backgroundedAt = now
+        reportDiagnosticTiming(
+            stage: "lifecycle.background",
+            startedAtMs: diagnosticNowMs(),
+            durationMs: 0,
+            detail: lifecycleDiagnosticDetail()
+        )
     }
 
     func resume() async {
@@ -934,6 +941,15 @@ final class AppStore {
         }
         backgroundedAt = nil
 
+        reportDiagnosticTiming(
+            stage: "lifecycle.resume.begin",
+            startedAtMs: diagnosticNowMs(),
+            durationMs: 0,
+            detail: lifecycleDiagnosticDetail(
+                elapsed: elapsed
+            )
+        )
+
         let wasDisconnected: Bool
         if case .disconnected = connectionState {
             wasDisconnected = true
@@ -954,6 +970,14 @@ final class AppStore {
             if connected,
                !wasDisconnected,
                !exceededBackgroundGrace {
+                reportDiagnosticTiming(
+                    stage: "lifecycle.resume.reuse",
+                    startedAtMs: diagnosticNowMs(),
+                    durationMs: 0,
+                    detail: lifecycleDiagnosticDetail(
+                        elapsed: elapsed
+                    )
+                )
                 return
             }
 
@@ -988,10 +1012,37 @@ final class AppStore {
 
         do {
             try await connectRelay(profile: profile)
+            reportDiagnosticTiming(
+                stage: "lifecycle.resume.reconnect",
+                startedAtMs: diagnosticNowMs(),
+                durationMs: 0,
+                detail: lifecycleDiagnosticDetail(
+                    elapsed: elapsed
+                )
+            )
         } catch {
             connectionState = .disconnected
             sessionError = error.localizedDescription
         }
+    }
+
+    private func lifecycleDiagnosticDetail(
+        elapsed: TimeInterval? = nil
+    ) -> String {
+        let streaming = rpcSnapshot?.state?
+            .objectValue?["isStreaming"]?
+            .boolValue == true
+        let phase = rpcSnapshot?.phase.rawValue ?? "none"
+        let elapsedMs = elapsed.map {
+            max(0, Int(($0 * 1_000).rounded()))
+        } ?? 0
+
+        return "elapsed=\(elapsedMs)"
+            + "|phase=\(phase)"
+            + "|stream=\(streaming ? 1 : 0)"
+            + "|rpc=\(rpcClient == nil ? 0 : 1)"
+            + "|relay=\(relayClient == nil ? 0 : 1)"
+            + "|resume=\(needsRpcTransportResume ? 1 : 0)"
     }
 
     private func connectRelay(
