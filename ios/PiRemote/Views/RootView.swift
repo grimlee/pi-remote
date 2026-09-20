@@ -511,6 +511,24 @@ private struct ConversationScrollGeometryModifier: ViewModifier {
     }
 }
 
+private struct ConversationComposerGeometryModifier: ViewModifier {
+    let onHeightChanged: (Int, Int) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onGeometryChange(for: Int.self) { geometry in
+                Int((geometry.size.height / 8).rounded()) * 8
+            } action: { oldValue, newValue in
+                guard oldValue != newValue else { return }
+                onHeightChanged(oldValue, newValue)
+            }
+        } else {
+            content
+        }
+    }
+}
+
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -607,10 +625,6 @@ private struct SessionDetailView: View {
                     oldValue,
                     newValue in
 
-                    guard !conversationIsScrolling else {
-                        return
-                    }
-
                     let offsetDelta = abs(
                         newValue.offsetY - oldValue.offsetY
                     )
@@ -628,6 +642,13 @@ private struct SessionDetailView: View {
                         return
                     }
 
+                    let oldGap = oldValue.contentHeight
+                        - oldValue.viewportHeight
+                        - oldValue.offsetY
+                    let newGap = newValue.contentHeight
+                        - newValue.viewportHeight
+                        - newValue.offsetY
+
                     store.reportDiagnosticTiming(
                         stage: "scroll.geometry",
                         startedAtMs: Int64(
@@ -637,6 +658,9 @@ private struct SessionDetailView: View {
                         detail: "y=\(oldValue.offsetY)>\(newValue.offsetY)"
                             + "|h=\(oldValue.contentHeight)>\(newValue.contentHeight)"
                             + "|v=\(oldValue.viewportHeight)>\(newValue.viewportHeight)"
+                            + "|g=\(oldGap)>\(newGap)"
+                            + "|s=\(conversationIsScrolling ? 1 : 0)"
+                            + "|f=\(composerFocused ? 1 : 0)"
                     )
                 }
             )
@@ -735,6 +759,34 @@ private struct SessionDetailView: View {
                 .padding(.vertical, 10)
             }
             .background(.bar)
+            .modifier(
+                ConversationComposerGeometryModifier {
+                    oldHeight,
+                    newHeight in
+
+                    store.reportDiagnosticTiming(
+                        stage: "composer.geometry",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "h=\(oldHeight)>\(newHeight)"
+                            + "|focus=\(composerFocused ? 1 : 0)"
+                            + "|epoch=\(composerFieldEpoch)"
+                    )
+                }
+            )
+        }
+        .onChange(of: composerFocused) { oldValue, newValue in
+            store.reportDiagnosticTiming(
+                stage: "composer.focus",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: "f=\(oldValue ? 1 : 0)>\(newValue ? 1 : 0)"
+                    + "|epoch=\(composerFieldEpoch)"
+            )
         }
         .navigationTitle(conversationTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -1109,6 +1161,16 @@ private struct SessionDetailView: View {
     }
 
     private func resetComposerAfterSend() {
+        store.reportDiagnosticTiming(
+            stage: "composer.reset.begin",
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: 0,
+            detail: "focus=\(composerFocused ? 1 : 0)"
+                + "|epoch=\(composerFieldEpoch)"
+        )
+
         composerText = ""
 
         // Recreate the underlying UITextField. SwiftUI may otherwise let an
@@ -1122,6 +1184,14 @@ private struct SessionDetailView: View {
         Task { @MainActor in
             await Task.yield()
             composerFocused = true
+            store.reportDiagnosticTiming(
+                stage: "composer.reset.focus",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: "focus=1|epoch=\(composerFieldEpoch)"
+            )
         }
     }
 
