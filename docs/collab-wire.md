@@ -1,5 +1,7 @@
 # Pi Collab Wire Map
 
+> **Legacy reference:** Pi Remote no longer uses Pi/OMP Collab as its primary session data plane. The current product uses native Pi RPC through `pi --session <path> --mode rpc`. This document is retained only as historical protocol research for a possible future live-TUI attachment path. See [architecture.md](architecture.md) for the current design.
+
 This document pins the native Pi Remote client to the upstream Pi Collab wire protocol observed at:
 
 can1357/oh-my-pi commit 62a4aa98a4b52f829a3ae9a5247ca8db4e5f810c
