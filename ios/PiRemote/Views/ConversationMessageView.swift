@@ -540,8 +540,7 @@ private struct ConversationMessageRow: View, Equatable {
     let isStreaming: Bool
 
     var body: some View {
-        Group {
-            switch message.role {
+        switch message.role {
         case .user:
             HStack(alignment: .bottom) {
                 Spacer(minLength: 48)
@@ -555,6 +554,9 @@ private struct ConversationMessageRow: View, Equatable {
                 .padding(.vertical, 10)
                 .background(Color.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
+            }
+            .contextMenu {
+                copyMenu
             }
 
         case .assistant:
@@ -579,6 +581,9 @@ private struct ConversationMessageRow: View, Equatable {
                 maxWidth: .infinity,
                 alignment: .leading
             )
+            .contextMenu {
+                copyMenu
+            }
 
         case .tool:
             ToolResultCard(message: message)
@@ -596,15 +601,16 @@ private struct ConversationMessageRow: View, Equatable {
             )
             .background(.quaternary)
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
         }
-        .contextMenu {
-            if let copyText {
-                Button {
-                    UIPasteboard.general.string = copyText
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
+    }
+
+    @ViewBuilder
+    private var copyMenu: some View {
+        if let copyText {
+            Button {
+                UIPasteboard.general.string = copyText
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
             }
         }
     }
