@@ -7,164 +7,207 @@ struct ConversationTranscriptView: View {
 
     let snapshot: PiRpcSnapshot
 
-    @State private var parsedMessages: [ChatMessage]
-    @State private var parsedRevision: Int
-    private let initialParseStartedAtMs: Int64
-    private let initialParseDurationMs: Int
-    private let initialConstructedAt: TimeInterval
-    private let initialMessageCount: Int
+    @State private var parsedMessages: [ChatMessage] = []
+    @State private var parsedRevision = -1
 
-    init(snapshot: PiRpcSnapshot) {
-        let constructedAt = ProcessInfo.processInfo.systemUptime
+    var body: some View {
+        Group {
+            if let liveEntry {
+                if stableTurns.isEmpty {
+                    ActiveTranscriptTurnView(
+                        turn: TranscriptTurn(
+                            user: nil,
+                            responses: []
+                        ),
+                        liveEntry: liveEntry
+                    )
+                } else {
+                    StableTranscriptTurnsView(
+                        turns: Array(stableTurns.dropLast()),
+                        revision: parsedRevision
+                    )
+                    .equatable()
+
+                    if let currentTurn = stableTurns.last {
+                        ActiveTranscriptTurnView(
+                            turn: currentTurn,
+                            liveEntry: liveEntry
+                        )
+                    }
+                }
+            } else {
+                StableTranscriptTurnsView(
+                    turns: stableTurns,
+                    revision: parsedRevision
+                )
+                .equatable()
+            }
+        }
+        .task(id: snapshot.messageRevision) {
+            await refreshParsedHistory()
+        }
+    }
+
+    private var liveEntry: TranscriptEntry? {
+        guard let live = snapshot.liveMessage,
+              let message = ChatMessageParser.parse(live)
+        else {
+            return nil
+        }
+
+        return TranscriptEntry(
+            message: message,
+            isStreaming: true
+        )
+    }
+
+    private var stableTurns: [TranscriptTurn] {
+        makeTranscriptTurns(
+            parsedMessages.map {
+                TranscriptEntry(
+                    message: $0,
+                    isStreaming: false
+                )
+            }
+        )
+    }
+
+    private func refreshParsedHistory() async {
+        let revision = snapshot.messageRevision
+        guard revision != parsedRevision else {
+            return
+        }
+
+        let values = snapshot.messages
         let startedAtMs = Int64(
             Date().timeIntervalSince1970 * 1_000
         )
-        let parsed = ChatMessageParser.parseAll(
-            snapshot.messages
-        )
-        let parseDurationMs = max(
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        let parsed = await Task.detached(
+            priority: .userInitiated
+        ) {
+            ChatMessageParser.parseAll(values)
+        }.value
+
+        guard !Task.isCancelled else {
+            return
+        }
+
+        parsedMessages = parsed
+        parsedRevision = revision
+
+        let durationMs = max(
             0,
             Int(
                 (
                     (
                         ProcessInfo.processInfo.systemUptime
-                            - constructedAt
+                            - startedAt
                     ) * 1_000
                 ).rounded()
             )
         )
-
-        self.snapshot = snapshot
-        self.initialParseStartedAtMs = startedAtMs
-        self.initialParseDurationMs = parseDurationMs
-        self.initialConstructedAt = constructedAt
-        self.initialMessageCount = snapshot.messages.count
-        _parsedMessages = State(initialValue: parsed)
-        _parsedRevision = State(
-            initialValue: snapshot.messageRevision
+        store.reportDiagnosticTiming(
+            stage: "transcript.history",
+            startedAtMs: startedAtMs,
+            durationMs: durationMs,
+            detail: "m=\(values.count)"
         )
-    }
-
-    var body: some View {
-        Group {
-            ForEach(
-                Array(transcriptTurns.enumerated()),
-                id: \.offset
-            ) { _, turn in
-                if let user = turn.user {
-                    ConversationMessageRow(
-                        message: user.message,
-                        isStreaming: false
-                    )
-                }
-
-                TurnResponseView(
-                    responses: turn.responses
-                )
-            }
-        }
-        .onAppear {
-            let appearDurationMs = max(
-                0,
-                Int(
-                    (
-                        (
-                            ProcessInfo.processInfo.systemUptime
-                                - initialConstructedAt
-                        ) * 1_000
-                    ).rounded()
-                )
-            )
-            store.reportDiagnosticTiming(
-                stage: "transcript.appear",
-                startedAtMs: initialParseStartedAtMs,
-                durationMs: appearDurationMs,
-                detail: "parse=\(initialParseDurationMs)|m=\(initialMessageCount)"
-            )
-        }
-        .onChange(of: snapshot.messageRevision) { _, revision in
-            guard parsedRevision != revision else { return }
-
-            let startedAt = ProcessInfo.processInfo.systemUptime
-            let startedAtMs = Int64(
-                Date().timeIntervalSince1970 * 1_000
-            )
-            let parsed = ChatMessageParser.parseAll(
-                snapshot.messages
-            )
-            let durationMs = max(
-                0,
-                Int(
-                    (
-                        (
-                            ProcessInfo.processInfo.systemUptime
-                                - startedAt
-                        ) * 1_000
-                    ).rounded()
-                )
-            )
-
-            parsedMessages = parsed
-            parsedRevision = revision
-            store.reportDiagnosticTiming(
-                stage: "transcript.reparse",
-                startedAtMs: startedAtMs,
-                durationMs: durationMs,
-                detail: "m=\(snapshot.messages.count)"
-            )
-        }
-    }
-
-    private var transcriptTurns: [TranscriptTurn] {
-        var entries = parsedMessages.map {
-            TranscriptEntry(message: $0, isStreaming: false)
-        }
-
-        if let live = snapshot.liveMessage,
-           let message = ChatMessageParser.parse(live) {
-            entries.append(
-                TranscriptEntry(message: message, isStreaming: true)
-            )
-        }
-
-        var turns: [TranscriptTurn] = []
-        var currentUser: TranscriptEntry?
-        var currentResponses: [TranscriptEntry] = []
-
-        func flush() {
-            guard currentUser != nil || !currentResponses.isEmpty else {
-                return
-            }
-            turns.append(
-                TranscriptTurn(
-                    user: currentUser,
-                    responses: currentResponses
-                )
-            )
-            currentUser = nil
-            currentResponses = []
-        }
-
-        for entry in entries {
-            if entry.message.role == .user {
-                flush()
-                currentUser = entry
-            } else {
-                currentResponses.append(entry)
-            }
-        }
-
-        flush()
-        return turns
     }
 }
 
-private struct TranscriptEntry {
+private struct StableTranscriptTurnsView: View, Equatable {
+    let turns: [TranscriptTurn]
+    let revision: Int
+
+    static func == (
+        lhs: StableTranscriptTurnsView,
+        rhs: StableTranscriptTurnsView
+    ) -> Bool {
+        lhs.revision == rhs.revision
+            && lhs.turns.count == rhs.turns.count
+    }
+
+    var body: some View {
+        ForEach(
+            Array(turns.enumerated()),
+            id: \.offset
+        ) { _, turn in
+            if let user = turn.user {
+                ConversationMessageRow(
+                    message: user.message,
+                    isStreaming: false
+                )
+                .equatable()
+            }
+
+            TurnResponseView(
+                responses: turn.responses
+            )
+        }
+    }
+}
+
+private struct ActiveTranscriptTurnView: View {
+    let turn: TranscriptTurn
+    let liveEntry: TranscriptEntry
+
+    var body: some View {
+        if let user = turn.user {
+            ConversationMessageRow(
+                message: user.message,
+                isStreaming: false
+            )
+            .equatable()
+        }
+
+        TurnResponseView(
+            responses: turn.responses + [liveEntry]
+        )
+    }
+}
+
+private func makeTranscriptTurns(
+    _ entries: [TranscriptEntry]
+) -> [TranscriptTurn] {
+    var turns: [TranscriptTurn] = []
+    var currentUser: TranscriptEntry?
+    var currentResponses: [TranscriptEntry] = []
+
+    func flush() {
+        guard currentUser != nil || !currentResponses.isEmpty else {
+            return
+        }
+        turns.append(
+            TranscriptTurn(
+                user: currentUser,
+                responses: currentResponses
+            )
+        )
+        currentUser = nil
+        currentResponses = []
+    }
+
+    for entry in entries {
+        if entry.message.role == .user {
+            flush()
+            currentUser = entry
+        } else {
+            currentResponses.append(entry)
+        }
+    }
+
+    flush()
+    return turns
+}
+
+private struct TranscriptEntry: Equatable {
     let message: ChatMessage
     let isStreaming: Bool
 }
 
-private struct TranscriptTurn {
+private struct TranscriptTurn: Equatable {
     let user: TranscriptEntry?
     let responses: [TranscriptEntry]
 }
@@ -178,6 +221,7 @@ private struct TurnResponseView: View {
                 entries: activityEntries,
                 isStreaming: isStreaming
             )
+            .equatable()
         }
 
         if let finalEntry {
@@ -185,6 +229,7 @@ private struct TurnResponseView: View {
                 message: finalEntry.message,
                 isStreaming: finalEntry.isStreaming
             )
+            .equatable()
         }
     }
 
@@ -273,7 +318,7 @@ private struct TurnResponseView: View {
     }
 }
 
-private struct AgentActivityGroup: View {
+private struct AgentActivityGroup: View, Equatable {
     let entries: [TranscriptEntry]
     let isStreaming: Bool
 
@@ -343,7 +388,7 @@ private struct AgentActivityGroup: View {
     }
 }
 
-private struct ConversationMessageRow: View {
+private struct ConversationMessageRow: View, Equatable {
     let message: ChatMessage
     let isStreaming: Bool
 
