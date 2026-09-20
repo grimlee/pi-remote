@@ -14,19 +14,22 @@ struct ConversationTranscriptView: View {
 
     var body: some View {
         Group {
-            if !stableTurns.isEmpty {
-                StableTranscriptTurnsView(
-                    turns: Array(stableTurns.dropLast()),
-                    revision: parsedRevision
-                )
-                .equatable()
+            // Always keep a concrete transcript subtree mounted, even before
+            // async history parsing has produced its first turn. Historical
+            // sessions begin with no live message; returning EmptyView here
+            // can prevent the lazy stack from keeping this view alive long
+            // enough for its revision task to populate parsedMessages.
+            StableTranscriptTurnsView(
+                turns: Array(stableTurns.dropLast()),
+                revision: parsedRevision
+            )
+            .equatable()
 
-                if let currentTurn = stableTurns.last {
-                    CurrentTranscriptTurnView(
-                        turn: currentTurn,
-                        liveEntry: presentationLiveEntry
-                    )
-                }
+            if let currentTurn = stableTurns.last {
+                CurrentTranscriptTurnView(
+                    turn: currentTurn,
+                    liveEntry: presentationLiveEntry
+                )
             } else if let presentationLiveEntry {
                 CurrentTranscriptTurnView(
                     turn: TranscriptTurn(
