@@ -558,7 +558,7 @@ private struct SessionDetailView: View {
             Divider()
 
             ScrollView {
-                LazyVStack(
+                VStack(
                     alignment: .leading,
                     spacing: 12
                 ) {
