@@ -324,6 +324,14 @@ private struct AgentActivityGroup: View, Equatable {
 
     @State private var isExpanded = false
 
+    static func == (
+        lhs: AgentActivityGroup,
+        rhs: AgentActivityGroup
+    ) -> Bool {
+        lhs.entries == rhs.entries
+            && lhs.isStreaming == rhs.isStreaming
+    }
+
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
