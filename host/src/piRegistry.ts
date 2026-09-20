@@ -38,6 +38,7 @@ interface SessionRecord {
   name: string | null;
   model: string | null;
   startedAt: string;
+  updatedAt: string;
 }
 
 interface ReplayEntry {
@@ -134,7 +135,10 @@ async function collectSessionFiles(root: string, output: string[]): Promise<void
   }));
 }
 
-async function parseSessionFile(file: string): Promise<SessionRecord | null> {
+async function parseSessionFile(
+  file: string,
+  updatedAt: string,
+): Promise<SessionRecord | null> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
@@ -210,6 +214,7 @@ async function parseSessionFile(file: string): Promise<SessionRecord | null> {
     name: name ?? firstMessage?.slice(0, 96) ?? null,
     model,
     startedAt: header.timestamp,
+    updatedAt,
   };
 }
 
@@ -265,7 +270,10 @@ export class PiRegistry {
       .slice(0, this.#maxSessions);
 
     const parsed = await Promise.all(recent.map(item =>
-      parseSessionFile(item.file),
+      parseSessionFile(
+        item.file,
+        item.info.mtime.toISOString(),
+      ),
     ));
 
     this.#sessions.clear();
@@ -281,6 +289,7 @@ export class PiRegistry {
         cwd: session.cwd,
         model: session.model,
         startedAt: session.startedAt,
+        updatedAt: session.updatedAt,
         participantCount: 0,
         relayConnected: true,
         inputRequired: false,
