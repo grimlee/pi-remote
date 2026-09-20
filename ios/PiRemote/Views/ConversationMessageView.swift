@@ -150,11 +150,20 @@ struct ConversationTranscriptView: View {
                 ).rounded()
             )
         )
+        let parsedTurnCount = makeTranscriptTurns(
+            parsed.map {
+                TranscriptEntry(
+                    message: $0,
+                    isStreaming: false
+                )
+            }
+        ).count
+
         store.reportDiagnosticTiming(
             stage: "transcript.history",
             startedAtMs: startedAtMs,
             durationMs: durationMs,
-            detail: "m=\(values.count)"
+            detail: "raw=\(values.count)|parsed=\(parsed.count)|turns=\(parsedTurnCount)|rev=\(revision)"
         )
     }
 }
