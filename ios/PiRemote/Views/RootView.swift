@@ -465,6 +465,52 @@ private struct ConversationScrollActivityModifier: ViewModifier {
     }
 }
 
+private struct ConversationScrollGeometrySample: Equatable {
+    let offsetY: Int
+    let contentHeight: Int
+    let viewportHeight: Int
+
+    init(
+        offsetY: CGFloat,
+        contentHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) {
+        self.offsetY = Self.quantize(offsetY)
+        self.contentHeight = Self.quantize(contentHeight)
+        self.viewportHeight = Self.quantize(viewportHeight)
+    }
+
+    private static func quantize(_ value: CGFloat) -> Int {
+        Int((value / 32).rounded()) * 32
+    }
+}
+
+private struct ConversationScrollGeometryModifier: ViewModifier {
+    let onGeometryChanged: (
+        ConversationScrollGeometrySample,
+        ConversationScrollGeometrySample
+    ) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(
+                for: ConversationScrollGeometrySample.self
+            ) { geometry in
+                ConversationScrollGeometrySample(
+                    offsetY: geometry.contentOffset.y,
+                    contentHeight: geometry.contentSize.height,
+                    viewportHeight: geometry.containerSize.height
+                )
+            } action: { oldValue, newValue in
+                onGeometryChanged(oldValue, newValue)
+            }
+        } else {
+            content
+        }
+    }
+}
+
 private struct SessionDetailView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -480,6 +526,7 @@ private struct SessionDetailView: View {
     @State private var showingCommands = false
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
+    @State private var conversationIsScrolling = false
     @State private var performanceMonitor =
         ConversationPerformanceMonitor()
 
@@ -533,6 +580,19 @@ private struct SessionDetailView: View {
             )
             .modifier(
                 ConversationScrollActivityModifier { isScrolling in
+                    guard conversationIsScrolling != isScrolling else {
+                        return
+                    }
+                    conversationIsScrolling = isScrolling
+                    store.reportDiagnosticTiming(
+                        stage: "scroll.phase",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: isScrolling ? "scrolling=1" : "scrolling=0"
+                    )
+
                     if isScrolling {
                         performanceMonitor.beginDragging()
                         store.beginConversationInteraction()
@@ -540,6 +600,44 @@ private struct SessionDetailView: View {
                         performanceMonitor.endDragging()
                         store.endConversationInteraction()
                     }
+                }
+            )
+            .modifier(
+                ConversationScrollGeometryModifier {
+                    oldValue,
+                    newValue in
+
+                    guard !conversationIsScrolling else {
+                        return
+                    }
+
+                    let offsetDelta = abs(
+                        newValue.offsetY - oldValue.offsetY
+                    )
+                    let heightDelta = abs(
+                        newValue.contentHeight - oldValue.contentHeight
+                    )
+                    let viewportDelta = abs(
+                        newValue.viewportHeight - oldValue.viewportHeight
+                    )
+
+                    guard offsetDelta >= 64
+                        || heightDelta >= 64
+                        || viewportDelta >= 64
+                    else {
+                        return
+                    }
+
+                    store.reportDiagnosticTiming(
+                        stage: "scroll.geometry",
+                        startedAtMs: Int64(
+                            Date().timeIntervalSince1970 * 1_000
+                        ),
+                        durationMs: 0,
+                        detail: "y=\(oldValue.offsetY)>\(newValue.offsetY)"
+                            + "|h=\(oldValue.contentHeight)>\(newValue.contentHeight)"
+                            + "|v=\(oldValue.viewportHeight)>\(newValue.viewportHeight)"
+                    )
                 }
             )
             .onAppear {
@@ -823,6 +921,15 @@ private struct SessionDetailView: View {
         let text = composerText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+
+        store.reportDiagnosticTiming(
+            stage: "composer.submit",
+            startedAtMs: Int64(
+                Date().timeIntervalSince1970 * 1_000
+            ),
+            durationMs: 0,
+            detail: "chars=\(text.count)|scroll=\(conversationIsScrolling ? 1 : 0)"
+        )
 
         guard text.hasPrefix("/") else {
             commandNotice = nil
