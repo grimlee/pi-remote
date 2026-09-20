@@ -545,6 +545,7 @@ private struct SessionDetailView: View {
     @State private var commandResult: PiCommandResultPayload?
     @State private var commandNotice: String?
     @State private var conversationIsScrolling = false
+    @State private var conversationWasNearBottom = true
     @State private var performanceMonitor =
         ConversationPerformanceMonitor()
 
@@ -556,8 +557,9 @@ private struct SessionDetailView: View {
 
             Divider()
 
-            ScrollView {
-                LazyVStack(
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVStack(
                     alignment: .leading,
                     spacing: 12
                 ) {
@@ -586,6 +588,10 @@ private struct SessionDetailView: View {
                             )
                         }
                     }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("conversation-bottom")
                 }
                 .padding()
             }
@@ -649,6 +655,32 @@ private struct SessionDetailView: View {
                         - newValue.viewportHeight
                         - newValue.offsetY
 
+                    if newGap >= -64 {
+                        conversationWasNearBottom = newGap <= 512
+                    }
+
+                    if conversationWasNearBottom,
+                       newGap < -64 {
+                        store.reportDiagnosticTiming(
+                            stage: "scroll.repair.bottom",
+                            startedAtMs: Int64(
+                                Date().timeIntervalSince1970 * 1_000
+                            ),
+                            durationMs: 0,
+                            detail: "g=\(oldGap)>\(newGap)"
+                                + "|focus=\(composerFocused ? 1 : 0)"
+                        )
+
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            scrollProxy.scrollTo(
+                                "conversation-bottom",
+                                anchor: .bottom
+                            )
+                        }
+                    }
+
                     store.reportDiagnosticTiming(
                         stage: "scroll.geometry",
                         startedAtMs: Int64(
@@ -685,6 +717,7 @@ private struct SessionDetailView: View {
                         .objectValue?["isStreaming"]?
                         .boolValue ?? false
                 )
+            }
             }
 
             Divider()
