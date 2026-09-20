@@ -91,6 +91,19 @@ struct ConversationTranscriptView: View {
         .task(id: snapshot.messageRevision) {
             await refreshParsedHistory()
         }
+        .onChange(
+            of: diagnosticTranscriptSignature,
+            initial: true
+        ) { _, newValue in
+            store.reportDiagnosticTiming(
+                stage: "transcript.state",
+                startedAtMs: Int64(
+                    Date().timeIntervalSince1970 * 1_000
+                ),
+                durationMs: 0,
+                detail: newValue
+            )
+        }
     }
 
     private var liveEntry: TranscriptEntry? {
@@ -147,6 +160,25 @@ struct ConversationTranscriptView: View {
                 )
             }
         )
+    }
+
+    private var diagnosticTranscriptSignature: String {
+        let retainedRole = retainedLiveEntry?
+            .message.role.rawValue ?? "none"
+        let liveRole = presentationLiveEntry?
+            .message.role.rawValue ?? "none"
+
+        return [
+            "turns=\(stableTurns.count)",
+            "parsed=\(parsedRevision)",
+            "rev=\(snapshot.messageRevision)",
+            "m=\(snapshot.messages.count)",
+            "live=\(liveRole)",
+            "user=\(presentationUserEntry == nil ? 0 : 1)",
+            "resp=\(presentationResponseEntry == nil ? 0 : 1)",
+            "ret=\(retainedRole)",
+            "retrev=\(retainedLiveRevision.map(String.init) ?? "none")"
+        ].joined(separator: "|")
     }
 
     private var presentationMessages: [ChatMessage] {
