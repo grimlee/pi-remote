@@ -13,31 +13,38 @@ struct ConversationTranscriptView: View {
     @State private var retainedLiveRevision: Int?
 
     var body: some View {
-        Group {
-            // Always keep a concrete transcript subtree mounted, even before
-            // async history parsing has produced its first turn. Historical
-            // sessions begin with no live message; returning EmptyView here
-            // can prevent the lazy stack from keeping this view alive long
-            // enough for its revision task to populate parsedMessages.
-            StableTranscriptTurnsView(
-                turns: Array(stableTurns.dropLast()),
-                revision: parsedRevision
-            )
-            .equatable()
+        let turns = stableTurns
 
-            if let currentTurn = stableTurns.last {
-                CurrentTranscriptTurnView(
-                    turn: currentTurn,
-                    liveEntry: presentationLiveEntry
+        Group {
+            // Keep every persisted turn at one stable ForEach position. The
+            // previous implementation moved the last completed turn between
+            // a "current" subtree and a "stable history" subtree whenever a
+            // new user message arrived. With long history that re-parenting
+            // could transiently collapse LazyVStack content and leave the
+            // ScrollView viewport beyond its valid content range.
+            ForEach(
+                Array(turns.enumerated()),
+                id: \.offset
+            ) { index, turn in
+                TranscriptTurnRowView(
+                    turn: turn,
+                    liveEntry: index == turns.count - 1
+                        ? presentationLiveEntry
+                        : nil
                 )
-            } else if let presentationLiveEntry {
-                CurrentTranscriptTurnView(
+                .equatable()
+            }
+
+            if turns.isEmpty,
+               let presentationLiveEntry {
+                TranscriptTurnRowView(
                     turn: TranscriptTurn(
                         user: nil,
                         responses: []
                     ),
                     liveEntry: presentationLiveEntry
                 )
+                .equatable()
             }
         }
         .onChange(
@@ -183,41 +190,17 @@ struct ConversationTranscriptView: View {
     }
 }
 
-private struct StableTranscriptTurnsView: View, Equatable {
-    let turns: [TranscriptTurn]
-    let revision: Int
-
-    nonisolated static func == (
-        lhs: StableTranscriptTurnsView,
-        rhs: StableTranscriptTurnsView
-    ) -> Bool {
-        lhs.revision == rhs.revision
-            && lhs.turns.count == rhs.turns.count
-    }
-
-    var body: some View {
-        ForEach(
-            Array(turns.enumerated()),
-            id: \.offset
-        ) { _, turn in
-            if let user = turn.user {
-                ConversationMessageRow(
-                    message: user.message,
-                    isStreaming: false
-                )
-                .equatable()
-            }
-
-            TurnResponseView(
-                responses: turn.responses
-            )
-        }
-    }
-}
-
-private struct CurrentTranscriptTurnView: View {
+private struct TranscriptTurnRowView: View, Equatable {
     let turn: TranscriptTurn
     let liveEntry: TranscriptEntry?
+
+    nonisolated static func == (
+        lhs: TranscriptTurnRowView,
+        rhs: TranscriptTurnRowView
+    ) -> Bool {
+        lhs.turn == rhs.turn
+            && lhs.liveEntry == rhs.liveEntry
+    }
 
     var body: some View {
         if let user = turn.user {
