@@ -1,15 +1,17 @@
-# Pi Agent Real iPhone Test
+# Real iPhone test guide
 
-This runbook validates the native Pi Agent backend:
+This guide validates the current Pi Remote workflow on a real iPhone.
+
+The preferred path is Quick Connect:
 
 ~~~text
 iPhone
   |
-  | authenticated Relay + E2EE RPC frames
+  | Tailcat underlay
   v
-Pi Remote Relay
+Host-local Relay
   |
-  | ciphertext routing
+  | encrypted Pi RPC frames
   v
 pi-remote-host
   |
@@ -18,136 +20,117 @@ pi-remote-host
 pi --session <path> --mode rpc
 ~~~
 
-The UI remains intentionally diagnostic. Success means a real iPhone can resume and control a persisted Pi session without exposing Pi RPC contents to Cloudflare or Pi Remote Relay.
+The older public Relay / Cloudflare path remains available as an advanced backup.
 
-## 1. Public Relay hostname
-
-Expose the loopback Relay through your public tunnel, for example:
-
-~~~text
-relay.example.com -> http://127.0.0.1:8780
-~~~
-
-Do not place an interactive Cloudflare Access login in front of the hostname; Pi Remote performs its own cryptographic device authentication.
+## 1. Host prerequisites
 
 Verify:
 
 ~~~bash
-curl -fsS https://relay.example.com/healthz
+node --version
+npm --version
+command -v pi
+pi --version
 ~~~
 
-Expected:
+Node.js 22 or newer is required by the Host/Relay packages.
 
-~~~json
-{"ok":true,"protocolVersion":0}
-~~~
-
-## 2. Install Relay and Host
-
-From the Pi Remote checkout:
-
-~~~bash
-bash scripts/install-user-services.sh \
-  --relay-url wss://relay.example.com/v0/host \
-  --pi "$(command -v pi)"
-~~~
-
-The installer builds Host/Relay, writes owner-only environment files under `~/.config/pi-remote`, installs user systemd units, and starts them.
-
-## 3. Preflight
-
-~~~bash
-bash scripts/preflight-real-device.sh
-~~~
-
-The preflight verifies:
-
-- Relay service active;
-- Host service active;
-- local Relay health;
-- configured Pi executable;
-- Pi advertises RPC output mode;
-- pairing IPC socket exists.
-
-## 4. Confirm Pi sessions exist
-
-Pi Remote discovers persisted sessions from Pi's native session store, normally:
+Pi Remote currently expects persisted Pi sessions under Pi's normal session store, usually:
 
 ~~~text
 ~/.pi/agent/sessions/
 ~~~
 
-You do **not** need to enable Pi Collab.
-
-A direct RPC smoke test that does not invoke a model is:
+A model-free RPC smoke test:
 
 ~~~bash
 printf '%s\n' '{"id":"smoke","type":"get_state"}' | pi --mode rpc
 ~~~
 
-To verify a specific historical session can be resumed:
+## 2. Start Quick Connect
+
+From the repository root:
 
 ~~~bash
-printf '%s\n' '{"id":"resume","type":"get_state"}' \
-  | pi --session "/path/to/session.jsonl" --mode rpc
+npm start
 ~~~
 
-## 5. Install the iPhone build
+Expected first-run behavior:
 
-Download the current `PiRemote-Sideload` GitHub Actions artifact, extract the IPA, and install/re-sign it with SideStore.
+- Host/Relay dependencies are installed if missing;
+- pinned Tailcat is found or downloaded/verified;
+- a persistent Tailcat key is created;
+- local Relay starts;
+- Host starts;
+- pairing QR appears if no active paired device exists.
 
-The iPhone stores its stable device private keys and Host grants in Keychain.
-
-## 6. Pair
-
-With `pi-remote-host` running:
-
-~~~bash
-npm --prefix host run pair
-~~~
-
-Copy the one-time `piremote-pair-v1....` payload to the iPhone and pair.
-
-Pairing remains the same trust flow: device Relay authentication, one-time HMAC proof, Host verification, Host-signed MachineGrant, and Keychain storage.
-
-## 7. Open a Pi session
-
-After pairing, Pi Remote should list persisted Pi sessions.
-
-Selecting one performs:
+Logs:
 
 ~~~text
-signed sessions.link(instanceId, generation)
-  ->
-Host verifies paired device
-  ->
-Host starts pi --session <path> --mode rpc
-  ->
-Host creates random 256-bit RPC channel key
-  ->
-channel descriptor encrypted to the exact iPhone X25519 key
-  ->
-Relay sees only encrypted capability
-  ->
-iPhone decrypts capability
+.runtime/relay-trace.log
+.runtime/host-trace.log
 ~~~
 
-Then Pi RPC commands/events travel as AES-256-GCM encrypted `rpc.frame` messages. Machine ID, device ID, channel ID, direction, and sequence number are authenticated as AAD.
+Launcher keys:
 
-## 8. Functional checks
-
-### History and state
-
-Opening the session automatically sends:
-
-~~~json
-{"type":"get_state"}
-{"type":"get_messages"}
+~~~text
+p   new pairing QR
+s   compatibility QR
+q   stop
 ~~~
 
-Confirm historical messages appear and the displayed model matches the selected Pi session.
+After the iPhone has already been paired, a normal restart should hide the QR and show that the existing pairing was found.
 
-### Prompt
+## 3. Install the iPhone build
+
+Open GitHub Actions and download the latest successful \`PiRemote-Sideload\` artifact from the **iOS Build** workflow.
+
+Install/re-sign the IPA using SideStore, AltStore, or another sideloading workflow.
+
+The artifact is an unsigned sideload IPA, not an App Store-signed build.
+
+## 4. Pair
+
+On first use:
+
+1. Open Pi Remote.
+2. Tap the Quick Connect pairing action.
+3. Scan the QR shown by the Host launcher.
+4. Wait for the Host/session list to appear.
+
+Normal later restarts should reconnect with the stored device identity and MachineGrant without another scan.
+
+## 5. Session list checks
+
+Confirm:
+
+- persisted Pi sessions appear;
+- sessions are grouped by Pi working directory/workspace;
+- workspace sections can collapse/expand;
+- recent activity affects ordering;
+- session title is the explicit Pi name when present, otherwise first-user-message fallback;
+- new-session action offers existing workspaces.
+
+## 6. Open a session
+
+Opening a session performs a signed generation-bound session link.
+
+The Host either reuses an appropriate live RPC channel or starts:
+
+~~~bash
+pi --session <session-path> --mode rpc
+~~~
+
+The phone then requests authoritative Pi state/history.
+
+Confirm:
+
+- historical messages appear;
+- model state appears;
+- conversation scroll/keyboard behavior remains stable;
+- returning to a previously opened session is fast.
+
+## 7. Prompt and streaming
 
 Send:
 
@@ -155,49 +138,82 @@ Send:
 Reply with exactly: PI_REMOTE_PROMPT_OK
 ~~~
 
-Confirm Pi receives it and the iPhone receives the resulting agent/message/tool events.
+Confirm:
 
-### Abort
+- submitted user message appears once;
+- assistant response streams;
+- completed response remains visible;
+- no transcript blanking/jumping occurs when showing/hiding the keyboard.
 
-Start a long turn, then tap Stop. Confirm Pi receives the native RPC `abort` command.
+For a longer stream, verify manual scrolling remains responsive.
 
-### Extension UI
+## 8. Model / context / speed
 
-Trigger a Pi extension `select`, `confirm`, `input`, or `editor` request. Confirm the iPhone renders it and sends the matching `extension_ui_response`.
+Open the model selector and switch models if the session supports it.
 
-### Background / transport resume
+Confirm:
 
-Start a Pi turn that takes long enough to keep producing output. While it is running, background Pi Remote or temporarily interrupt the iPhone network, then return to the app.
+- selected model updates;
+- context usage is visible when Pi reports it;
+- approximate decode-rate display appears while streaming;
+- changing these controls does not destabilize conversation scrolling.
 
-For a short interruption the expected path is:
+The speed value is a UI/runtime estimate based on observed Pi delta events, not a tokenizer-verified exact tokens-per-second benchmark.
 
-~~~text
-existing Pi RPC process keeps running
-  ->
-iPhone reconnects/authenticates to Relay
-  ->
-signed sessions.link(resumeFromHostSeq=last applied seq)
-  ->
-Host reuses the same RPC channel
-  ->
-missing encrypted frames replay in sequence
-  ->
-iPhone sends piremote.resume_ack
-  ->
-live delivery continues
-~~~
+## 9. Copy and rename
 
-The conversation already visible on screen should remain in memory. The app should not show a full session re-join or create another Pi RPC process.
+Long-press a user or assistant message and confirm Copy works.
 
-To force a deterministic transport interruption without stopping the Host/Pi process, restart only the Relay service while a turn is running:
+Use the session action menu to rename the session.
+
+Confirm the renamed title persists after leaving/reopening the session because Pi Remote calls Pi's native \`set_session_name\` RPC command.
+
+## 10. Slash commands and extension UI
+
+Verify slash command discovery/selection.
+
+If available in your Pi setup, trigger extension UI:
+
+- select;
+- confirm;
+- input;
+- editor.
+
+Confirm Pi Remote renders the request and sends the matching response.
+
+## 11. Abort
+
+Start a long turn and tap Stop.
+
+Confirm the turn aborts and the UI returns to a writable state.
+
+## 12. Background/foreground
+
+Start a sufficiently long generation, then background Pi Remote for 10-30 seconds.
+
+Expected behavior:
+
+- the Host-owned Pi task continues;
+- the iPhone does not need to keep rendering in the background;
+- returning to the app should not recreate a healthy Pi RPC task;
+- the conversation should continue/reconcile without duplicate content;
+- \`Pi running\` should not remain stuck after the task has actually finished.
+
+A short background interval may reuse the existing transport directly.
+
+## 13. Deterministic transport interruption
+
+To test actual replay/resume, interrupt transport rather than merely backgrounding the iPhone.
+
+For the public Relay/systemd deployment, restart only the Relay while a turn is running:
 
 ~~~bash
 systemctl --user restart pi-remote-relay.service
 ~~~
 
-Do **not** restart `pi-remote-host.service` for this test, because the live replay ring and Pi RPC subprocess intentionally live in the Host process.
+Do not restart the Host for this test because the live Pi RPC subprocess and replay ring are intentionally Host-owned.
 
-After the Relay is back, reconnect from the iPhone if needed. In Host logs, a replay hit should look like:
+Expected Host logs for a replay hit:
 
 ~~~text
 Pi RPC resume [rpc_...]: cursor=... target=... replay=N frame(s)
@@ -206,15 +222,22 @@ Pi RPC resume ACK [rpc_...]: target=... queued=N
 
 Confirm:
 
-- the same conversation remains visible;
-- events that occurred during the outage appear after reconnect;
-- no duplicate assistant/tool events appear;
-- the current turn reaches the same final state as Pi on the Host;
-- sending a new prompt still works after recovery.
+- same conversation remains visible;
+- missed events are reconciled/replayed;
+- no duplicate assistant/tool output appears;
+- the turn reaches the same final state as Pi on the Host;
+- a new prompt still works afterward.
 
-### Replay-window fallback
+## 14. Replay-window fallback
 
-The replay ring is intentionally bounded. If the mobile cursor is older than the retained ring, the Host reports replay unavailable and the iPhone repairs state from Pi rather than attempting partial replay.
+The Host replay ring is bounded.
+
+Current defaults are approximately:
+
+- 2,048 encrypted Host frames;
+- 8 MiB per live RPC channel.
+
+If the mobile cursor is older than the retained ring, the Host reports replay unavailable and the iPhone repairs authoritative state from Pi.
 
 Expected Host log:
 
@@ -222,40 +245,83 @@ Expected Host log:
 Pi RPC resume [rpc_...]: cursor=... target=... replay=unavailable; authoritative reconciliation required
 ~~~
 
-For normal usage the default ring is 2,048 encrypted frames or 8 MiB per live RPC channel. Unit tests exercise the small-ring overflow path; production real-device testing does not need to deliberately generate thousands of events.
+The fallback must not create duplicate completed messages.
 
-After fallback, confirm completed history and model/state match Pi. A partially streaming message may visually jump to authoritative state rather than replaying every missed delta; it must not create duplicated completed messages.
+## 15. Network changes
 
-## 9. Diagnostics
+Useful real-device checks:
+
+- Wi-Fi to cellular;
+- cellular to Wi-Fi;
+- proxy/VPN on/off;
+- Host launcher stop/start;
+- iOS app stop/start.
+
+An already paired device should normally reconnect without scanning another QR unless transport coordinates/identity were deliberately rotated.
+
+## 16. Public Relay / Cloudflare backup
+
+Quick Connect is preferred, but the older public topology remains supported.
+
+Install the systemd services:
+
+~~~bash
+bash scripts/install-user-services.sh \
+  --relay-url wss://relay.example.com/v0/host \
+  --pi "$(command -v pi)"
+~~~
+
+Expose the local Relay origin through your tunnel and verify:
+
+~~~bash
+curl -fsS https://relay.example.com/healthz
+~~~
+
+Do not put an interactive browser login page in front of the Relay WebSocket.
+
+## 17. Diagnostics
+
+Quick Connect:
+
+~~~bash
+tail -n 100 .runtime/host-trace.log
+tail -n 100 .runtime/relay-trace.log
+~~~
+
+Public/systemd path:
 
 ~~~bash
 systemctl --user status pi-remote-relay.service
 systemctl --user status pi-remote-host.service
 journalctl --user -u pi-remote-relay.service -n 100 --no-pager
 journalctl --user -u pi-remote-host.service -n 100 --no-pager
-curl -fsS http://127.0.0.1:8780/healthz
-curl -fsS https://relay.example.com/healthz
 ~~~
 
-## Current limitation
+Review logs before sharing them publicly.
 
-Pi RPC can resume a persisted session, but it cannot attach to an independent Pi TUI process that is already running. Do not open the same session concurrently in the TUI and Pi Remote during this milestone. A future Pi extension can provide live-process attachment.
+## Current limitations
 
-## MVP success criterion
+- Sideloading is required; there is no App Store/TestFlight release.
+- Rich image/file input is still planned.
+- Session deletion is not exposed.
+- Pi Remote opens persisted sessions through its own Pi RPC process rather than attaching to an independently running Pi TUI.
+- Quick Connect is tested most heavily on Linux Host + real iPhone.
 
-One real iPhone can:
+## Success criterion
 
-- pair to the Host;
-- see the real Omarchy machine;
-- list persisted Pi sessions;
-- open an existing session through native Pi RPC;
-- receive authoritative state/history;
-- send a prompt;
-- receive live agent/tool events;
-- abort a turn;
-- answer extension UI requests;
-- background and foreground without losing the live Pi RPC session;
-- replay short transport gaps without duplicate or missing completed events;
-- fall back to authoritative Pi state when the replay window is unavailable.
+A successful real-device build should let one paired iPhone:
 
-UI polish remains outside this milestone.
+- discover its trusted Host;
+- browse workspace-grouped Pi sessions;
+- open existing history;
+- create a new session in an existing workspace;
+- rename sessions;
+- send prompts;
+- receive live assistant/tool events;
+- switch supported models;
+- use slash commands;
+- copy messages;
+- abort turns;
+- handle interactive extension UI;
+- background/foreground without stopping Host work;
+- recover from real transport interruptions without duplicated completed output.
