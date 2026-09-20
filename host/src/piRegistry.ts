@@ -703,8 +703,36 @@ export class PiRegistry {
     } catch {
       return;
     }
-    if (!asRecord(value)) return;
-    this.#sendHostPayload(channel, value as Record<string, unknown>);
+    const record = asRecord(value);
+    if (!record) return;
+
+    this.#trackSessionIdentity(channel, record);
+    this.#sendHostPayload(channel, record);
+  }
+
+  #trackSessionIdentity(
+    channel: RpcChannel,
+    value: Record<string, unknown>,
+  ): void {
+    if (value.type !== "response"
+      || value.command !== "get_state"
+      || value.success !== true) {
+      return;
+    }
+
+    const data = asRecord(value.data);
+    const sessionId = data?.sessionId;
+    if (typeof sessionId !== "string"
+      || !sessionId
+      || sessionId === channel.instanceId) {
+      return;
+    }
+
+    const previous = channel.instanceId;
+    channel.instanceId = sessionId;
+    console.log(
+      `Pi RPC session rebind [${channel.channelId}] ${previous} -> ${sessionId}`,
+    );
   }
 
   #sendHostPayload(channel: RpcChannel, value: Record<string, unknown>): void {
