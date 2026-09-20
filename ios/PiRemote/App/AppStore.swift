@@ -72,6 +72,8 @@ final class AppStore {
     private var activeCacheSessionId: String?
     private var lastCachedMessageRevision = 0
     private var shouldRefreshAfterNewSession = false
+    private var isDeferringConversationPresentation = false
+    private var deferredRpcSnapshot: PiRpcSnapshot?
     private var sessionListReconciliationTask: Task<Void, Never>?
     private var sessionListReconciliationID: String?
     private var backgroundedAt: Date?
@@ -551,6 +553,26 @@ final class AppStore {
             try await rpcClient.abort()
         } catch {
             sessionError = error.localizedDescription
+        }
+    }
+
+    func beginConversationInteraction() {
+        guard !isDeferringConversationPresentation else {
+            return
+        }
+        isDeferringConversationPresentation = true
+        deferredRpcSnapshot = nil
+    }
+
+    func endConversationInteraction() {
+        guard isDeferringConversationPresentation else {
+            return
+        }
+
+        isDeferringConversationPresentation = false
+        if let deferredRpcSnapshot {
+            self.deferredRpcSnapshot = nil
+            rpcSnapshot = deferredRpcSnapshot
         }
     }
 
@@ -1066,7 +1088,24 @@ final class AppStore {
     ) async {
         switch event {
         case let .snapshot(snapshot):
-            rpcSnapshot = snapshot
+            let isStreamingPresentation =
+                snapshot.liveMessage != nil
+                || snapshot.state?
+                    .objectValue?["isStreaming"]?
+                    .boolValue == true
+
+            if isDeferringConversationPresentation,
+               isStreamingPresentation {
+                // Keep transport/RPC/cache state fully live while the user's
+                // finger owns the scroll gesture. Only defer the expensive
+                // SwiftUI presentation update, latest-wins. Releasing the
+                // gesture publishes one current snapshot and normal cadence
+                // resumes unchanged.
+                deferredRpcSnapshot = snapshot
+            } else {
+                deferredRpcSnapshot = nil
+                rpcSnapshot = snapshot
+            }
 
             if let sessionId = snapshot.state?
                 .objectValue?["sessionId"]?
@@ -1192,6 +1231,8 @@ final class AppStore {
         activeCacheSessionId = nil
         lastCachedMessageRevision = 0
         shouldRefreshAfterNewSession = false
+        isDeferringConversationPresentation = false
+        deferredRpcSnapshot = nil
         needsRpcTransportResume = false
         isResumingSession = false
         resumeInFlight = false
