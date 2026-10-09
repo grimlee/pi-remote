@@ -1,0 +1,25 @@
+name: PWA checks
+on:
+  push:
+    branches: ["feature/pwa-remote"]
+    paths: ["pwa/**", "package.json", ".github/workflows/pwa-check.yml"]
+  pull_request:
+    paths: ["pwa/**", "package.json", ".github/workflows/pwa-check.yml"]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax validation
+        run: |
+          node --check pwa/registry.mjs
+          node --check pwa/security.mjs
+          node --check pwa/server.mjs
+          node --check pwa/public/app.js
+          node --check pwa/public/sw.js
+      - name: Node integration tests
+        run: npm run test:pwa

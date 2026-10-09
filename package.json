@@ -6,6 +6,8 @@
     "start": "node scripts/tailcat-launcher.mjs",
     "quick-connect": "node scripts/tailcat-launcher.mjs",
     "tailcat": "node scripts/tailcat-launcher.mjs",
+    "pwa": "node pwa/server.mjs",
+    "test:pwa": "node --test pwa/test/*.test.mjs",
     "test": "npm --prefix host test && npm --prefix relay test",
     "typecheck": "npm --prefix host run typecheck && npm --prefix relay run typecheck",
     "build:control-plane": "npm --prefix relay run build && npm --prefix host run build",
