@@ -77,7 +77,7 @@ test("API, recovery entry point, foreign origins, and POSTs bypass worker", asyn
 });
 
 test("activation deletes only obsolete Pi Remote shell caches", async () => {
-  const w = worker({ names: ["pi-remote-shell-v4", "pi-remote-shell-v6", "pi-remote-shell-v7.2", "other-app-cache"] });
+  const w = worker({ names: ["pi-remote-shell-v4", "pi-remote-shell-v6", "pi-remote-shell-v8.0", "other-app-cache"] });
   await w.activate();
   assert.deepEqual(w.deleted, ["pi-remote-shell-v4", "pi-remote-shell-v6"]);
   assert.equal(w.claimed(), true);

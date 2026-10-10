@@ -19,7 +19,9 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
       addEventListener(type, fn) { this.handlers[type] = fn; },
       append(...items) { this.children.push(...items); for (const item of items) item.parentElement = this; },
       remove() { const items=this.parentElement?.children; if(items) items.splice(items.indexOf(this),1); },
-      replaceChildren(...items) { this.children = items; },
+      replaceChildren(...items) { this.children = items; for(const item of items) item.parentElement=this; },
+      insertBefore(item, before) {const i=this.children.indexOf(before);if(i<0)this.append(item);else{this.children.splice(i,0,item);item.parentElement=this;}},
+      replaceWith(item) {const a=this.parentElement?.children;if(a){a.splice(a.indexOf(this),1,item);item.parentElement=this.parentElement;}},
     });
     return nodes.get(id);
   };
@@ -47,11 +49,12 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
     return { status: 200, ok: true, json: async () => data };
   };
   const context = vm.createContext({ document, window, navigator: browserOptions.navigator || {}, location: browserOptions.location || {}, EventSource, fetch,
+    renderContent:(node,message)=>{node.textContent=typeof message.content==='string'?message.content:(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n');},contentForCopy:message=>(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n'),
     crypto: webcrypto, TextEncoder, RecoveryMemory, messageFingerprint, prefersPolling, AbortController, URLSearchParams,
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, fn); delays.set(id, delay); return id; },
     clearTimeout(id) { timers.delete(id); delays.delete(id); } });
   const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-  vm.runInContext(source.replace(/^import .*\n/, ''), context);
+  vm.runInContext(source.replace(/^import .*\n/gm, ''), context);
   await new Promise(resolve => setImmediate(resolve));
   return { context, nodes, element, streams, calls, window, document, timers, delays, session, saved };
 }

@@ -1,4 +1,5 @@
 import { RecoveryMemory, messageFingerprint, prefersPolling } from "./recovery.js";
+import { renderContent, contentForCopy } from "./transcript.js";
 const $ = id => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
@@ -31,6 +32,9 @@ let pollingOnly = prefersPolling(navigator, location);
 let agentBusy = false;
 let activeStateRead = null;
 let lastRenderedSnapshot = null;
+const renderedNodes = new Map();
+let liveSignature = null;
+let renderTools = {};
 const collapsedWorkspaces = new Set();
 function pauseStateReads() {
   clearTimeout(pollTimer);
@@ -269,7 +273,7 @@ async function copyMessage(text) {
     setActivity("无法自动复制，请长按选中文字");
   }
 }
-function makeMessage(role, text) {
+function makeMessage(role, text, message = null) {
   const block = document.createElement("section");
   block.className = "message " + role;
   const heading = document.createElement("div");
@@ -286,46 +290,38 @@ function makeMessage(role, text) {
   copy.textContent = "复制";
   copy.setAttribute?.("aria-label", "复制消息内容");
   copy.addEventListener("click", () => {
-    if (body.textContent) void copyMessage(body.textContent);
+    void copyMessage(message ? contentForCopy(message) : body.textContent);
   });
   heading.append(label, copy);
   block.append(heading, body);
+  if (message) renderContent(body, message, copyMessage, renderTools);
   return { block, body };
 }
 function renderMessages(messages) {
   const visible = (messages || []).slice(-160);
-  const signature = JSON.stringify(visible);
-  // iOS polls once a second while busy. Don't rebuild 160 message nodes when
-  // the persisted transcript hasn't changed; it loses selection and scroll.
-  if (signature === lastRenderedSnapshot) {
-    updateJumpButton();
-    return;
-  }
+  const signature = JSON.stringify([visible, renderTools]);
+  if (signature === lastRenderedSnapshot) { updateJumpButton(); return; }
   lastRenderedSnapshot = signature;
   const nearBottom = atBottom();
-  const fragment = document.createDocumentFragment();
-  for (const message of visible) {
-    const role = message?.role;
-    if (role === "assistant" || role === "user") {
-      const text = textContentOf(message);
-      if (text) fragment.append(makeMessage(role, text).block);
-      if (role === "assistant" && message.errorMessage) {
-        fragment.append(makeMessage(role, message.stopReason === "aborted" || /aborted/i.test(message.errorMessage)
-          ? "已停止" : "Pi 运行失败：" + message.errorMessage).block);
-      }
-    } else if (role === "toolResult" || role === "tool") {
-      const node = document.createElement("div");
-      node.className = "tool";
-      node.textContent = "工具完成：" + String(message.toolName || message.name || "tool");
-      fragment.append(node);
+  const keep = new Set();
+  for (let i=0; i<visible.length; i++) {
+    const message = visible[i]; if (!message) continue;
+    const key = String((messages || []).length - visible.length + i);
+    keep.add(key);
+    const sig = JSON.stringify([message, renderTools]);
+    let item = renderedNodes.get(key);
+    if (!item || item.signature !== sig) {
+      const open = item?.body.querySelectorAll?.('details[open]');
+      const opened = new Set(open ? [...open].map(d=>d.dataset.detailKey) : []);
+      const next = makeMessage(message.role, '', message); next.signature = sig;
+      if (item) item.block.replaceWith(next.block);
+      else messagesView.insertBefore(next.block, liveBlock);
+      for (const detail of next.body.querySelectorAll?.('details') || []) detail.open = opened.has(detail.dataset.detailKey);
+      item = next; renderedNodes.set(key,item);
     }
   }
-  messagesView.replaceChildren(fragment);
-  liveNode = null;
-  liveBlock = null;
-  liveText = "";
-  if (nearBottom) scrollBottom();
-  else updateJumpButton();
+  for (const [key,item] of renderedNodes) if (!keep.has(key)) {item.block.remove(); renderedNodes.delete(key);}
+  if (nearBottom) scrollBottom(); else updateJumpButton();
 }
 function setLiveText(text) {
   if (!current || !text || text === liveText) return;
@@ -346,14 +342,22 @@ function appendLive(delta) {
 }
 function renderSnapshot(data) {
   agentBusy = !!data.busy;
+  renderTools = {};
+  for (const m of data.messages || []) if (m?.role==='toolResult') renderTools[m.toolCallId] = {status:m.isError?'失败':'成功'};
+  for (const t of data.tools || []) renderTools[t.toolCallId] = {status:t.status};
   renderMessages(data.messages);
-  const text = data.busy && data.liveMessage ? textContentOf(data.liveMessage) : "";
-  if (text) setLiveText(text);
-  else if (liveNode) {
-    liveBlock?.remove();
-    liveBlock = liveNode = null;
-    liveText = "";
-    updateJumpButton();
+  const message = data.busy && data.liveMessage;
+  const sig = message ? JSON.stringify([message,renderTools]) : null;
+  if (message && sig !== liveSignature) {
+    const nearBottom = atBottom();
+    if (!liveNode) {const item=makeMessage('assistant','');liveNode=item.body;liveBlock=item.block;messagesView.append(item.block);}
+    const opened = new Set([...(liveNode.querySelectorAll?.('details[open]') || [])].map(d=>d.dataset.detailKey));
+    renderContent(liveNode,message,copyMessage,renderTools);
+    for (const d of liveNode.querySelectorAll?.('details') || []) d.open=opened.has(d.dataset.detailKey);
+    liveText=textContentOf(message);liveSignature=sig;
+    if(nearBottom) scrollBottom();else updateJumpButton();
+  } else if (!message && liveNode) {
+    liveBlock?.remove();liveBlock=liveNode=null;liveText='';liveSignature=null;updateJumpButton();
   }
 }
 async function syncState(expectedEpoch = epoch) {
@@ -389,14 +393,7 @@ function processRpc(payload) {
   if (type === "tool_execution_start") {
     setActivity("正在执行工具：" + (payload.toolName || "tool"));
   }
-  if (type === "message_update") {
-    const update = payload.assistantMessageEvent;
-    if (update?.type === "text_delta" && typeof update.delta === "string") {
-      if (payload.message?.role === "assistant") {
-        setLiveText(textContentOf(payload.message));
-      } else appendLive(update.delta);
-    }
-  }
+  if (type === "message_update" || type.startsWith("tool_execution_")) scheduleSync(280);
   if (type === "agent_settled" || type === "agent_end" || type === "turn_end" || type === "message_end") {
     setActivity("本轮结束");
     scheduleSync(type === "message_end" ? 350 : 0);
@@ -516,6 +513,7 @@ async function openSession(session) {
   $("send").disabled = false;
   $("stop").disabled = false;
   lastRenderedSnapshot = null;
+  renderedNodes.clear();liveSignature=null;liveBlock=liveNode=null;liveText="";
   messagesView.textContent = "正在载入会话…";
   setConnection("连接 Pi RPC…");
   try {

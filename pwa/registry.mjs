@@ -125,6 +125,7 @@ export class PiRunner {
     this.seq = 0;
     this.busy = false;
     this.liveMessage = null;
+    this.tools = new Map();
     this.dead = false;
     this.lastActive = Date.now();
     this.buffer = "";
@@ -174,22 +175,28 @@ export class PiRunner {
           else if (message.type === "message_update") this.applyTextUpdate(message.assistantMessageEvent);
         }
         if (message.type === "message_end" || message.type === "agent_settled") this.liveMessage = null;
+        if (message.type === 'tool_execution_start') {
+          this.tools.set(message.toolCallId,{toolCallId:message.toolCallId,toolName:message.toolName,status:'运行中'});
+          while(this.tools.size>100) this.tools.delete(this.tools.keys().next().value);
+        }
+        if (message.type === 'tool_execution_end') this.tools.set(message.toolCallId,{toolCallId:message.toolCallId,toolName:message.toolName,status:message.isError?'失败':'成功'});
         this.publish("rpc", message);
       }
     }
   }
 
   applyTextUpdate(update) {
-    // Pi 1.x RPC intentionally sends deltas, not cumulative SDK message snapshots.
-    if (!update || !["text_start", "text_delta", "text_end"].includes(update.type)) return;
+    if (!update || !Number.isSafeInteger(update.contentIndex ?? 0)) return;
     if (!this.liveMessage) this.liveMessage = { role: "assistant", content: [] };
-    const index = Number.isSafeInteger(update.contentIndex) ? update.contentIndex : 0;
-    if (index < 0 || index > 10000) return;
-    const blocks = this.liveMessage.content;
-    if (!Array.isArray(blocks)) return;
-    if (!blocks[index] || blocks[index].type !== "text") blocks[index] = { type: "text", text: "" };
-    if (update.type === "text_delta" && typeof update.delta === "string") blocks[index].text += update.delta;
-    if (update.type === "text_end" && typeof update.content === "string") blocks[index].text = update.content;
+    const index=update.contentIndex ?? 0; if(index<0 || index>10000) return;
+    const blocks=this.liveMessage.content; if(!Array.isArray(blocks)) return;
+    const family=update.type?.split('_')[0];
+    if (family==='text' || family==='thinking') {
+      const key=family==='text'?'text':'thinking';
+      if(blocks[index]?.type!==family) blocks[index]={type:family,[key]:''};
+      if(update.type.endsWith('_delta') && typeof update.delta==='string') blocks[index][key]+=update.delta;
+      if(update.type.endsWith('_end') && typeof update.content==='string') blocks[index][key]=update.content;
+    } else if(family==='toolcall' && update.type==='toolcall_end' && update.toolCall) blocks[index]=structuredClone(update.toolCall);
   }
 
   publish(type, data) {
@@ -253,7 +260,8 @@ export class PiRunner {
       messages: Array.isArray(data?.messages) ? data.messages : (Array.isArray(data) ? data : []),
       cursor: this.seq,
       busy: this.busy,
-      liveMessage: this.liveMessage
+      liveMessage: this.liveMessage,
+      tools: [...this.tools.values()]
     };
   }
 

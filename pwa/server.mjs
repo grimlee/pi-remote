@@ -15,6 +15,7 @@ const files = new Map([
   ["/sw-reset.js", ["sw-reset.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
+  ["/transcript.js", ["transcript.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
   ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json"]],
@@ -115,8 +116,8 @@ export function createPwaServer(options = {}) {
       json(res, 200, { ok: true });
       return;
     }
-    if (method === "GET" && files.has(pathname)) {
-      const [file, mime] = files.get(pathname);
+    if (method === "GET" && (files.has(pathname) || /^\/vendor\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(pathname))) {
+      const [file, mime] = files.get(pathname) || [pathname.slice(1), pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : pathname.endsWith('.css') ? 'text/css; charset=utf-8' : pathname.endsWith('.woff2') ? 'font/woff2' : pathname.endsWith('.woff') ? 'font/woff' : 'application/octet-stream'];
       try {
         let data = await readFile(path.join(root, "public", file));
         const compressible = /^(?:text\/|application\/(?:json|manifest\+json))/.test(mime) || mime === "image/svg+xml";

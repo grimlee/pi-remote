@@ -78,3 +78,5 @@
 /* Match Safari keyboard viewport and keep the history control above the composer. */
 .shell{height:var(--app-height,100dvh)}
 .jump-latest{bottom:calc(var(--composer-height,127px) + 16px)}
+
+.content {white-space:normal;overflow-wrap:anywhere;min-width:0}.content .rich-text{white-space:normal}.user .rich-text{white-space:pre-wrap} .content pre{position:relative;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;padding:12px;background:#0d1117;border-radius:8px} .content code{font-family:monospace}.content table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}.content th,.content td{border:1px solid #384352;padding:6px}.content a{color:#86bcff}.content img{max-width:100%;max-height:280px}.content details{margin:8px 0;padding:10px;border:1px solid #35404f;border-radius:8px}.content summary{cursor:pointer;color:#aebdd0}.content .raw-output{max-height:360px}.content h1{font-size:1.5em}.content h2{font-size:1.25em}.math{max-width:100%;overflow:auto}
