@@ -29,7 +29,9 @@ Open https://YOUR-HOST.YOUR-TAILNET.ts.net:10000/ in Safari with tailnet access,
 - Browser persists the selected session ID and restores it after reload. It rebuilds SSE on foreground, network recovery, and stream failure, with bounded backoff. Offline reloads recover without re-pairing.
 - Authoritative state includes the current partial assistant text, reconstructed from Pi 1.x delta-only RPC events, even when bounded event replay has expired.
 - Large state responses use gzip when supported, retaining complete message history over slow mobile links.
-- SSE has an 8-second connection deadline and a 45-second heartbeat deadline. Stalled streams fall back to three-second authoritative state polling while reconnecting; commands are never automatically replayed.
+- iPhone/iPad default to short HTTPS state requests every three seconds, avoiding long-lived SSE on mobile VPN paths. Failed reads retry with bounded backoff. Use `?transport=poll` to opt into this mode on other browsers or `?transport=stream` for an explicit SSE test.
+- Desktop SSE has an 8-second connection deadline and a 45-second heartbeat deadline. A stalled stream switches to polling for the remainder of the page session, without an endless stream reconnect loop. Commands are never automatically replayed.
+- Sending/aborting takes priority over history downloads. Authenticated receipt reconciliation clears an unchanged draft once an ambiguous command is confirmed as accepted.
 - Browser reloads authoritative Pi state on reconnect, on foreground, and on turn completion.
 - Browser stores pending command IDs and message fingerprints (never prompt text or credentials) before dispatch, and queries authenticated receipts on recovery. Storage-disabled browsers cannot retain this metadata across reloads.
 - Prompts use a persistent command receipt/idempotency key, stored BEFORE dispatch. Ambiguous status is not automatically retried. This favors at-most-once dispatch rather than duplicate tool execution; it is not full exactly-once semantics.

@@ -24,3 +24,12 @@ export async function messageFingerprint(message) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(message));
   return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
 }
+
+export function prefersPolling(navigator, location) {
+  const transport = new URLSearchParams(location.search || "").get("transport");
+  if (transport === "poll") return true;
+  if (transport === "stream") return false;
+  const agent = navigator.userAgent || "";
+  return /iPhone|iPad|iPod/i.test(agent)
+    || (/Macintosh/i.test(agent) && navigator.maxTouchPoints > 1);
+}

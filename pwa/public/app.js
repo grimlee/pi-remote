@@ -1,4 +1,4 @@
-import { RecoveryMemory, messageFingerprint } from "./recovery.js";
+import { RecoveryMemory, messageFingerprint, prefersPolling } from "./recovery.js";
 const $ = id => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
@@ -23,21 +23,37 @@ let submitting = false;
 let streamWatchdog = null;
 let pollTimer = null;
 let realtimeConnected = false;
+let pollingOnly = prefersPolling(navigator, location);
+let activeStateRead = null;
+function pauseStateReads() {
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  if (activeStateRead) activeStateRead.abort();
+}
+function connectTransport(id, cursor, expectedEpoch) {
+  if (pollingOnly) startPolling(expectedEpoch);
+  else {
+    setConnection("Pi 会话已连接 · 正在建立实时连接…", "good");
+    attachStream(id, cursor, expectedEpoch);
+  }
+}
 function clearRealtimeTimers() {
   clearTimeout(streamWatchdog);
   clearTimeout(pollTimer);
   streamWatchdog = pollTimer = null;
   realtimeConnected = false;
 }
-function startPolling(expectedEpoch) {
+function startPolling(expectedEpoch, immediate = false) {
   clearTimeout(pollTimer);
-  setConnection("会话已连接 · 实时流暂不可用，自动同步中", "good");
+  setConnection(pollingOnly ? "Pi 会话已连接 · 稳定同步模式" : "会话已连接 · 自动同步中", "good");
+  let delay = 3000;
   const poll = async () => {
-    if (expectedEpoch !== epoch || realtimeConnected || !current) return;
-    await syncState(expectedEpoch);
-    if (expectedEpoch === epoch && !realtimeConnected && current) pollTimer = setTimeout(poll, 3000);
+    if (expectedEpoch !== epoch || realtimeConnected || !current || submitting) return;
+    const ok = await syncState(expectedEpoch);
+    delay = ok ? 3000 : Math.min(delay * 2, 15000);
+    if (expectedEpoch === epoch && !realtimeConnected && current && !submitting) pollTimer = setTimeout(poll, delay);
   };
-  pollTimer = setTimeout(poll, 0);
+  pollTimer = setTimeout(poll, immediate ? 0 : delay);
 }
 let storage;
 try { storage = window.localStorage; } catch {}
@@ -57,26 +73,36 @@ function setConnection(message, kind = "") {
 function setActivity(message) { activity.textContent = message; }
 async function api(url, options = {}) {
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), 45000);
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const deadline = setTimeout(abort, options.method === "POST" ? 45000 : 20000);
   try {
     const response = await fetch(url, {
       credentials: "same-origin",
       cache: "no-store",
-      signal: controller.signal,
-      ...options
+      ...options,
+      signal: controller.signal
     });
     let value;
-    try { value = await response.json(); } catch { value = {}; }
+    try { value = await response.json(); } catch (err) {
+      if (response.ok) throw err;
+      value = {};
+    }
     if (response.status === 401 && url !== "/api/login") showLogin();
     if (!response.ok) throw Object.assign(new Error(value.error || value.status || "HTTP " + response.status), { status: response.status });
     return value;
-  } finally { clearTimeout(deadline); }
+  } finally {
+    clearTimeout(deadline);
+    options.signal?.removeEventListener("abort", abort);
+  }
 }
 function showLogin() {
   epoch++;
   clearTimeout(reconnectTimer);
   clearTimeout(syncTimer);
   clearRealtimeTimers();
+  pauseStateReads();
   current = null;
   if (stream) { stream.close(); stream = null; }
   appView.hidden = true;
@@ -204,17 +230,25 @@ function renderSnapshot(data) {
   if (data.busy && data.liveMessage) appendLive(textContentOf(data.liveMessage));
 }
 async function syncState(expectedEpoch = epoch) {
-  if (!current || expectedEpoch !== epoch || synchronizing === expectedEpoch) return;
+  if (!current || expectedEpoch !== epoch || synchronizing === expectedEpoch || submitting) return false;
   synchronizing = expectedEpoch;
+  const read = new AbortController();
+  activeStateRead = read;
   try {
-    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state");
+    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state", { signal: read.signal });
     if (expectedEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在工作" : "会话已同步");
-    setConnection(realtimeConnected ? "已连接 · 会话状态已同步" : "会话已连接 · 自动同步中", "good");
+    setConnection(realtimeConnected ? "已连接 · 会话状态已同步" : "Pi 会话已连接 · 稳定同步模式", "good");
+    await reconcileCommand(current.id, read.signal);
+    return true;
   } catch (err) {
-    if (expectedEpoch === epoch) setConnection("同步失败，等待重新连接：" + err.message, "bad");
-  } finally { if (synchronizing === expectedEpoch) synchronizing = null; }
+    if (expectedEpoch === epoch && !read.signal.aborted) setConnection("网络请求失败，正在自动重试：" + err.message, "bad");
+    return false;
+  } finally {
+    if (activeStateRead === read) activeStateRead = null;
+    if (synchronizing === expectedEpoch) synchronizing = null;
+  }
 }
 function scheduleSync(delay = 280) {
   clearTimeout(syncTimer);
@@ -257,8 +291,10 @@ function attachStream(id, since, expectedEpoch) {
     source.close();
     stream = null;
     realtimeConnected = false;
-    startPolling(expectedEpoch);
-    retryRecovery(expectedEpoch);
+    // Latch to short requests instead of endlessly retrying a stalled stream.
+    pollingOnly = true;
+    clearTimeout(reconnectTimer);
+    startPolling(expectedEpoch, true);
   };
   const watch = delay => {
     clearTimeout(streamWatchdog);
@@ -288,14 +324,22 @@ function attachStream(id, since, expectedEpoch) {
   // Safari/VPN proxies can stall SSE without firing onerror.
   watch(8000);
 }
-async function reconcileCommand(id) {
+async function reconcileCommand(id, signal) {
   const pending = memory.pending(id);
   if (!pending) return;
   try {
-    const receipt = await api("/api/commands/" + encodeURIComponent(pending.id));
+    const receipt = await api("/api/commands/" + encodeURIComponent(pending.id), signal ? { signal } : {});
+    if (memory.pending(id)?.id !== pending.id) return;
     if (receipt.status === "accepted") {
+      if (current?.id === id && await messageFingerprint(promptBox.value) === pending.fingerprint) {
+        promptBox.value = "";
+      }
+      if (memory.pending(id)?.id !== pending.id) return;
       memory.pending(id, null);
-      if (current?.id === id) pendingCommand = null;
+      if (current?.id === id) {
+        pendingCommand = null;
+        setActivity("上次命令已确认接收");
+      }
     } else if (current?.id === id) {
       setActivity("上次命令状态未确认；请检查会话，命令不会自动重发");
     }
@@ -304,11 +348,11 @@ async function reconcileCommand(id) {
 async function recoverSession() {
   if (!current) { if (!appView.hidden) await bootstrap(); return; }
   const session = current;
-  const wasPolling = pollTimer !== null;
   const thisEpoch = ++epoch;
   clearTimeout(reconnectTimer);
   clearTimeout(syncTimer);
   clearRealtimeTimers();
+  pauseStateReads();
   if (stream) { stream.close(); stream = null; }
   try {
     // Restore completed messages and the authoritative in-flight assistant snapshot.
@@ -316,9 +360,7 @@ async function recoverSession() {
     if (thisEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在运行" : "会话已恢复");
-    setConnection("Pi 会话已连接 · 正在建立实时连接…", "good");
-    attachStream(session.id, data.cursor, thisEpoch);
-    if (wasPolling) startPolling(thisEpoch);
+    connectTransport(session.id, data.cursor, thisEpoch);
     await reconcileCommand(session.id);
   } catch (err) {
     if (thisEpoch !== epoch) return;
@@ -336,6 +378,7 @@ async function openSession(session) {
   clearTimeout(syncTimer);
   promptBox.value = "";
   clearRealtimeTimers();
+  pauseStateReads();
   if (stream) { stream.close(); stream = null; }
   sidebar.classList.remove("open");
   renderSessions();
@@ -351,8 +394,7 @@ async function openSession(session) {
     if (thisEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在运行" : "准备就绪");
-    setConnection("Pi 会话已连接 · 正在建立实时连接…", "good");
-    attachStream(session.id, data.cursor, thisEpoch);
+    connectTransport(session.id, data.cursor, thisEpoch);
     await reconcileCommand(session.id);
   } catch (err) {
     if (thisEpoch === epoch) {
@@ -384,6 +426,7 @@ $("composer").addEventListener("submit", async event => {
   const message = promptBox.value;
   if (!message.trim()) return;
   submitting = true;
+  pauseStateReads();
   $("send").disabled = true;
   setActivity("提交命令中…");
   try {
@@ -414,7 +457,11 @@ $("composer").addEventListener("submit", async event => {
       setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
       setConnection("命令状态：" + err.message, "bad");
     }
-  } finally { submitting = false; $("send").disabled = !current; }
+  } finally {
+    submitting = false;
+    $("send").disabled = !current;
+    if (current && pollingOnly) startPolling(epoch);
+  }
 });
 promptBox.addEventListener("keydown", event => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -425,12 +472,14 @@ promptBox.addEventListener("keydown", event => {
 $("stop").addEventListener("click", async () => {
   if (!current) return;
   try {
+    pauseStateReads();
     await api("/api/sessions/" + encodeURIComponent(current.id) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "abort" })
     });
     setActivity("已发送停止请求");
   } catch (err) { setActivity("停止失败：" + err.message); }
+  finally { if (current && pollingOnly) startPolling(epoch); }
 });
 $("refreshSessions").addEventListener("click", () => void loadSessions());
 $("syncButton").addEventListener("click", () => scheduleSync(0));
