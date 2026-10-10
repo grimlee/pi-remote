@@ -17,7 +17,8 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
       scrollHeight: 0, scrollTop: 0, clientHeight: 0,
       classList: { add() {}, remove() {} },
       addEventListener(type, fn) { this.handlers[type] = fn; },
-      append(...items) { this.children.push(...items); },
+      append(...items) { this.children.push(...items); for (const item of items) item.parentElement = this; },
+      remove() { const items=this.parentElement?.children; if(items) items.splice(items.indexOf(this),1); },
       replaceChildren(...items) { this.children = items; },
     });
     return nodes.get(id);
@@ -25,8 +26,9 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
   const session = { id: 'browser-session-1234', name: 'Disposable test', cwd: '/tmp/test' };
   const streams = [];
   const calls = [];
-  const window = { localStorage: saved, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
-  const document = { hidden: false, handlers: {}, getElementById: element,
+  const window = { localStorage: saved, innerHeight:844, visualViewport:browserOptions.visualViewport, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
+  const properties = new Map();
+  const document = { hidden: false, handlers: {}, documentElement:{style:{setProperty:(k,v)=>properties.set(k,v),getPropertyValue:k=>properties.get(k)}}, getElementById: element,
     createElement: () => element(Math.random()), createDocumentFragment: () => element(Math.random()),
     addEventListener(k, fn) { this.handlers[k] = fn; } };
   class EventSource {
@@ -358,4 +360,37 @@ test('message copy reads the current full message text', async () => {
   copy.handlers.click();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(clipboardText, 'copy this message');
+});
+
+
+test('authoritative snapshots remove stale live text when it disappears without transcript changes', async () => {
+  const saved=storage();new RecoveryMemory(saved).selected('browser-session-1234');
+  const b=await browser(saved, async url=>url.endsWith('/state')?{
+    status:200,ok:true,json:async()=>({messages:[],busy:true,liveMessage:{role:'assistant',content:[{type:'text',text:'partial reply'}]}})
+  }:null,{navigator:{userAgent:'iPhone'}});
+  const before=b.element('messages').children.length;
+  vm.runInContext('renderSnapshot({messages:[],busy:false,liveMessage:null})',b.context);
+  assert.equal(vm.runInContext('liveText',b.context),'');
+  assert.equal(b.element('messages').children.length,before-1);
+  vm.runInContext('renderSnapshot({messages:[],busy:true,liveMessage:{role:"assistant",content:[{type:"text",text:"next partial"}]}})',b.context);
+  vm.runInContext('renderSnapshot({messages:[],busy:true,liveMessage:null})',b.context);
+  assert.equal(vm.runInContext('liveText',b.context),'');
+  assert.equal(b.element('messages').children.length,before-1);
+});
+
+test('visual viewport shrink updates shell height and keeps the composer bounded', async () => {
+  const viewport={height:844,handlers:{},addEventListener(k,fn){this.handlers[k]=fn;}};
+  const b=await browser(storage(),null,{visualViewport:viewport});
+  const prompt=b.element('prompt');prompt.style={};prompt.scrollHeight=450;
+  assert.equal(b.document.documentElement.style.getPropertyValue('--app-height'),'844px');
+  viewport.height=380;viewport.handlers.resize();
+  assert.equal(b.document.documentElement.style.getPropertyValue('--app-height'),'380px');
+  assert.ok(parseFloat(prompt.style.height)<=380*.28);
+});
+
+test('jump-to-latest position follows the expanded composer height', async () => {
+  const b=await browser();b.element('prompt').style={};b.element('prompt').scrollHeight=190;
+  b.element('composer').getBoundingClientRect=()=>({height:250});
+  vm.runInContext('resizeComposer()',b.context);
+  assert.equal(b.document.documentElement.style.getPropertyValue('--composer-height'),'250px');
 });

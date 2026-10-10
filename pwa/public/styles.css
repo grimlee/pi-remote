@@ -74,3 +74,7 @@
   .jump-latest{background:#fff;color:#335776;border-color:#dae6ef;box-shadow:0 6px 22px #203b5918}
 }
 @media(prefers-reduced-motion:reduce){.sidebar,.workspace-toggle::before{transition:none}}
+
+/* Match Safari keyboard viewport and keep the history control above the composer. */
+.shell{height:var(--app-height,100dvh)}
+.jump-latest{bottom:calc(var(--composer-height,127px) + 16px)}

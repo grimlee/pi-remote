@@ -13,6 +13,8 @@ export function stateDir() {
 export class Authentication {
   constructor(options = {}) {
     this.dir = options.dir || stateDir();
+    this.cookieName = options.cookieName || process.env.PI_REMOTE_PWA_COOKIE_NAME || "pr_session";
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(this.cookieName)) throw new Error("Invalid PWA cookie name");
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const pathname = path.join(this.dir, "access-token");
     this.token = options.token || process.env.PI_REMOTE_PWA_TOKEN;
@@ -45,7 +47,7 @@ export class Authentication {
     return entry.count <= 8;
   }
   isAuthorized(req) {
-    const match = /(?:^|;\s*)pr_session=([^;]+)/.exec(req.headers.cookie || "");
+    const match = new RegExp("(?:^|;\\s*)" + this.cookieName + "=([^;]+)").exec(req.headers.cookie || "");
     if (!match) return false;
     const value = match[1];
     if (typeof value !== "string" || value.length !== this.cookieValue.length) return false;
@@ -58,7 +60,7 @@ export class Authentication {
     const protocol = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
     const local = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host);
     const secure = protocol === "https" || !local;
-    return "pr_session=" + this.cookieValue
+    return this.cookieName + "=" + this.cookieValue
       + "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
       + (secure ? "; Secure" : "");
   }

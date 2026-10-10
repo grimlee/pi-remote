@@ -17,6 +17,7 @@ let stream = null;
 let epoch = 0;
 let liveText = "";
 let liveNode = null;
+let liveBlock = null;
 let syncTimer = null;
 let pendingCommand = null;
 let synchronizing = null;
@@ -248,9 +249,16 @@ function setSidebarOpen(open) {
 }
 function resizeComposer() {
   if (!promptBox.style) return;
-  const maxHeight = Math.min(190, (window.innerHeight || 760) * 0.28);
+  const maxHeight = Math.min(190, (window.visualViewport?.height || window.innerHeight || 760) * 0.28);
   promptBox.style.height = "auto";
   promptBox.style.height = Math.min(Math.max(promptBox.scrollHeight, 50), maxHeight) + "px";
+  const height = $("composer").getBoundingClientRect?.().height;
+  if (height > 0) document.documentElement.style.setProperty("--composer-height", height + "px");
+}
+function syncViewport() {
+  const height = window.visualViewport?.height || window.innerHeight;
+  if (height > 0) document.documentElement.style.setProperty("--app-height", height + "px");
+  resizeComposer();
 }
 async function copyMessage(text) {
   try {
@@ -314,6 +322,7 @@ function renderMessages(messages) {
   }
   messagesView.replaceChildren(fragment);
   liveNode = null;
+  liveBlock = null;
   liveText = "";
   if (nearBottom) scrollBottom();
   else updateJumpButton();
@@ -324,6 +333,7 @@ function setLiveText(text) {
   if (!liveNode) {
     const item = makeMessage("assistant", "");
     liveNode = item.body;
+    liveBlock = item.block;
     messagesView.append(item.block);
   }
   liveText = text;
@@ -337,7 +347,14 @@ function appendLive(delta) {
 function renderSnapshot(data) {
   agentBusy = !!data.busy;
   renderMessages(data.messages);
-  if (data.busy && data.liveMessage) setLiveText(textContentOf(data.liveMessage));
+  const text = data.busy && data.liveMessage ? textContentOf(data.liveMessage) : "";
+  if (text) setLiveText(text);
+  else if (liveNode) {
+    liveBlock?.remove();
+    liveBlock = liveNode = null;
+    liveText = "";
+    updateJumpButton();
+  }
 }
 async function syncState(expectedEpoch = epoch) {
   if (!current || expectedEpoch !== epoch || synchronizing === expectedEpoch || submitting) return false;
@@ -608,6 +625,9 @@ promptBox.addEventListener("input", resizeComposer);
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") setSidebarOpen(false);
 });
+window.addEventListener("resize", syncViewport);
+window.visualViewport?.addEventListener("resize", syncViewport);
+syncViewport();
 window.addEventListener("online", () => void recoverSession());
 window.addEventListener("pageshow", event => { if (event.persisted) void recoverSession(); });
 document.addEventListener("visibilitychange", () => {
