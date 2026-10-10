@@ -218,6 +218,8 @@ test('built static host serves only hashed program assets and rejects Agent, key
   const base='http://127.0.0.1:'+web.address().port;
   const home=await fetch(base); assert.match(await home.text(),/一次性设备配对码/);
   assert.match(home.headers.get('content-security-policy'),/worker-src 'self'/);
+  assert.equal((await fetch(base+'/recover.html')).status,200);
+  assert.match(await (await fetch(base+'/recover.mjs')).text(),/pi-remote-tailcat-shell-/);
   for(const target of ['/api/sessions','/browser-authority.json','/admin.sock','/?token=secret']) assert.equal((await fetch(base+target)).status,404);
   assert.equal((await fetch(base,{method:'POST',body:'secret'})).status,405);
   assert.equal((await fetch(base+'/main.wasm.gz')).headers.get('content-encoding'),null);

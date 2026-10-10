@@ -232,6 +232,9 @@ self.onmessage = event => {
   const message = event.data;
   if (message.type === 'ack') { acknowledgements.delete(message.id); return; }
   if (message.type === 'suspend') { suspended = true; drop(fail(503, 'page_suspended'), false, false); return; }
+  // Apply lifecycle order before awaiting boot: a later suspend must win over
+  // an earlier resume that is still waiting for WASM/IndexedDB initialization.
+  if (message.type === 'resume') suspended = false;
   if (message.type === 'cancel') {
     const id = message.id;
     cancelled.add(id);
@@ -241,7 +244,7 @@ self.onmessage = event => {
   }
   const run = async () => {
     if (message.type === 'pair') return pair(message.text, message.origin);
-    if (message.type === 'resume') { await booted; suspended = false; if (!config) return {configured: false}; if (message.force && ready) drop(fail(503, 'foreground_reconnect'), false, false); await connect(); return {configured: true}; }
+    if (message.type === 'resume') { await booted; if (suspended) throw fail(503, 'page_suspended'); if (!config) return {configured: false}; if (message.force && ready) drop(fail(503, 'foreground_reconnect'), false, false); await connect(); return {configured: true}; }
     if (message.type === 'request') return request(message.op, message.args, message.id);
     if (message.type === 'subscribe') {
       subscriptions.set(message.id, {sessionId: message.sessionId, since: message.since});

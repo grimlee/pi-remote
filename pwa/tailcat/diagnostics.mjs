@@ -32,5 +32,6 @@ download.onclick = () => {
 };
 details.append(summary, reconnect, download, output);
 document.body.prepend(details);
-transport.onDiagnostics = render;
+const previous = transport.onDiagnostics;
+transport.onDiagnostics = value => { previous?.(value); render(); };
 render();

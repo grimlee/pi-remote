@@ -7,7 +7,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 export async function buildStatic(wasmDir, output, {mock = false} = {}) {
   await mkdir(output, {recursive: true});
   const shell = ['app.js', 'recovery.js', 'styles.css', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'];
-  const bridge = ['entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs', 'diagnostics.mjs'];
+  const bridge = ['entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs', 'diagnostics.mjs', 'recover.html', 'recover.mjs'];
   const wasm = ['wasm_exec.js', 'main.wasm.gz', 'TAILCAT-LICENSE'];
   for (const file of shell) await cp(path.join(root, '../public', file), path.join(output, file));
   for (const file of bridge) await cp(path.join(root, file), path.join(output, file));
@@ -19,6 +19,9 @@ export async function buildStatic(wasmDir, output, {mock = false} = {}) {
     .replace('Pi 运行在电脑上，手机只负责交互。', 'Phase A · Mock Pi 隔离测试');
   html = html.replace('src="/app.js"', 'src="/entry.mjs"').replace('PWA 登录密钥', '一次性设备配对码').replace('<input id="token" type="password" autocomplete="off" required placeholder="输入 Host 显示的登录密钥">', '<textarea id="token" rows="4" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required placeholder="粘贴 Host 私下提供的一次性配对码"></textarea>');
   html = html.replace('请通过可信的 HTTPS / Tailnet 地址访问。PWA 不需要 iOS 侧载签名。', '请核对 HTTPS 地址与 Host 配对码一致。配对码只粘贴在页面内，不放进网址；无须开启 Tailscale。');
+  html = html.replace('class="login-view" hidden', 'class="login-view"')
+    .replace('<button type="submit">连接 Host</button>', '<button type="submit" disabled>连接 Host</button>')
+    .replace('<p id="loginError"', '<p id="tailcatStartup" role="status">正在加载界面…</p><p><a href="/recover.html">恢复页面缓存（保留设备密钥）</a></p>\n      <p id="loginError"');
   html = html.replace('<button id="refreshSessions"', '<button id="newSession" class="soft" hidden>＋ 新会话</button>\n      <button id="refreshSessions"');
   html = html.replace('<button id="syncButton"', '<button id="renameSession" class="ghost" hidden>改名</button><button id="chooseModel" class="ghost" hidden>模型</button>\n        <button id="syncButton"');
   html = html.replace('<div id="connection"', '<div class="model-controls"><select id="modelPicker" aria-label="模型" hidden></select><button id="applyModel" type="button" hidden>使用模型</button></div>\n      <div id="connection"');
@@ -28,7 +31,7 @@ export async function buildStatic(wasmDir, output, {mock = false} = {}) {
   for (const name of files) manifest[name] = createHash('sha256').update(await readFile(path.join(output, name))).digest('hex');
   const version = createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
   const sw = `const CACHE = 'pi-remote-tailcat-shell-${version}';
-const FILES = ${JSON.stringify(['/', ...files.filter(f => f !== 'index.html').map(f => '/' + f)])};
+const FILES = ${JSON.stringify(['/', ...files.filter(f => f !== 'index.html' && !f.startsWith('recover.')).map(f => '/' + f)])};
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('pi-remote-tailcat-shell-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {

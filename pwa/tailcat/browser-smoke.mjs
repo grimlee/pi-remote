@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { createTailcatGateway } from './gateway.mjs';
 import { buildStatic } from './build.mjs';
 import { staticServer } from './static.mjs';
+import { verifyStartup } from './startup-checks.mjs';
 
 const [wasmDir, tailcatBin, kind='chromium', reconnects='2'] = process.argv.slice(2);
 if (!wasmDir || !tailcatBin) throw new Error('Usage: browser-smoke.mjs WASM_DIR TAILCAT_BINARY [chromium|webkit] [RECONNECT_COUNT]');
@@ -43,6 +44,7 @@ try {
     launch.env={...process.env,WEBKIT_EXEC_PATH:w+'/bin',WEBKIT_INJECTED_BUNDLE_PATH:w+'/lib',WEBKIT_INSPECTOR_RESOURCES_PATH:w+'/share',LD_LIBRARY_PATH:w+'/lib:'+w+'/sys/lib:'+process.env.PI_REMOTE_WEBKIT_COMPAT};
   }
   browser=await playwright[kind].launch(launch);
+  await verifyStartup(browser,origin);
   const page=await browser.newPage({viewport:{width:390,height:844}});
   const errors=[]; page.on('pageerror',e=>errors.push(e.message.replace(/tc[A-Za-z0-9_-]{20,}/g,'tc[REDACTED]')));
   const requests=[]; page.on('request',r=>requests.push(new URL(r.url()).pathname));
@@ -119,9 +121,24 @@ try {
   assert.equal(app.authority.state.devices.length,1);
   const after=await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'));
   assert.equal(after.messages.filter(m=>m.content?.[0]?.text==='long_test').length,1);
+  const storedIdentity = await page.evaluate(async()=>{
+    const {loadDevice}=await import('/identity.mjs');
+    localStorage.setItem('tailcat-regression-preserve','keep');
+    await caches.open('unrelated-cache-regression');
+    return (await loadDevice()).identity.id;
+  });
+  await page.goto(origin+'/recover.html');
+  await page.waitForURL('**/index.html');
+  await page.locator('#appView').waitFor({state:'visible',timeout:90000});
+  const restored=await page.evaluate(async()=>{
+    const {loadDevice}=await import('/identity.mjs');
+    return {id:(await loadDevice()).identity.id,local:localStorage.getItem('tailcat-regression-preserve'),unrelated:(await caches.keys()).includes('unrelated-cache-regression')};
+  });
+  assert.deepEqual(restored,{id:storedIdentity,local:'keep',unrelated:true});
+  assert.equal(app.authority.state.devices.length,1);
   assert.equal(requests.some(p=>p.startsWith('/api/')),false,'no API request to static origin');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
+  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,startupFailureVisible:true,backgroundDuringStartup:true,cacheRecoveryPreservesIdentity:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
 } finally {
   await browser?.close();
   if(sidecar&&!sidecar.killed){const closed=once(sidecar,'exit');sidecar.kill('SIGTERM');await closed;}

@@ -224,3 +224,14 @@ Phone acceptance remains manual: Safari and Home Screen pairing/key persistence,
 stream integrity, offline UI and revocation. Preserve the Echo experiment and
 all production services. Passing Mock acceptance is not permission to change the
 executable to real Pi: request a separate real-Agent authorization afterward.
+
+The Tailcat pairing shell is visible before JavaScript/WASM initialization.
+A failed UI-module load shows a recovery link rather than hiding both screens.
+Foreground/pageshow resumes an unpaired device to the unpaired state; lifecycle
+messages are applied before asynchronous boot so a later suspend wins.
+`/recover.html` is a static-only recovery entry outside the shell cache. It
+unregisters only this origin's root `/sw.js` and deletes only Tailcat program
+caches; IndexedDB keys, grants, localStorage and pending command IDs are retained.
+The browser smoke also checks module failure, lifecycle events while WASM is
+loading, and identity-preserving cache recovery in fresh browser contexts.
+These simulated desktop checks still require physical iPhone confirmation.

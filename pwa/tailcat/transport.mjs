@@ -3,6 +3,7 @@ export function createTransport() {
   const worker = new Worker(new URL('./worker.mjs', import.meta.url), {type: 'module'});
   const waiting = new Map(), streams = new Map();
   let connectedBefore = false;
+  let configured = false;
   const metrics = {wasmStartupMs: null, state: 'initializing', reason: null, attempts: 0, connections: 0, handshakesMs: [], recoveriesMs: [], readRequestMs: [], failedCalls: 0};
   let recoveryStarted;
   const transport = {onRecovered: null, onDiagnostics: null, diagnostics: () => structuredClone(metrics)};
@@ -21,20 +22,22 @@ export function createTransport() {
       };
       const timer = setTimeout(abort, 120000);
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
-      waiting.set(id, {resolve, reject, cleanup, started: performance.now(), read: value.type === 'request' && value.op !== 'command.dispatch'});
+      waiting.set(id, {resolve, reject, cleanup, type: value.type, started: performance.now(), read: value.type === 'request' && value.op !== 'command.dispatch'});
       signal?.addEventListener('abort', abort, {once: true});
       worker.postMessage({...value, id});
     });
   }
   worker.onmessage = ({data}) => {
     if (data.type === 'boot') {
-      metrics.wasmStartupMs = data.startupMs; metrics.state = data.configured ? 'offline' : 'unpaired'; report();
+      configured = data.configured;
+      metrics.wasmStartupMs = data.startupMs; metrics.state = document.hidden ? 'background' : configured ? 'offline' : 'unpaired'; report();
     } else if (data.type === 'dialing') {
       metrics.attempts++; metrics.state = 'connecting'; report();
     } else if (data.type === 'reply') {
       const pending = waiting.get(data.id);
       if (!pending) return;
       waiting.delete(data.id); pending.cleanup();
+      if (pending.type === 'resume' && data.value?.configured === false) { configured = false; metrics.state = document.hidden ? 'background' : 'unpaired'; metrics.reason = null; }
       if (data.error) { metrics.failedCalls++; pending.reject(Object.assign(new Error(data.error), {status: data.status, definitive: data.definitive})); }
       else { if (pending.read) { metrics.readRequestMs.push(Math.round(performance.now() - pending.started)); metrics.readRequestMs = metrics.readRequestMs.slice(-200); } pending.resolve(data.value); }
       report();
@@ -47,6 +50,7 @@ export function createTransport() {
       recoveryStarted ??= performance.now(); metrics.state = 'offline'; metrics.reason = data.reason; report();
       for (const source of [...streams.values()]) source.onerror?.();
     } else if (data.type === 'connected') {
+      configured = true;
       metrics.connections++; metrics.state = 'connected'; metrics.reason = null;
       metrics.handshakesMs.push(data.handshakeMs); metrics.handshakesMs = metrics.handshakesMs.slice(-200);
       if (recoveryStarted !== undefined) { metrics.recoveriesMs.push(Math.round(performance.now() - recoveryStarted)); metrics.recoveriesMs = metrics.recoveriesMs.slice(-200); recoveryStarted = undefined; }
@@ -113,12 +117,22 @@ export function createTransport() {
     void call({type: 'subscribe', id, sessionId, since}).then(() => { if (!closed) source.onopen?.(); }).catch(() => { if (!closed) source.onerror?.(); });
     return source;
   };
-  transport.reconnect = () => { recoveryStarted ??= performance.now(); return call({type: 'resume', force: true}); };
-  const resume = () => { void transport.reconnect().catch(() => {}); };
+  const resume = (force = false) => {
+    if (document.hidden) return Promise.resolve();
+    if (configured) recoveryStarted ??= performance.now();
+    if (metrics.state !== 'failed') { metrics.state = configured ? 'connecting' : metrics.wasmStartupMs === null ? 'initializing' : 'unpaired'; report(); }
+    return call({type: 'resume', force}).then(value => {
+      if (!document.hidden && value.configured && metrics.state !== 'failed') { metrics.state = 'connected'; report(); }
+      return value;
+    });
+  };
+  transport.reconnect = () => resume(true);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { recoveryStarted ??= performance.now(); metrics.state = 'background'; report(); worker.postMessage({type: 'suspend'}); } else resume();
+    if (document.hidden) { if (configured) recoveryStarted ??= performance.now(); metrics.state = 'background'; report(); worker.postMessage({type: 'suspend'}); } else void resume().catch(() => {});
   });
-  window.addEventListener('online', resume);
-  window.addEventListener('pageshow', event => { if (event.persisted) resume(); });
+  window.addEventListener('online', () => { void resume(true).catch(() => {}); });
+  window.addEventListener('pageshow', () => { void resume().catch(() => {}); });
+  window.addEventListener('focus', () => { if (metrics.state === 'background') void resume().catch(() => {}); });
+  if (document.hidden) worker.postMessage({type: 'suspend'});
   return transport;
 }
