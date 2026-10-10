@@ -19,7 +19,7 @@ let app, web, sidecar, browser;
 try {
   const sessionDir = path.join(temp, 'sessions'); await mkdir(sessionDir);
   await writeFile(path.join(sessionDir, 'session.jsonl'), JSON.stringify({type:'session',id:'session_test_12345',timestamp:'2026-10-10T00:00:00Z',cwd:temp})+'\n');
-  app = createTailcatGateway({stateDir:path.join(temp,'state'),sessionDir,executable:fileURLToPath(new URL('../test/fake-pi',import.meta.url))});
+  app = createTailcatGateway({stateDir:path.join(temp,'state'),sessionDir,workspaces:[temp],executable:fileURLToPath(new URL('../test/fake-pi',import.meta.url))});
   const sockets = new Set();
   app.server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
@@ -64,6 +64,17 @@ try {
     return {privateExtractable:identity.privateKey.extractable,wrappingExtractable:identity.wrappingKey.extractable,grant:config.grant.role};
   });
   assert.deepEqual(cryptoState,{privateExtractable:false,wrappingExtractable:false,grant:'owner'});
+  const diagnostics=await page.evaluate(()=>window.piRemoteTransport.diagnostics());
+  assert.ok(diagnostics.wasmStartupMs>0); assert.equal(diagnostics.state,'connected'); assert.ok(diagnostics.handshakesMs[0]>0);
+  const snapshot=app.service.snapshot.bind(app.service);
+  app.service.snapshot=async id=>{await new Promise(resolve=>setTimeout(resolve,500));return snapshot(id);};
+  const cancelled=await page.evaluate(async()=>{
+    const controller=new AbortController(); setTimeout(()=>controller.abort(),100);
+    try {await window.piRemoteTransport.api('/api/sessions/session_test_12345/state',{signal:controller.signal});return 0;}
+    catch(error){return error.status;}
+  });
+  assert.equal(cancelled,499); app.service.snapshot=snapshot;
+  await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'));
   const invalid = await page.evaluate(async () => {
     try {
       await window.piRemoteTransport.api('/api/sessions/session_test_12345/commands', {method:'POST',body:JSON.stringify({type:'prompt',commandId:crypto.randomUUID(),message:''})});
@@ -110,7 +121,7 @@ try {
   assert.equal(after.messages.filter(m=>m.content?.[0]?.text==='long_test').length,1);
   assert.equal(requests.some(p=>p.startsWith('/api/')),false,'no API request to static origin');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
+  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
 } finally {
   await browser?.close();
   if(sidecar&&!sidecar.killed){const closed=once(sidecar,'exit');sidecar.kill('SIGTERM');await closed;}

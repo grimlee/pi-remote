@@ -119,6 +119,7 @@ export class PiRunner {
     this.session = session;
     this.executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
     this.sessionDir = options.sessionDir;
+    this.strictCwd = options.strictCwd === true;
     this.pending = new Map();
     this.listeners = new Set();
     this.events = [];
@@ -140,7 +141,8 @@ export class PiRunner {
     let cwd = process.cwd();
     try {
       if ((await stat(this.session.cwd)).isDirectory()) cwd = this.session.cwd;
-    } catch {}
+      else if (this.strictCwd) throw new Error('Workspace unavailable');
+    } catch (error) { if (this.strictCwd) throw error; }
     if (this.dead) throw new Error("Pi RPC is stopped");
     const args = ["--mode", "rpc", ...(this.session.file ? ["--session", this.session.file] : []), ...(this.sessionDir ? ["--session-dir", this.sessionDir] : [])];
     this.child = spawn(this.executable, args, {

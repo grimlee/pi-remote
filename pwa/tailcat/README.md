@@ -84,7 +84,19 @@ The client maps pairing/login, list/create/rename, models, prompt, abort, state,
 receipts and subscriptions. New empty sessions are seeded with Pi's documented
 v3 header/name metadata because current Pi delays persisting new empty sessions
 until an assistant turn. Execution stays entirely in the existing RPC runner.
-Only Host-configured or already discovered workspaces may be used for creation.
+The Tailcat adapter requires an explicit absolute executable and canonical
+workspace allowlist. It never falls back to the system `pi`. Session headers
+cannot expand the allowlist; sessions outside it, path traversal and files
+replaced by symlinks outside the session root are rejected before starting RPC.
+The existing HTTPS adapter retains its previous workspace policy.
+
+The Tailcat page has a local diagnostics panel with WASM startup, handshake,
+recovery and read-request samples (last 200 per category), p50/p95, connection
+attempts and a force-reconnect button. Its downloadable JSON contains no host
+address, invitation, device/session identifiers, keys or conversation data.
+Safari may not expose memory statistics; available JS heap figures exclude
+Worker/WASM and process memory. Samples reset on page reload. Attempt counters
+include attempts still in progress; they are not a final success-rate claim.
 
 ## Build static artifacts
 
@@ -116,7 +128,7 @@ session directories or reuse native Tailcat private keys.
 PI_REMOTE_BROWSER_STATE_DIR=/absolute/private/browser-test/state \
 PI_REMOTE_BROWSER_SESSION_DIR=/absolute/private/browser-test/sessions \
 PI_REMOTE_BROWSER_WORKSPACES='["/absolute/disposable/workspace"]' \
-PI_REMOTE_BROWSER_PI_COMMAND=/absolute/path/to/pi \
+PI_REMOTE_BROWSER_PI_COMMAND=/absolute/path/to/reviewed-mock-launcher \
 node pwa/tailcat/gateway.mjs
 ```
 
@@ -175,3 +187,40 @@ latency, at least 20 reconnects, completion rate and whole-process memory agains
 the unchanged Tailscale baseline. Desktop/CI passes are not this acceptance.
 Preserve the original Echo test during that process and do not merge this Draft
 PR or replace working PWA/native services based only on CI.
+
+## Phase A: physical iPhone with Mock Pi only
+
+A Phase A deployment must explicitly select `pwa/test/fake-pi` through a reviewed
+launcher, use fresh state/session/workspace directories and start under a minimal
+environment. `PI_REMOTE_TEST_PERSIST=1` enables mock transcript persistence across
+Gateway restarts; `PI_REMOTE_TEST_AUDIT` records only RPC IDs/types and prompt
+hashes, never prompt contents. Mock Pi has no provider or tool execution path.
+On Linux, a separate network and mount namespace can additionally prevent the
+Mock from reaching providers or reading production credentials/sessions.
+Verify the running process environment, namespace and actual RPC responses.
+Do not treat an environment file as proof of isolation.
+
+Build with `node pwa/tailcat/build.mjs WASM_DIR OUTPUT --mock` to identify the page
+as a Mock test. Keep private runtime state outside OUTPUT. Use a dedicated HTTPS
+origin. A TryCloudflare Quick Tunnel is acceptable only for this temporary test:
+its hostname can change on restart and existing grants then require new pairing.
+Restarting `tailcat serve --key=new` also changes its address; to simulate an
+outage without replacing its identity, suspend/resume only the isolated test
+sidecar. Do not suspend the production sidecar.
+
+The Gateway CLI probes a leftover local admin socket after an unclean stop. It
+removes only an owned, unchanged Unix socket that refuses connections; it refuses
+an active socket or ordinary file. The signing identity and grants remain in
+browser-authority.json. Graceful shutdown still removes the admin socket.
+
+Only mint the five-minute phone invitation once services, static assets and
+acceptance checks are ready. Paste privately obtained text in the page; do not
+send a QR containing pairing text to a web search or online QR decoder. The
+current page intentionally disables camera permission; local QR generation is
+for a trusted offline decoder/copy workflow.
+
+Phone acceptance remains manual: Safari and Home Screen pairing/key persistence,
+1–10 minute lock/background, Wi-Fi↔5G switching, at least 20 reconnects, long_test
+stream integrity, offline UI and revocation. Preserve the Echo experiment and
+all production services. Passing Mock acceptance is not permission to change the
+executable to real Pi: request a separate real-Agent authorization afterward.

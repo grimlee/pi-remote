@@ -4,15 +4,19 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-export async function buildStatic(wasmDir, output) {
+export async function buildStatic(wasmDir, output, {mock = false} = {}) {
   await mkdir(output, {recursive: true});
   const shell = ['app.js', 'recovery.js', 'styles.css', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'];
-  const bridge = ['entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs'];
+  const bridge = ['entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs', 'diagnostics.mjs'];
   const wasm = ['wasm_exec.js', 'main.wasm.gz', 'TAILCAT-LICENSE'];
   for (const file of shell) await cp(path.join(root, '../public', file), path.join(output, file));
   for (const file of bridge) await cp(path.join(root, file), path.join(output, file));
   for (const file of wasm) await cp(path.join(wasmDir, file), path.join(output, file));
   let html = await readFile(path.join(root, '../public/index.html'), 'utf8');
+  if (mock) html = html.replace('<title>Pi Remote</title>', '<title>Pi Remote · Phase A Mock</title>')
+    .replace('<h1>Pi Remote</h1>', '<h1>Phase A · Mock Pi</h1>')
+    .replace('连接你自己的 Pi Agent。所有模型、文件和工具都留在 Host。', '隔离测试：只有 Mock Pi，没有真实模型、生产会话或 Shell 工具。')
+    .replace('Pi 运行在电脑上，手机只负责交互。', 'Phase A · Mock Pi 隔离测试');
   html = html.replace('src="/app.js"', 'src="/entry.mjs"').replace('PWA 登录密钥', '一次性设备配对码').replace('<input id="token" type="password" autocomplete="off" required placeholder="输入 Host 显示的登录密钥">', '<textarea id="token" rows="4" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required placeholder="粘贴 Host 私下提供的一次性配对码"></textarea>');
   html = html.replace('请通过可信的 HTTPS / Tailnet 地址访问。PWA 不需要 iOS 侧载签名。', '请核对 HTTPS 地址与 Host 配对码一致。配对码只粘贴在页面内，不放进网址；无须开启 Tailscale。');
   html = html.replace('<button id="refreshSessions"', '<button id="newSession" class="soft" hidden>＋ 新会话</button>\n      <button id="refreshSessions"');
@@ -39,7 +43,8 @@ self.addEventListener('fetch', e => {
   return {version, files: [...files, 'sw.js']};
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [wasm, output] = process.argv.slice(2);
+  const [wasm, output, mode] = process.argv.slice(2);
   if (!wasm || !output) throw new Error('Usage: build.mjs PINNED_WASM_DIRECTORY STATIC_OUTPUT_DIRECTORY');
-  console.log(JSON.stringify(await buildStatic(wasm, output)));
+  if (mode && mode !== '--mock') throw new Error('Optional build flag: --mock');
+  console.log(JSON.stringify(await buildStatic(wasm, output, {mock: mode === '--mock'})));
 }

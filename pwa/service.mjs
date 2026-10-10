@@ -1,6 +1,6 @@
 // Shared authoritative Pi RPC service for the private HTTPS and Tailcat adapters.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, statSync } from 'node:fs';
+import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, statSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { discoverSessions, publicSession, PiRunner, DEFAULT_SESSION_DIR } from './registry.mjs';
 import { CommandLedger, stateDir } from './security.mjs';
@@ -12,6 +12,13 @@ export class PiService {
     this.sessionRoot = options.sessionDir || DEFAULT_SESSION_DIR;
     this.executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || 'pi';
     this.workspaces = options.workspaces || [];
+    this.strictWorkspaces = options.strictWorkspaces === true;
+    if (this.strictWorkspaces) {
+      if (!path.isAbsolute(this.sessionRoot) || !Array.isArray(this.workspaces) || !this.workspaces.length) throw new Error('Explicit isolated session directory and workspace allowlist required');
+      mkdirSync(this.sessionRoot, {recursive: true, mode: 0o700});
+      this.sessionRoot = realpathSync(this.sessionRoot);
+      for (const cwd of this.workspaces) if (!path.isAbsolute(cwd) || realpathSync(cwd) !== cwd || !statSync(cwd).isDirectory()) throw new Error('Workspace must be an existing canonical absolute directory');
+    }
     this.runners = new Map();
     this.temporaryRunners = new Set();
     this.records = new Map();
@@ -20,10 +27,19 @@ export class PiService {
   }
   async refreshSessions(limit = 10000) {
     if (this.closed) throw fault(503, 'service_closed');
-    const list = await discoverSessions(this.sessionRoot, limit);
+    const discovered = await discoverSessions(this.sessionRoot, limit);
+    const list = this.strictWorkspaces ? discovered.filter(s => this.allowedRecord(s)) : discovered;
     if (this.closed) throw fault(503, 'service_closed');
     this.records = new Map(list.map(s => [s.id, s]));
     return list;
+  }
+  allowedRecord(session) {
+    try {
+      const file = realpathSync(session.file);
+      const relative = path.relative(this.sessionRoot, file);
+      return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
+        && this.workspaces.includes(session.cwd) && realpathSync(session.cwd) === session.cwd && statSync(session.cwd).isDirectory();
+    } catch { return false; }
   }
   async runnerFor(id) {
     if (this.closed) throw fault(503, 'service_closed');
@@ -31,6 +47,7 @@ export class PiService {
     let session = this.records.get(id);
     if (!session) { await this.refreshSessions(); session = this.records.get(id); }
     if (!session) throw fault(404, 'session_not_found');
+    if (this.strictWorkspaces && !this.allowedRecord(session)) throw fault(403, 'workspace_not_allowed');
     let runner = this.runners.get(id);
     if (runner && runner.session.generation !== session.generation) {
       runner.stop(); this.runners.delete(id); runner = null;
@@ -38,7 +55,7 @@ export class PiService {
     if (!runner || runner.dead) {
       this.makeRoom();
       runner = new PiRunner(session, {
-        executable: this.executable, sessionDir: this.sessionRoot,
+        executable: this.executable, sessionDir: this.sessionRoot, strictCwd: this.strictWorkspaces,
         onClosed: closed => { if (this.runners.get(id) === closed) this.runners.delete(id); }
       });
       this.runners.set(id, runner);
@@ -56,7 +73,7 @@ export class PiService {
   async list({offset = 0, limit = 100} = {}) {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw fault(400, 'invalid_page');
     const list = await this.refreshSessions();
-    return {sessions: list.slice(offset, offset + limit).map(publicSession), next: offset + limit < list.length ? offset + limit : null};
+    return {sessions: list.slice(offset, offset + limit).map(publicSession), next: offset + limit < list.length ? offset + limit : null, ...(this.strictWorkspaces ? {workspaces: this.workspaces} : {})};
   }
   async snapshot(id) { return (await this.runnerFor(id)).snapshot(); }
   receipt(id) {
@@ -77,9 +94,9 @@ export class PiService {
       values = {name: body.name.trim()}; rpc = 'set_session_name';
       if (body.type === 'create') {
         await this.refreshSessions();
-        const allowed = new Set([...this.workspaces, ...[...this.records.values()].map(s => s.cwd)]);
+        const allowed = new Set(this.strictWorkspaces ? this.workspaces : [...this.workspaces, ...[...this.records.values()].map(s => s.cwd)]);
         if (!allowed.has(body.cwd)) throw fault(403, 'workspace_not_allowed');
-        try { if (!statSync(body.cwd).isDirectory()) throw new Error(); }
+        try { if (!statSync(body.cwd).isDirectory() || (this.strictWorkspaces && realpathSync(body.cwd) !== body.cwd)) throw new Error(); }
         catch { throw fault(404, 'workspace_unavailable'); }
         values.cwd = body.cwd;
       }
@@ -122,7 +139,7 @@ export class PiService {
         } finally { closeSync(fd); }
         const dir = openSync(this.sessionRoot, 'r');
         try { fsyncSync(dir); } finally { closeSync(dir); }
-        runner = new PiRunner({cwd: values.cwd, file}, {executable: this.executable, sessionDir: this.sessionRoot});
+        runner = new PiRunner({cwd: values.cwd, file}, {executable: this.executable, sessionDir: this.sessionRoot, strictCwd: this.strictWorkspaces});
         this.temporaryRunners.add(runner);
         await runner.start();
       }

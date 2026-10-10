@@ -3,7 +3,10 @@ export function createTransport() {
   const worker = new Worker(new URL('./worker.mjs', import.meta.url), {type: 'module'});
   const waiting = new Map(), streams = new Map();
   let connectedBefore = false;
-  const transport = {onRecovered: null};
+  const metrics = {wasmStartupMs: null, state: 'initializing', reason: null, attempts: 0, connections: 0, handshakesMs: [], recoveriesMs: [], readRequestMs: [], failedCalls: 0};
+  let recoveryStarted;
+  const transport = {onRecovered: null, onDiagnostics: null, diagnostics: () => structuredClone(metrics)};
+  const report = () => transport.onDiagnostics?.(transport.diagnostics());
   function call(value, signal) {
     if (waiting.size >= 8) return Promise.reject(Object.assign(new Error('请求队列已满'), {status: 429}));
     if (signal?.aborted) return Promise.reject(Object.assign(new Error('request_cancelled'), {status: 499}));
@@ -18,34 +21,46 @@ export function createTransport() {
       };
       const timer = setTimeout(abort, 120000);
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
-      waiting.set(id, {resolve, reject, cleanup});
+      waiting.set(id, {resolve, reject, cleanup, started: performance.now(), read: value.type === 'request' && value.op !== 'command.dispatch'});
       signal?.addEventListener('abort', abort, {once: true});
       worker.postMessage({...value, id});
     });
   }
   worker.onmessage = ({data}) => {
-    if (data.type === 'reply') {
+    if (data.type === 'boot') {
+      metrics.wasmStartupMs = data.startupMs; metrics.state = data.configured ? 'offline' : 'unpaired'; report();
+    } else if (data.type === 'dialing') {
+      metrics.attempts++; metrics.state = 'connecting'; report();
+    } else if (data.type === 'reply') {
       const pending = waiting.get(data.id);
       if (!pending) return;
       waiting.delete(data.id); pending.cleanup();
-      if (data.error) pending.reject(Object.assign(new Error(data.error), {status: data.status, definitive: data.definitive}));
-      else pending.resolve(data.value);
+      if (data.error) { metrics.failedCalls++; pending.reject(Object.assign(new Error(data.error), {status: data.status, definitive: data.definitive})); }
+      else { if (pending.read) { metrics.readRequestMs.push(Math.round(performance.now() - pending.started)); metrics.readRequestMs = metrics.readRequestMs.slice(-200); } pending.resolve(data.value); }
+      report();
     } else if (data.type === 'event') {
       try { streams.get(data.subscription)?.emit(data.event.type, {data: JSON.stringify(data.event.data), lastEventId: String(data.event.id)}); }
       finally { worker.postMessage({type: 'ack', id: data.id}); }
     } else if (data.type === 'pulse') {
       for (const source of streams.values()) source.emit('ping', {data: '{}'});
     } else if (data.type === 'disconnected') {
+      recoveryStarted ??= performance.now(); metrics.state = 'offline'; metrics.reason = data.reason; report();
       for (const source of [...streams.values()]) source.onerror?.();
     } else if (data.type === 'connected') {
+      metrics.connections++; metrics.state = 'connected'; metrics.reason = null;
+      metrics.handshakesMs.push(data.handshakeMs); metrics.handshakesMs = metrics.handshakesMs.slice(-200);
+      if (recoveryStarted !== undefined) { metrics.recoveriesMs.push(Math.round(performance.now() - recoveryStarted)); metrics.recoveriesMs = metrics.recoveriesMs.slice(-200); recoveryStarted = undefined; }
+      report();
       if (connectedBefore) transport.onRecovered?.();
       connectedBefore = true;
     } else if (data.type === 'fatal') {
+      metrics.state = 'failed'; metrics.reason = data.error; report();
       for (const pending of waiting.values()) { pending.cleanup(); pending.reject(Object.assign(new Error(data.error), {status: data.status})); }
       waiting.clear();
     }
   };
   worker.onerror = () => {
+    metrics.state = 'failed'; metrics.reason = 'worker_stopped'; report();
     for (const pending of waiting.values()) { pending.cleanup(); pending.reject(Object.assign(new Error('浏览器连接进程已停止，请重新加载'), {status: 503})); }
     waiting.clear();
   };
@@ -98,9 +113,10 @@ export function createTransport() {
     void call({type: 'subscribe', id, sessionId, since}).then(() => { if (!closed) source.onopen?.(); }).catch(() => { if (!closed) source.onerror?.(); });
     return source;
   };
-  const resume = () => { void call({type: 'resume', force: true}).catch(() => {}); };
+  transport.reconnect = () => { recoveryStarted ??= performance.now(); return call({type: 'resume', force: true}); };
+  const resume = () => { void transport.reconnect().catch(() => {}); };
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) worker.postMessage({type: 'suspend'}); else resume();
+    if (document.hidden) { recoveryStarted ??= performance.now(); metrics.state = 'background'; report(); worker.postMessage({type: 'suspend'}); } else resume();
   });
   window.addEventListener('online', resume);
   window.addEventListener('pageshow', event => { if (event.persisted) resume(); });

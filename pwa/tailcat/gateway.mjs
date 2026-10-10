@@ -1,5 +1,5 @@
-import { createServer } from 'node:net';
-import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { createServer, connect } from 'node:net';
+import { chmodSync, existsSync, unlinkSync, lstatSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { PiService, fault } from '../service.mjs';
@@ -7,10 +7,29 @@ import { DeviceAuthority, validSignature } from './authorization.mjs';
 import { VERSION, Framer, frame, proof, MAX_RESULT, CHUNK, MAX_PENDING } from './protocol.mjs';
 
 // This adapter never accepts HTTP, shell commands, arbitrary RPC or proxy routes.
+export async function prepareAdminSocket(stateDir) {
+  const file = path.join(stateDir, 'admin.sock');
+  if (!existsSync(file)) return;
+  const entry = lstatSync(file);
+  if (!entry.isSocket() || entry.uid !== process.getuid()) throw new Error('Refuse to replace non-owned admin socket');
+  const active = await new Promise((resolve, reject) => {
+    const socket = connect(file);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', error => { if (['ECONNREFUSED','ENOENT'].includes(error.code)) resolve(false); else reject(error); });
+    socket.setTimeout(1000, () => { socket.destroy(); reject(new Error('Admin socket liveness unknown')); });
+  });
+  if (active) throw new Error('Admin socket already active; refuse second gateway');
+  if (existsSync(file)) {
+    const current = lstatSync(file);
+    if (!current.isSocket() || current.ino !== entry.ino || current.uid !== entry.uid) throw new Error('Admin socket changed during probe');
+    unlinkSync(file);
+  }
+}
 export function createTailcatGateway(options) {
   if (!options?.stateDir || !options?.sessionDir) throw new Error('Isolated stateDir and sessionDir are required');
   const authority = options.authority || new DeviceAuthority(options.stateDir);
-  const service = options.service || new PiService(options);
+  if (!options.service && (!options.executable || !path.isAbsolute(options.executable))) throw new Error('Explicit absolute Pi executable required; no system pi fallback');
+  const service = options.service || new PiService({...options, strictWorkspaces: true});
   const peers = new Set();
   const server = createServer(socket => {
     if (peers.size >= 32) { socket.destroy(); return; }
@@ -184,6 +203,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (!stateDir || !sessionDir || !path.isAbsolute(sessionDir)) throw new Error('Explicit isolated browser state/session directories required');
   const port = Number(process.env.PI_REMOTE_BROWSER_PORT || 17987);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid isolated gateway port');
+  await prepareAdminSocket(stateDir);
   const app = createTailcatGateway({stateDir, sessionDir, executable: process.env.PI_REMOTE_BROWSER_PI_COMMAND, workspaces: process.env.PI_REMOTE_BROWSER_WORKSPACES ? JSON.parse(process.env.PI_REMOTE_BROWSER_WORKSPACES) : []});
   app.server.listen(port, '127.0.0.1', () => { app.listenAdmin(); console.log('Authenticated browser gateway listening on loopback port ' + port); });
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => void app.close().then(() => process.exit(0)));

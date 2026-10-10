@@ -37,7 +37,7 @@ function drop(error = fail(503, 'connection_lost'), reconnect = true, notify = t
   conn = null; hello = null; writeTail = Promise.resolve();
   for (const p of pending.values()) { clearTimeout(p.timer); p.reject(error); }
   pending.clear(); assembly.clear(); receivedBytes = 0; acknowledgements.clear();
-  if (notify) post({type: 'disconnected'});
+  if (notify) post({type: 'disconnected', reason: error.message});
   if (reconnect) schedule();
 }
 async function write(value, context = 'request') {
@@ -76,10 +76,17 @@ function complete(id, value, error) {
   if (error) entry.reject(error); else entry.resolve(value);
 }
 function receive(message) {
+  // The server may already have queued bytes when cancellation crosses the
+  // tunnel. Keep bounded cancellation tombstones and discard late frames;
+  // cancellation must not tear down other multiplexed requests.
+  if (cancelled.has(message.id)) {
+    const partial = assembly.get(message.id);
+    if (partial) { receivedBytes -= partial.bytes.length; assembly.delete(message.id); }
+    return;
+  }
   if (message.type === 'result.error') {
     const partial = assembly.get(message.id);
     if (partial) { receivedBytes -= partial.bytes.length; assembly.delete(message.id); }
-    cancelled.delete(message.id);
     const error = fail(message.status || 503, message.error || 'request_failed');
     error.definitive = [400, 403, 404, 413, 429].includes(message.status);
     complete(message.id, null, error); return;
@@ -111,6 +118,8 @@ function receive(message) {
   } else complete(message.id, value);
 }
 async function handshake(pairing) {
+  const started = performance.now();
+  post({type: 'dialing'});
   const activeEpoch = epoch;
   const candidate = await tailcatDial({addr: config.address, port: config.port, derpMapURL: 'https://tailcat.dev/derpmap.json'});
   if (activeEpoch !== epoch || suspended) { candidate.close(); throw fail(503, 'connection_cancelled'); }
@@ -145,7 +154,7 @@ async function handshake(pairing) {
   if (activeEpoch !== epoch) throw fail(503, 'connection_cancelled');
   ready = true; retries = 0;
   pingTimer = setInterval(() => { void request('ping', {}, undefined, 20000).then(() => post({type: 'pulse'})).catch(() => drop()); }, 15000);
-  post({type: 'connected'});
+  post({type: 'connected', handshakeMs: Math.round(performance.now() - started)});
   // Receipt reads are safe after reconnect; uncertain mutations are never sent
   // again. Keep IDs in the sealed IndexedDB record even if localStorage fails.
   void reconcilePending();

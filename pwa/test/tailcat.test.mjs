@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import { connect } from 'node:net';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { Framer, frame, proof, MAX_FRAME, MAX_RESULT, publicKey } from '../tailcat/protocol.mjs';
 import { DeviceAuthority, signed, validSignature } from '../tailcat/authorization.mjs';
 import { deviceIdentity, signValue, verifySigned } from '../tailcat/identity.mjs';
-import { createTailcatGateway } from '../tailcat/gateway.mjs';
+import { createTailcatGateway, prepareAdminSocket } from '../tailcat/gateway.mjs';
 import { buildStatic } from '../tailcat/build.mjs';
 import { staticServer } from '../tailcat/static.mjs';
 
@@ -231,4 +232,43 @@ test('shutdown during pending discovery cannot start a new Pi process or reserve
   assert.equal(f.app.service.runners.size,0);
   assert.equal(f.app.service.temporaryRunners.size,0);
   await assert.rejects(f.app.service.runnerFor('session_test_12345'),/service_closed/);
+});
+
+test('Tailcat refuses executable fallback and unconfigured workspaces',async t=>{
+  const f=await fixture(t);
+  assert.throws(()=>createTailcatGateway({stateDir:f.state,sessionDir:f.sessions,workspaces:[f.root]}),/Explicit absolute Pi executable/);
+  assert.throws(()=>createTailcatGateway({stateDir:f.state,sessionDir:f.sessions,executable:fakePi,workspaces:[]}),/workspace allowlist/);
+});
+test('Tailcat rejects session-header workspace escalation, traversal and symlink replacement',async t=>{
+  const f=await fixture(t); const {client}=await paired(t,f);
+  await writeFile(path.join(f.sessions,'escape.jsonl'),JSON.stringify({type:'session',id:'session_escape_12345',timestamp:new Date().toISOString(),cwd:'/'})+'\n');
+  const listed=await client.call('sessions.list');
+  assert.deepEqual(listed.workspaces,[f.root]); assert.equal(listed.sessions.length,1);
+  await assert.rejects(client.call('session.state',{sessionId:'session_escape_12345'}),/session_not_found/);
+  await assert.rejects(client.call('session.state',{sessionId:'../session.jsonl'}),/invalid_session/);
+  await assert.rejects(client.call('command.dispatch',{sessionId:'new_session',command:{type:'create',commandId:randomUUID(),cwd:'/',name:'escape'}}),/workspace_not_allowed/);
+  assert.equal(f.app.service.runners.size,0);
+  const outside=path.join(f.root,'outside.jsonl');
+  await writeFile(outside,JSON.stringify({type:'session',id:'session_test_12345',timestamp:new Date().toISOString(),cwd:f.root})+'\n');
+  await rm(path.join(f.sessions,'session.jsonl')); await symlink(outside,path.join(f.sessions,'session.jsonl'));
+  await assert.rejects(client.call('session.state',{sessionId:'session_test_12345'}),/workspace_not_allowed/);
+  assert.equal(f.app.service.runners.size,0);
+});
+test('invalid device signature cannot consume an invite or start RPC',async t=>{
+  const f=await fixture(t); const key=keypair(); const bad=new Client(f.port); await bad.greet();
+  const bundle=f.app.authority.mint({address:'tc'+'a'.repeat(100),port:f.port,origin});
+  const closed=once(bad.socket,'close');
+  bad.send({v:1,type:'pair',deviceId:key.id,key:key.public,origin,name:'bad',invitationId:bundle.invitation.id,secret:bundle.invitation.secret,signature:'x'.repeat(86)});
+  await closed; assert.equal(f.app.authority.state.devices.length,0); assert.equal(f.app.authority.state.invites[0].used,false);
+  assert.equal(f.app.service.runners.size,0);
+});
+test('restart removes only a stale owned admin socket and preserves active or non-socket files',async t=>{
+  const f=await fixture(t); const file=f.app.listenAdmin();await new Promise(r=>setImmediate(r));
+  await assert.rejects(prepareAdminSocket(f.state),/already active/);
+  const other=path.join(f.root,'restart-state');await mkdir(other);
+  const stale=path.join(other,'admin.sock');
+  execFileSync(process.execPath,['--input-type=module','-e',"import {createServer} from 'node:net';createServer().listen(process.argv[1],()=>process.exit(0));",stale],{env:{}});
+  await prepareAdminSocket(other);await assert.rejects(stat(stale),{code:'ENOENT'});
+  await writeFile(stale,'must preserve');await assert.rejects(prepareAdminSocket(other),/non-owned admin socket/);
+  assert.equal(await readFile(stale,'utf8'),'must preserve');assert.ok((await stat(file)).isSocket());
 });

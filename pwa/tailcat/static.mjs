@@ -6,7 +6,7 @@ import path from 'node:path';
 
 export async function staticServer(dir) {
   const manifest = JSON.parse(await readFile(path.join(dir, 'asset-manifest.json'), 'utf8'));
-  const allowed = new Set(['index.html', 'app.js', 'recovery.js', 'styles.css', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest', 'entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs', 'wasm_exec.js', 'main.wasm.gz', 'TAILCAT-LICENSE', 'sw.js']);
+  const allowed = new Set(['index.html', 'app.js', 'recovery.js', 'styles.css', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest', 'entry.mjs', 'transport.mjs', 'worker.mjs', 'identity.mjs', 'protocol.mjs', 'diagnostics.mjs', 'wasm_exec.js', 'main.wasm.gz', 'TAILCAT-LICENSE', 'sw.js']);
   const assets = new Map();
   for (const [name, hash] of Object.entries(manifest)) {
     if (!allowed.has(name)) throw new Error('Unexpected static artifact entry');
