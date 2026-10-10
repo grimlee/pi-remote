@@ -235,3 +235,15 @@ caches; IndexedDB keys, grants, localStorage and pending command IDs are retaine
 The browser smoke also checks module failure, lifecycle events while WASM is
 loading, and identity-preserving cache recovery in fresh browser contexts.
 These simulated desktop checks still require physical iPhone confirmation.
+
+New sessions use an inline name form with visible progress/errors, including
+when the host has only an allowed workspace and no existing sessions. The
+browser smoke creates a Mock session and sends a prompt in it.
+
+Foreground recovery probes a socket still marked ready; a failed probe dials
+again without replaying commands. Suspend/forced recovery retires an in-flight
+WASM dial immediately, dials have a 30-second deadline, and late candidates or
+settlement cannot replace/clear a newer attempt. BFCache pageshow forces a fresh
+connection; a normal pageshow/focus performs a liveness check. Smoke coverage
+also closes a page and reopens it with the same device store and no reconnect
+button. Physical Safari termination and lock/network transitions remain manual.

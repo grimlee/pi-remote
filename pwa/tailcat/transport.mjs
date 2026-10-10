@@ -131,8 +131,8 @@ export function createTransport() {
     if (document.hidden) { if (configured) recoveryStarted ??= performance.now(); metrics.state = 'background'; report(); worker.postMessage({type: 'suspend'}); } else void resume().catch(() => {});
   });
   window.addEventListener('online', () => { void resume(true).catch(() => {}); });
-  window.addEventListener('pageshow', () => { void resume().catch(() => {}); });
-  window.addEventListener('focus', () => { if (metrics.state === 'background') void resume().catch(() => {}); });
+  window.addEventListener('pageshow', event => { void resume(event.persisted).catch(() => {}); });
+  window.addEventListener('focus', () => { void resume().catch(() => {}); });
   if (document.hidden) worker.postMessage({type: 'suspend'});
   return transport;
 }

@@ -12,6 +12,7 @@ const jumpLatest = $("jumpLatest");
 const connection = $("connection");
 const activity = $("activity");
 let sessions = [];
+let workspaces = [];
 let current = null;
 let stream = null;
 let epoch = 0;
@@ -213,6 +214,7 @@ function renderSessions() {
 }
 function acceptSessions(data) {
   sessions = data.sessions || [];
+  workspaces = data.workspaces || [];
   renderSessions();
   if (!current) setConnection("Host 已连接 · 等待选择会话", "good");
 }
@@ -673,7 +675,7 @@ async function tailcatMutation(sessionId, command) {
     const receipt = await api("/api/commands/" + encodeURIComponent(previous.id));
     if (receipt.status !== "accepted") throw new Error("上次操作结果未确认，请检查会话；不会自动重发");
     memory.write(key, null);
-    return receipt;
+    if (previous.type === command.type && previous.sessionId === sessionId) return receipt;
   }
   const id = crypto.randomUUID();
   // Persist identifiers only for every mutation, including create/abort/model.
@@ -705,17 +707,32 @@ if (window.piRemoteTransport) {
   $("chooseModel").hidden = false;
   const change = tailcatMutation;
   $("newSession").addEventListener("click", async () => {
-    const name = window.prompt("新会话名称");
+    $("newSessionForm").hidden = false;
+    $("newSessionName").focus?.();
+  });
+  $("cancelNewSession").addEventListener("click", () => { $("newSessionForm").hidden = true; });
+  $("newSessionForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    if ($("createSession").disabled) return;
+    const name = $("newSessionName").value;
     if (!name?.trim()) return;
-    const cwd = current?.cwd || sessions[0]?.cwd;
-    if (!cwd) { setActivity("请先在 Host 配置或创建一个工作区会话"); return; }
+    const status = $("newSessionStatus");
+    const report = text => { status.hidden = false; status.textContent = text; setActivity(text); };
+    const cwd = current?.cwd || sessions[0]?.cwd || workspaces[0];
+    if (!cwd) { report("Host 未配置允许的工作区"); return; }
+    $("createSession").disabled = true;
+    report("正在创建会话…");
     try {
       const result = await change("new_session", {type: "create", name, cwd});
-      if (result.status !== "accepted") { setActivity("创建结果未确认，请刷新列表；不会自动重试"); return; }
+      if (result.status !== "accepted") { report("创建结果未确认，请刷新列表；不会自动重试"); return; }
       await loadSessions();
       const created = sessions.find(s => s.id === result.result?.sessionId);
-      if (created) await openSession(created);
-    } catch (e) { setActivity("创建结果未确认：" + e.message); }
+      if (created) {
+        $("newSessionForm").hidden = true; $("newSessionName").value = "";
+        report("会话已创建"); await openSession(created);
+      } else report("命令已接收，请更新会话列表确认");
+    } catch (e) { report("创建失败或结果未确认：" + e.message); }
+    finally { $("createSession").disabled = false; }
   });
   $("renameSession").addEventListener("click", async () => {
     if (!current) return;

@@ -32,6 +32,9 @@ function schedule() {
 }
 function drop(error = fail(503, 'connection_lost'), reconnect = true, notify = true) {
   epoch++; ready = false;
+  // A suspended WASM dial may never settle. A new epoch must be able to dial
+  // independently; the old candidate is closed if it eventually arrives.
+  connectPromise = null;
   clearInterval(pingTimer); clearTimeout(timer);
   try { conn?.close(); } catch {}
   conn = null; hello = null; writeTail = Promise.resolve();
@@ -121,7 +124,7 @@ async function handshake(pairing) {
   const started = performance.now();
   post({type: 'dialing'});
   const activeEpoch = epoch;
-  const candidate = await tailcatDial({addr: config.address, port: config.port, derpMapURL: 'https://tailcat.dev/derpmap.json'});
+  const candidate = await dialWithDeadline({addr: config.address, port: config.port, derpMapURL: 'https://tailcat.dev/derpmap.json'});
   if (activeEpoch !== epoch || suspended) { candidate.close(); throw fail(503, 'connection_cancelled'); }
   conn = candidate; seq = 0;
   const reader = new Framer();
@@ -165,8 +168,41 @@ async function connect(pairing) {
   if (suspended) throw fail(503, 'page_suspended');
   if (ready) return;
   if (connectPromise) return connectPromise;
-  connectPromise = handshake(pairing).finally(() => { connectPromise = null; });
+  const activeEpoch = epoch;
+  const attempt = handshake(pairing).catch(error => {
+    if (activeEpoch === epoch) drop(error);
+    throw error;
+  }).finally(() => { if (connectPromise === attempt) connectPromise = null; });
+  connectPromise = attempt;
   return connectPromise;
+}
+function dialWithDeadline(options, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const deadline = setTimeout(() => { finished = true; reject(fail(503, 'dial_timeout')); }, timeout);
+    Promise.resolve().then(() => tailcatDial(options)).then(candidate => {
+      if (finished) { candidate.close(); return; }
+      finished = true; clearTimeout(deadline); resolve(candidate);
+    }, error => {
+      if (finished) return;
+      finished = true; clearTimeout(deadline); reject(error);
+    });
+  });
+}
+async function resumeConnection(force) {
+  await booted;
+  if (suspended) throw fail(503, 'page_suspended');
+  if (!config) return {configured: false};
+  if (force && (ready || connectPromise)) drop(fail(503, 'foreground_reconnect'), false, false);
+  if (ready) {
+    // Safari can thaw a page with a dead socket still marked ready. Confirm
+    // liveness immediately instead of waiting for the periodic heartbeat.
+    const checkedEpoch = epoch;
+    try { await request('ping', {}, undefined, 5000); }
+    catch (error) { if (checkedEpoch === epoch) drop(error, false, false); }
+  }
+  await connect();
+  return {configured: true};
 }
 async function request(op, args, id = crypto.randomUUID(), timeout) {
   // Reject oversized requests before reserving an uncertain mutation or dialing.
@@ -244,7 +280,7 @@ self.onmessage = event => {
   }
   const run = async () => {
     if (message.type === 'pair') return pair(message.text, message.origin);
-    if (message.type === 'resume') { await booted; if (suspended) throw fail(503, 'page_suspended'); if (!config) return {configured: false}; if (message.force && ready) drop(fail(503, 'foreground_reconnect'), false, false); await connect(); return {configured: true}; }
+    if (message.type === 'resume') return resumeConnection(message.force);
     if (message.type === 'request') return request(message.op, message.args, message.id);
     if (message.type === 'subscribe') {
       subscriptions.set(message.id, {sessionId: message.sessionId, since: message.since});

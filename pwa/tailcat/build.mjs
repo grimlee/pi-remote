@@ -23,6 +23,13 @@ export async function buildStatic(wasmDir, output, {mock = false} = {}) {
     .replace('<button type="submit">连接 Host</button>', '<button type="submit" disabled>连接 Host</button>')
     .replace('<p id="loginError"', '<p id="tailcatStartup" role="status">正在加载界面…</p><p><a href="/recover.html">恢复页面缓存（保留设备密钥）</a></p>\n      <p id="loginError"');
   html = html.replace('<button id="refreshSessions"', '<button id="newSession" class="soft" hidden>＋ 新会话</button>\n      <button id="refreshSessions"');
+  html = html.replace('<button id="newSession"', `<form id="newSessionForm" class="new-session-form" hidden>
+        <label for="newSessionName">新会话名称</label>
+        <input id="newSessionName" maxlength="128" required autocomplete="off">
+        <button id="createSession" type="submit">创建会话</button>
+        <button id="cancelNewSession" type="button" class="soft">取消</button>
+      </form><p id="newSessionStatus" class="new-session-status" role="status" hidden></p>
+      <button id="newSession"`);
   html = html.replace('<button id="syncButton"', '<button id="renameSession" class="ghost" hidden>改名</button><button id="chooseModel" class="ghost" hidden>模型</button>\n        <button id="syncButton"');
   html = html.replace('<div id="connection"', '<div class="model-controls"><select id="modelPicker" aria-label="模型" hidden></select><button id="applyModel" type="button" hidden>使用模型</button></div>\n      <div id="connection"');
   await writeFile(path.join(output, 'index.html'), html);

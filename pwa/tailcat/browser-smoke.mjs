@@ -45,7 +45,8 @@ try {
   }
   browser=await playwright[kind].launch(launch);
   await verifyStartup(browser,origin);
-  const page=await browser.newPage({viewport:{width:390,height:844}});
+  const phoneContext=await browser.newContext({viewport:{width:390,height:844}});
+  let page=await phoneContext.newPage();
   const errors=[]; page.on('pageerror',e=>errors.push(e.message.replace(/tc[A-Za-z0-9_-]{20,}/g,'tc[REDACTED]')));
   const requests=[]; page.on('request',r=>requests.push(new URL(r.url()).pathname));
   await page.goto(origin);
@@ -84,6 +85,21 @@ try {
     } catch(error) { return error.status; }
   });
   assert.equal(invalid,400,'a definitively rejected request must not block later mutations');
+  await page.locator('#openSidebar').click();
+  await page.locator('#newSession').click();
+  await page.locator('#newSessionName').fill('Phone created mock');
+  await page.locator('#createSession').click();
+  await page.waitForFunction(()=>document.getElementById('sessionTitle').textContent==='Phone created mock');
+  const createdList=await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions'));
+  const created=createdList.sessions.find(s=>s.name==='Phone created mock');
+  assert.ok(created,'inline creation reaches Mock Pi');
+  await page.locator('#prompt').fill('created session prompt');
+  await page.locator('#composer').evaluate(form=>form.requestSubmit());
+  await page.waitForFunction(()=>document.getElementById('messages').textContent.includes('mock reply'));
+  const createdState=await page.evaluate(id=>window.piRemoteTransport.api('/api/sessions/'+id+'/state'),created.id);
+  assert.equal(createdState.messages.filter(m=>m.content?.[0]?.text==='created session prompt').length,1);
+  await page.locator('#openSidebar').click();
+  await page.locator('#sessions .session').filter({hasText:'Untitled session'}).click();
   await page.locator('#prompt').fill('long_test'); await page.locator('#composer').evaluate(form=>form.requestSubmit());
   await page.waitForFunction(()=>document.getElementById('messages').textContent.includes('长🙂'),{timeout:30000});
   const transcript=await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'));
@@ -136,9 +152,16 @@ try {
   });
   assert.deepEqual(restored,{id:storedIdentity,local:'keep',unrelated:true});
   assert.equal(app.authority.state.devices.length,1);
+  // A killed Safari page gets a fresh Worker in the same browser data store.
+  // It must restore its grant and selected session without manual reconnect.
+  await page.close();page=await phoneContext.newPage();
+  await page.goto(origin);await page.locator('#appView').waitFor({state:'visible',timeout:90000});
+  await page.waitForFunction(()=>document.getElementById('connection').textContent.includes('已连接'),null,{timeout:90000});
+  assert.equal(await page.evaluate(async()=>{const {loadDevice}=await import('/identity.mjs');return (await loadDevice()).identity.id;}),storedIdentity);
+  assert.equal((await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'))).messages.filter(m=>m.content?.[0]?.text==='long_test').length,1);
   assert.equal(requests.some(p=>p.startsWith('/api/')),false,'no API request to static origin');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,startupFailureVisible:true,backgroundDuringStartup:true,cacheRecoveryPreservesIdentity:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
+  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,startupFailureVisible:true,backgroundDuringStartup:true,cacheRecoveryPreservesIdentity:true,inlineSessionCreation:true,createdSessionPrompt:true,pageCloseReopenAutoConnect:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
 } finally {
   await browser?.close();
   if(sidecar&&!sidecar.killed){const closed=once(sidecar,'exit');sidecar.kill('SIGTERM');await closed;}

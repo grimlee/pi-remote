@@ -56,6 +56,43 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
   return { context, nodes, element, streams, calls, window, document, timers, delays, session, saved };
 }
 
+test('Tailcat session creation uses an inline form and the configured workspace even with no sessions', async()=>{
+  const calls=[];
+  const created={id:'created-session-1234',name:'Phone test',cwd:'/tmp/isolated'};
+  let done=false;
+  const transport={api:async(url,options={})=>{
+    calls.push({url,options});
+    if(url==='/api/sessions')return {sessions:done?[created]:[],workspaces:['/tmp/isolated']};
+    if(url.endsWith('/commands')) {done=true;return {status:'accepted',result:{sessionId:created.id}};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(storage(),null,{transport});
+  await b.element('newSession').handlers.click();
+  assert.equal(b.element('newSessionForm').hidden,false);
+  b.element('newSessionName').value='Phone test';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  const command=JSON.parse(calls.find(c=>c.url.endsWith('/commands')).options.body);
+  assert.equal(command.type,'create');assert.equal(command.cwd,'/tmp/isolated');
+  assert.equal(b.element('sessionTitle').textContent,'Phone test');
+  assert.equal(b.element('newSessionForm').hidden,true);
+});
+
+test('a recovered receipt for a different mutation does not consume a new create action',async()=>{
+  const saved=storage();
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify({id:'old-rename-command',sessionId:'old-session',type:'rename'}));
+  const commands=[];
+  const transport={api:async(url,options={})=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {status:'accepted'};
+    if(url.endsWith('/commands')) {commands.push(JSON.parse(options.body));return {status:'accepted',result:{sessionId:'created-session'}};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});
+  b.element('newSessionName').value='Next operation';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(commands.length,1);assert.equal(commands[0].type,'create');
+});
+
 test('browser reload restores the selected session and foreground/network replaces SSE', async () => {
   const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
   const b = await browser(saved);

@@ -82,3 +82,6 @@
 .tailcat-diagnostics { position: fixed; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); z-index: 50; max-width: min(92vw, 440px); background: #11151c; color: #e4e8ee; border: 1px solid #516078; border-radius: 8px; padding: 8px; font-size: 12px; }
 .tailcat-diagnostics pre { max-height: 40vh; overflow: auto; font-size: 11px; white-space: pre-wrap; }
 .tailcat-diagnostics button { padding: 6px; margin: 4px; font-size: 12px; }
+.new-session-form { display: grid; gap: 8px; flex-shrink: 0; }
+.new-session-form input { width: 100%; min-width: 0; padding: 10px; border: 1px solid #8295ad; border-radius: 10px; }
+.new-session-status { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
