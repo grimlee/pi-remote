@@ -39,6 +39,7 @@
       <div class="side-subtitle">工作区与会话</div>
       <label for="sessionSearch" class="visually-hidden">搜索会话</label>
       <input id="sessionSearch" class="session-search" type="search" placeholder="搜索会话、工作区或模型…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button id="newSession" class="soft" type="button">＋ 新建会话</button>
       <div id="sessions" class="sessions" aria-label="会话列表"></div>
       <button id="refreshSessions" class="soft side-refresh">↻ 更新会话</button>
       <div class="side-footer">Pi 运行在电脑上，手机只负责交互。</div>
@@ -51,9 +52,11 @@
           <strong id="sessionTitle">选择一个 Pi 会话</strong>
           <span id="sessionSub">Host 运行 Agent · iPhone 显示内容</span>
         </div>
+        <button id="sessionSettings" class="ghost" type="button" disabled>设置</button>
         <button id="syncButton" class="ghost" title="同步会话" aria-label="同步会话">↻</button>
       </header>
       <div id="connection" class="connection" role="status">正在连接…</div>
+      <div id="sessionStatus" class="session-status" role="status"></div>
       <div id="messages" class="messages">
         <div class="empty">选择左侧会话以开始，或从已有 Pi 会话继续工作。</div>
       </div>
@@ -70,5 +73,17 @@
       </form>
     </main>
   </div>
+  <section id="controlPanel" class="control-panel" hidden aria-label="会话设置">
+    <form id="controlForm" class="control-card">
+      <h2 id="controlTitle">会话设置</h2>
+      <label id="workspaceField">工作区<select id="workspaceSelect"></select></label>
+      <label id="nameField">会话名称<input id="sessionName" maxlength="120"></label>
+      <label id="modelField">模型<select id="modelSelect"></select></label>
+      <label id="thinkingField">Thinking<select id="thinkingSelect"></select></label>
+      <label id="commandField">Pi 命令<select id="commandSelect"></select><button id="insertCommand" type="button" class="soft">插入命令</button></label>
+      <p id="controlError" class="error" role="alert"></p>
+      <div class="control-actions"><button id="closeControl" class="soft" type="button">关闭</button><button id="applyControl" type="submit">保存</button></div>
+    </form>
+  </section>
 </body>
 </html>

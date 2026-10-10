@@ -4,6 +4,7 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
+import { publicState } from "./control.mjs";
 import path from "node:path";
 import os from "node:os";
 
@@ -118,6 +119,8 @@ export class PiRunner {
   constructor(session, options = {}) {
     this.session = session;
     this.executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
+    this.sessionDir = options.sessionDir;
+    this.extraArgs = options.extraArgs || [];
     this.pending = new Map();
     this.listeners = new Set();
     this.events = [];
@@ -140,7 +143,16 @@ export class PiRunner {
     try {
       if ((await stat(this.session.cwd)).isDirectory()) cwd = this.session.cwd;
     } catch {}
-    this.child = spawn(this.executable, ["--session", this.session.file, "--mode", "rpc"], {
+    const args=["--mode","rpc",...this.extraArgs];
+    if(this.session.file && await stat(this.session.file).then(()=>true).catch(()=>false)) args.push('--session',this.session.file);
+    else if(this.session.id) {
+      args.push('--session-id',this.session.id);
+      if(this.session.name) args.push('--name',this.session.name);
+      if(this.session.model) {const split=this.session.model.indexOf('/');if(split>0)args.push('--provider',this.session.model.slice(0,split),'--model',this.session.model.slice(split+1));}
+      if(this.session.thinkingLevel) args.push('--thinking',this.session.thinkingLevel);
+    }
+    if(this.sessionDir) args.push('--session-dir',this.sessionDir);
+    this.child = spawn(this.executable, args, {
       cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"], shell: false
     });
     this.child.stdout.on("data", bytes => this.consume(bytes));
@@ -256,7 +268,8 @@ export class PiRunner {
     this.busy = !!(state?.isStreaming || state?.isCompacting || state?.isRetrying);
     const data = await this.request("get_messages", {}, 30000);
     return {
-      state: state || {},
+      state: publicState(state || {}),
+      session: {id:this.session.id,generation:this.session.generation},
       messages: Array.isArray(data?.messages) ? data.messages : (Array.isArray(data) ? data : []),
       cursor: this.seq,
       busy: this.busy,

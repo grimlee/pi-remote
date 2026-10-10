@@ -1,5 +1,16 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import path from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+const args=process.argv;
+const root=args[args.indexOf('--session-dir')+1]||'/tmp';
+const fileArg=args.indexOf('--session');
+let file=fileArg>=0?args[fileArg+1]:path.join(root,'empty.jsonl');
+let sessionId='session_test_12345';try{sessionId=JSON.parse(readFileSync(file,'utf8').split('\n')[0]).id;}catch{}
+let sessionName;let level='low';
+let model={provider:'mock',id:'test',name:'Test model',reasoning:true,input:['text','image'],contextWindow:200000,headers:{Authorization:'NEVER_SEND_SECRET'},baseUrl:'https://private.invalid?key=SECRET'};
+const models=[model,{...model,id:'other',name:'Other model'}];
 const messages = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
 const output = event => process.stdout.write(JSON.stringify(event) + "\n");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -8,7 +19,17 @@ for await (const line of lines) {
   try { command = JSON.parse(line); } catch { continue; }
   const { id, type } = command;
   if (type === "get_state") {
-    output({ type: "response", id, command: type, success: true, data: { sessionId: "session_test_12345", isStreaming: false } });
+    output({ type: "response", id, command: type, success: true, data: {sessionId,sessionFile:file,sessionName,model,thinkingLevel:level,isStreaming:false} });
+  } else if (type === 'new_session') {
+    sessionId=randomUUID();file=path.join(root,sessionId+'.jsonl');messages.length=0;
+    output({type:'response',id,command:type,success:true,data:{cancelled:false}});
+  } else if(type==='set_session_name') {sessionName=command.name;output({type:'response',id,command:type,success:true});
+  } else if(type==='set_model') {model=models.find(m=>m.provider===command.provider&&m.id===command.modelId);output({type:'response',id,command:type,success:!!model,data:model});
+  } else if(type==='set_thinking_level') {level=command.level;output({type:'response',id,command:type,success:true});
+  } else if(type==='get_available_models') {output({type:'response',id,command:type,success:true,data:{models}});
+  } else if(type==='get_available_thinking_levels') {output({type:'response',id,command:type,success:true,data:{levels:['off','low','high']}});
+  } else if(type==='get_commands') {output({type:'response',id,command:type,success:true,data:{commands:[{name:'test-command',description:'Test extension',source:'extension',sourceInfo:{path:'/secret'}}]}});
+  } else if(type==='get_session_stats') {output({type:'response',id,command:type,success:true,data:{sessionId,sessionFile:file,contextUsage:{percent:5,tokens:10000,contextWindow:200000}}});
   } else if (type === "get_messages") {
     output({ type: "response", id, command: type, success: true, data: { messages } });
   } else if (type === "prompt") {

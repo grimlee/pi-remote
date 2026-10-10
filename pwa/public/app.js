@@ -14,6 +14,11 @@ const connection = $("connection");
 const activity = $("activity");
 let sessions = [];
 let current = null;
+let controlBusy=false;
+let controlMode="settings";
+let controlSession=null;
+let controls=null;
+let authoritativeState={};
 let stream = null;
 let epoch = 0;
 let liveText = "";
@@ -342,6 +347,11 @@ function appendLive(delta) {
 }
 function renderSnapshot(data) {
   agentBusy = !!data.busy;
+  authoritativeState=data.state || {};
+  if(current && authoritativeState.sessionName) {current.name=authoritativeState.sessionName;$("sessionTitle").textContent=current.name;}
+  if(current && authoritativeState.model) current.model=authoritativeState.model.provider+'/'+authoritativeState.model.id;
+  const ctx=controls?.stats?.contextUsage;
+  $('sessionStatus').textContent=[authoritativeState.model?.name||authoritativeState.model?.id,authoritativeState.thinkingLevel ? 'Thinking '+authoritativeState.thinkingLevel : '',ctx?.percent!=null?'上下文 '+ctx.percent.toFixed(1)+'%':'',data.busy?'运行中':'空闲'].filter(Boolean).join(' · ');
   renderTools = {};
   for (const m of data.messages || []) if (m?.role==='toolResult') renderTools[m.toolCallId] = {status:m.isError?'失败':'成功'};
   for (const t of data.tools || []) renderTools[t.toolCallId] = {status:t.status};
@@ -494,7 +504,8 @@ async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
-  agentBusy = false;
+  agentBusy = false;controls=null;authoritativeState={};
+  $('controlPanel').hidden=true;$('sessionSettings').disabled=false;
   memory.selected(session.id);
   pendingCommand = memory.pending(session.id);
   clearTimeout(reconnectTimer);
@@ -530,6 +541,78 @@ async function openSession(session) {
     }
   }
 }
+function readOperation(key) {try{return JSON.parse(storage?.getItem('pi-remote-operation-'+key)||'null');}catch{return null;}}
+function saveOperation(key,value){try{if(value)storage?.setItem('pi-remote-operation-'+key,JSON.stringify(value));else storage?.removeItem('pi-remote-operation-'+key);}catch{}}
+async function operation(key, values, url) {
+  const fingerprint=await messageFingerprint(JSON.stringify(values));
+  let pending=readOperation(key);
+  if(pending && pending.fingerprint!==fingerprint) {
+    const receipt=await api('/api/commands/'+pending.id).catch(()=>null);
+    if(receipt?.status!=='accepted' && receipt?.status!=='rejected')throw new Error('上次操作结果未知，请先同步核对；不会自动重复执行');
+    saveOperation(key,null);pending=null;
+  }
+  const id=pending?.id||crypto.randomUUID();saveOperation(key,{id,fingerprint});
+  const result=await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...values,commandId:id})});
+  if(result.status==='unknown')throw new Error('操作结果未知，请同步后核对，再重试同一操作');
+  if(result.status==='rejected') {saveOperation(key,null);throw new Error('Pi 拒绝了操作');}
+  saveOperation(key,null);return result;
+}
+function fillSelect(node, values, selected) {
+  node.replaceChildren();for(const [value,label] of values) {const o=document.createElement('option');o.value=value;o.textContent=label;node.append(o);}node.value=selected||values[0]?.[0]||'';
+}
+async function showControls(mode) {
+  if(controlBusy) return;
+  controlMode=mode;controlSession=current?{...current}:null;
+  const expected=epoch;
+  $('controlError').textContent='';$('controlPanel').hidden=false;
+  $('controlTitle').textContent=mode==='new'?'新建会话':'会话设置';
+  $('workspaceField').hidden=mode!=='new';for(const id of ['nameField','modelField','thinkingField','commandField']) $(id).hidden=mode==='new';
+  $('applyControl').disabled=true;
+  try {
+    if(mode==='new') {
+      const data=await api('/api/workspaces');fillSelect($('workspaceSelect'),data.workspaces.map(w=>[w.id,w.name]));
+      const pending=readOperation('create');if(pending) {
+        const receipt=await api('/api/commands/'+pending.id).catch(()=>null);
+        if(receipt?.status==='accepted' && receipt.result) {saveOperation('create',null);await loadSessions();await openSession(receipt.result);return;}
+      }
+    } else {
+      if(!controlSession)throw new Error('请先选择会话');
+      controls=await api('/api/sessions/'+encodeURIComponent(controlSession.id)+'/controls');
+      if(expected!==epoch)return;
+      fillSelect($('commandSelect'),controls.commands.map(c=>[c.name,'/'+c.name+' · '+(c.description||c.source)]));
+      $('sessionName').value=authoritativeState.sessionName||controlSession.name;
+      fillSelect($('modelSelect'),controls.models.map(m=>[JSON.stringify([m.provider,m.id]),m.provider+' / '+(m.name||m.id)]),authoritativeState.model?JSON.stringify([authoritativeState.model.provider,authoritativeState.model.id]):null);
+      fillSelect($('thinkingSelect'),controls.levels.map(l=>[l,l]),authoritativeState.thinkingLevel);
+    }
+    if(expected===epoch)$('applyControl').disabled=false;
+  } catch(err){$('controlError').textContent=err.message;}
+}
+$('insertCommand').addEventListener('click',()=>{const name=$('commandSelect').value;if(name){promptBox.value='/'+name+' ';$('controlPanel').hidden=true;resizeComposer();promptBox.focus();}});
+$('newSession').addEventListener('click',()=>void showControls('new'));
+$('sessionSettings').addEventListener('click',()=>void showControls('settings'));
+$('closeControl').addEventListener('click',()=>{$('controlPanel').hidden=true;});
+$('controlForm').addEventListener('submit',async event=>{
+  event.preventDefault();if(controlBusy)return;controlBusy=true;$('applyControl').disabled=true;$('controlError').textContent='';
+  const selected=controlSession;const expected=epoch;
+  try {
+    if(controlMode==='new') {const result=await operation('create',{workspaceId:$('workspaceSelect').value},'/api/sessions');await loadSessions();if(expected===epoch && result.session)await openSession(result.session);}
+    else {
+      if(!selected || current?.id!==selected.id || selected.generation!==current.generation)throw new Error('会话已切换，请重新打开设置');
+      const url='/api/sessions/'+encodeURIComponent(selected.id)+'/commands';
+      const command=async (type,values)=>{if(expected!==epoch)throw new Error('会话已切换');return operation(selected.id+'-'+type,{type,generation:selected.generation,...values},url);};
+      const [provider,modelId]=JSON.parse($('modelSelect').value);
+      if(authoritativeState.model?.provider!==provider||authoritativeState.model?.id!==modelId) {await command('set_model',{provider,modelId});
+        controls=await api('/api/sessions/'+encodeURIComponent(selected.id)+'/controls');
+      }
+      const level=$('thinkingSelect').value;
+      if(level!==authoritativeState.thinkingLevel) {if(!controls.levels.includes(level))throw new Error('新模型不支持所选 Thinking，请重新打开设置');await command('set_thinking_level',{level});}
+      const name=$('sessionName').value.trim();if(name!==selected.name)await command('set_session_name',{name});
+      await loadSessions();if(expected===epoch)await syncState(expected);
+    }
+    if(expected===epoch)$('controlPanel').hidden=true;
+  }catch(err){if(expected===epoch)$('controlError').textContent=err.message;}
+  finally{controlBusy=false;$('applyControl').disabled=false;}
+});
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
   const token = $("token").value;
@@ -567,7 +650,7 @@ $("composer").addEventListener("submit", async event => {
     memory.pending(sessionId, command);
     const result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", message, commandId: command.id })
+      body: JSON.stringify({ type: "prompt", message, commandId: command.id, generation:current?.id===sessionId?current.generation:undefined })
     });
     if (result.status === "unknown") {
       if (current?.id === sessionId) setActivity("命令状态未确认；再次发送将查询同一命令 ID，不会重复执行");
