@@ -510,7 +510,8 @@ async function openSession(session) {
   setSidebarOpen(false);
   renderSessions();
   $("sessionTitle").textContent = sessionLabel(session);
-  $("sessionSub").textContent = session.cwd;
+  $("sessionSub").textContent = workspaceLabel(session.cwd);
+  $("sessionSub").title = session.cwd;
   promptBox.disabled = false;
   $("send").disabled = false;
   $("stop").disabled = false;

@@ -102,7 +102,7 @@ by HTTPS origin.
 The mobile shell follows `visualViewport.height` when available and limits the
 composer to that viewport. The jump-to-latest control follows composer height.
 Authoritative snapshots also remove vanished live text when persisted messages
-have not changed. These fixes use shell cache `v7.1`; `/recover` preserves the
+have not changed. These fixes use shell cache `v7.2`; `/recover` preserves the
 login cookie and selected-session/pending-command metadata.
 
 Host validation includes real Pi replies above 10K output tokens, a detached

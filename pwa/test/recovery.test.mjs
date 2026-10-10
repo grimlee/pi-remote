@@ -394,3 +394,11 @@ test('jump-to-latest position follows the expanded composer height', async () =>
   vm.runInContext('resizeComposer()',b.context);
   assert.equal(b.document.documentElement.style.getPropertyValue('--composer-height'),'250px');
 });
+
+
+test('the selected workspace header uses a compact label and preserves the full path as a tooltip', async () => {
+  const saved=storage();new RecoveryMemory(saved).selected('browser-session-1234');
+  const b=await browser(saved);
+  assert.equal(b.element('sessionSub').textContent,'tmp / test');
+  assert.equal(b.element('sessionSub').title,'/tmp/test');
+});
