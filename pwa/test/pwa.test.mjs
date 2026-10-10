@@ -242,3 +242,20 @@ test("shell resources compress without changing their contents or MIME types", a
     assert.ok(raw.body.length < Number(identity.headers.get("content-length")));
   }
 });
+
+test("side-by-side ports use independent cookie names without replacing stable authentication", async () => {
+  const f = await fixture();
+  const stable = new Authentication({ dir: f.config, token });
+  const ux = new Authentication({ dir: f.config, token: "different-ux-token-for-tests-0123456789", cookieName: "pr_ux_session" });
+  const req = { headers: { host: "host.example:10001", "x-forwarded-proto": "https" } };
+  const stableCookie = stable.cookie(req).split(";")[0];
+  const uxCookie = ux.cookie(req).split(";")[0];
+  assert.match(stableCookie, /^pr_session=/);
+  assert.match(uxCookie, /^pr_ux_session=/);
+  const both = { headers: { cookie: stableCookie + "; " + uxCookie } };
+  assert.equal(stable.isAuthorized(both), true);
+  assert.equal(ux.isAuthorized(both), true);
+  assert.equal(stable.isAuthorized({ headers: { cookie: uxCookie } }), false);
+  assert.equal(ux.isAuthorized({ headers: { cookie: stableCookie } }), false);
+  assert.throws(() => new Authentication({ dir: f.config, token, cookieName: "bad; cookie" }), /Invalid PWA cookie name/);
+});

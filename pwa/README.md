@@ -81,3 +81,33 @@ Automated tests cover authentication/error paths, bounded replay, Pi 1.x delta
 reconstruction, browser reload and network recovery, ambiguous command IDs, and
 long text restoration. These tests use a fake Pi or browser harness; they must
 be supplemented by a real Pi prompt/background-tool/abort smoke test on the host.
+
+## Mobile UX experiment (`feature/pwa-mobile-ux`)
+
+This iteration keeps the Pi transport and server behavior unchanged. It adds a dismissible mobile session drawer with a backdrop, session search by name/workspace/model, collapsible workspace groups, short workspace labels with full-path tooltips, per-message copy, an explicit jump-to-latest control, and auto-sizing message input. The iOS polling renderer now skips complete transcript DOM replacement when the authoritative message list is unchanged and sets (rather than appends) identical live assistant snapshots. These changes aim to reduce large-output scroll jumps without changing command idempotency or recovery semantics.
+
+To validate, use `npm run test:pwa`, then verify iPhone Safari and standalone PWA behavior with keyboard shown, screen locked/unlocked, Wi-Fi/5G transitions and >10K-token replies. The service worker shell cache version is `v7`. Deploy from a separate checkout; do not overwrite the currently working live gateway without explicit user approval.
+
+
+### Parallel UX deployments and validation
+
+When running two PWA gateways on the same hostname with different HTTPS ports,
+configure a distinct `PI_REMOTE_PWA_COOKIE_NAME` (for example `pr_ux_session`)
+for the second service, as well as separate state and Pi session directories.
+Browser cookies are shared across ports; the default `pr_session` is unchanged.
+This keeps the stable and UX gateways authenticated together without replacing
+one another's cookie. Service-worker caches and browser storage remain separated
+by HTTPS origin.
+
+The mobile shell follows `visualViewport.height` when available and limits the
+composer to that viewport. The jump-to-latest control follows composer height.
+Authoritative snapshots also remove vanished live text when persisted messages
+have not changed. These fixes use shell cache `v7.2`; `/recover` preserves the
+login cookie and selected-session/pending-command metadata.
+
+Host validation includes real Pi replies above 10K output tokens, a detached
+background tool task, duplicate-command protection, WebKit mobile layout/recovery,
+and a bounded browser transcript stress sample. Actual iPhone keyboard, clipboard,
+lock/unlock, Wi-Fi/cellular transitions and Home Screen lifecycle still require
+physical-device acceptance. The transcript renders the latest 160 messages;
+older messages remain in Pi storage, with history pagination left for later work.

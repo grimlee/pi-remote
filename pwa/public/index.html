@@ -31,14 +31,17 @@
     </div>
   </section>
   <div id="appView" class="shell" hidden>
-    <aside id="sidebar" class="sidebar">
+    <aside id="sidebar" class="sidebar" role="navigation" aria-label="工作区与会话">
       <div class="side-title"><div class="brand"><span class="logo-small">π</span> Pi Remote</div>
         <button id="closeSidebar" class="ghost mobile-only" aria-label="关闭会话列表">✕</button></div>
-      <div class="side-subtitle">Workspaces & Sessions</div>
+      <div class="side-subtitle">工作区与会话</div>
+      <label for="sessionSearch" class="visually-hidden">搜索会话</label>
+      <input id="sessionSearch" class="session-search" type="search" placeholder="搜索会话、工作区或模型…" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div id="sessions" class="sessions" aria-label="会话列表"></div>
       <button id="refreshSessions" class="soft side-refresh">↻ 更新会话</button>
-      <div class="side-footer">PWA · HTTPS Gateway<br>Native Tailcat Quick Connect 保留</div>
+      <div class="side-footer">Pi 运行在电脑上，手机只负责交互。</div>
     </aside>
+    <button id="sidebarBackdrop" class="sidebar-backdrop" type="button" aria-label="关闭会话导航" hidden></button>
     <main class="main">
       <header class="topbar">
         <button id="openSidebar" class="ghost mobile-only" aria-label="打开会话列表">☰</button>
@@ -52,6 +55,7 @@
       <div id="messages" class="messages">
         <div class="empty">选择左侧会话以开始，或从已有 Pi 会话继续工作。</div>
       </div>
+      <button id="jumpLatest" class="jump-latest" type="button" hidden>↓ 回到最新</button>
       <form id="composer" class="composer">
         <textarea id="prompt" rows="2" aria-label="发送给 Pi 的消息" placeholder="输入消息…" disabled></textarea>
         <div class="composer-bar">

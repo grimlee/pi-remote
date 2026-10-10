@@ -16,7 +16,7 @@
     }
     // Cookie and localStorage contain authentication/session/command recovery state.
     // Leave them intact and navigate outside the obsolete worker's lifetime.
-    location.replace("/?transport=poll&v=6");
+    location.replace("/?transport=poll&v=7.1");
   } catch {
     document.getElementById("status").textContent = "页面缓存恢复未完成，请检查 Tailscale 连接后点击重试恢复。登录和会话信息仍保留。";
   }
