@@ -7,6 +7,7 @@ import path from "node:path";
 import { discoverSessions, publicSession, PiRunner } from "./registry.mjs";
 import { Authentication, CommandLedger, safeOrigin, readJson, stateDir } from "./security.mjs";
 
+import { validateImages, MAX_IMAGE_REQUEST } from "./images.mjs";
 import { OwnedSessions, publicModel, validateControl, invalid } from "./control.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const files = new Map([
@@ -16,6 +17,7 @@ const files = new Map([
   ["/sw-reset.js", ["sw-reset.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
+  ["/attachments.js", ["attachments.js", "text/javascript; charset=utf-8"]],
   ["/transcript.js", ["transcript.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
@@ -270,11 +272,23 @@ export function createPwaServer(options = {}) {
         json(res,200,{models:(models?.models||[]).map(publicModel),levels:levels?.levels||[],commands:(commands?.commands||[]).map(c=>({name:c.name,description:c.description,source:c.source})),stats:safeStats});return;
       }
       if (action === "commands" && method === "POST") {
-        const body = await readJson(req);
-        if (!body || !["prompt", "abort", "set_session_name", "set_model", "set_thinking_level"].includes(body.type)) {
+        const body = await readJson(req, MAX_IMAGE_REQUEST);
+        if (!body || !["prompt", "abort", "set_session_name", "set_model", "set_thinking_level", "extension_ui_response"].includes(body.type)) {
           error(res, 400, "unsupported_command"); return;
         }
         if (body.generation!==undefined && body.generation!==runner.session.generation) {error(res,409,'stale_session_generation');return;}
+        if(body.type==='extension_ui_response') {
+          if(body.generation!==runner.session.generation)throw invalid('stale_session_generation',409);
+          if(!/^[\w-]{10,100}$/.test(body.commandId||'')||typeof body.requestId!=='string')throw invalid('invalid_ui_response');
+          const values={id:body.requestId,...(body.cancelled===true?{cancelled:true}:typeof body.confirmed==='boolean'?{confirmed:body.confirmed}:{value:body.value})};
+          const hash=createHash('sha256').update(JSON.stringify([id,runner.session.generation,'ui',values])).digest('hex');
+          const prior=ledger.get(body.commandId);if(prior){if(prior.hash!==hash||prior.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:prior.status,deduplicated:true});return;}
+          // Validate without consuming before recording, including stale/expired requests.
+          const request=runner.uiRequests.get(body.requestId);if(!request || (request.expiresAt&&request.expiresAt<=Date.now()))throw invalid('request_expired',409);
+          if(!values.cancelled && (request.method==='confirm'?typeof values.confirmed!=='boolean':typeof values.value!=='string'||values.value.length>20000||(request.method==='select'&&!request.options?.includes(values.value))))throw invalid('invalid_ui_value');
+          const receipt={id:body.commandId,sessionId:id,hash,status:'unknown',at:Date.now()};ledger.save(receipt);
+          try{await runner.answerUI(values);receipt.status='accepted';ledger.save(receipt);json(res,202,{status:'accepted'});}catch(e){if(e.code)throw e;json(res,503,{status:'unknown'});}return;
+        }
         if(!['prompt','abort'].includes(body.type)) {
           if(body.generation!==runner.session.generation)throw invalid('stale_session_generation',409);
           const values=validateControl(body);
@@ -298,11 +312,12 @@ export function createPwaServer(options = {}) {
           json(res, 200, { status: "accepted" });
           return;
         }
-        if (typeof body.message !== "string" || !body.message.trim() || body.message.length > 50000
+        if (typeof body.message !== "string" || (!body.message.trim() && !body.images?.length) || body.message.length > 50000
           || typeof body.commandId !== "string" || !/^[\w-]{10,100}$/.test(body.commandId)) {
           error(res, 400, "invalid_prompt"); return;
         }
-        const hash = createHash("sha256").update(id + "\n" + body.message).digest("hex");
+        const images=validateImages(body.images);
+        const hash = createHash("sha256").update(JSON.stringify([id,body.message,images])).digest("hex");
         const prior = ledger.get(body.commandId);
         if (prior) {
           if (prior.hash !== hash || prior.sessionId !== id) {
@@ -311,6 +326,7 @@ export function createPwaServer(options = {}) {
           json(res, 200, { status: prior.status, deduplicated: true, commandId: body.commandId });
           return;
         }
+        if(images.length){const state=await runner.request('get_state');if(!state.model?.input?.includes('image'))throw invalid('model_does_not_support_images');}
         if(body.message.trimStart().startsWith('/')) {
           const name=body.message.trimStart().split(/\s/)[0].slice(1);
           const commands=await runner.request('get_commands');if(!commands?.commands?.some(c=>c.name===name))throw invalid('unsupported_slash_command');
@@ -320,7 +336,7 @@ export function createPwaServer(options = {}) {
         const receipt = { id: body.commandId, sessionId: id, hash, status: "unknown", at: Date.now() };
         ledger.save(receipt);
         try {
-          await runner.request("prompt", { message: body.message }, 30000);
+          await runner.request("prompt", { message: body.message, ...(images.length?{images}: {}) }, 30000);
           receipt.status = "accepted";
           ledger.save(receipt);
           json(res, 202, { status: "accepted", commandId: body.commandId });

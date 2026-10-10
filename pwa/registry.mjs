@@ -129,6 +129,9 @@ export class PiRunner {
     this.busy = false;
     this.liveMessage = null;
     this.tools = new Map();
+    this.uiRequests = new Map();
+    this.uiTimers = new Map();
+    this.notice = null;
     this.dead = false;
     this.lastActive = Date.now();
     this.buffer = "";
@@ -187,6 +190,13 @@ export class PiRunner {
           else if (message.type === "message_update") this.applyTextUpdate(message.assistantMessageEvent);
         }
         if (message.type === "message_end" || message.type === "agent_settled") this.liveMessage = null;
+        if(message.type==='extension_ui_request') {
+          if(['confirm','input','select','editor'].includes(message.method) && typeof message.id==='string') {
+            const request={...message,receivedAt:Date.now(),expiresAt:typeof message.timeout==='number'?Date.now()+message.timeout:null};
+            this.uiRequests.set(message.id,request);
+            if(request.expiresAt){const timer=setTimeout(()=>{this.uiRequests.delete(message.id);this.uiTimers.delete(message.id);this.publish('rpc',{type:'ui_expired',id:message.id});},Math.max(0,message.timeout));this.uiTimers.set(message.id,timer);}
+          }else if(message.method==='notify') this.notice={message:message.message,notifyType:message.notifyType};
+        }
         if (message.type === 'tool_execution_start') {
           this.tools.set(message.toolCallId,{toolCallId:message.toolCallId,toolName:message.toolName,status:'运行中'});
           while(this.tools.size>100) this.tools.delete(this.tools.keys().next().value);
@@ -274,13 +284,28 @@ export class PiRunner {
       cursor: this.seq,
       busy: this.busy,
       liveMessage: this.liveMessage,
-      tools: [...this.tools.values()]
+      tools: [...this.tools.values()],
+      uiRequests:[...this.uiRequests.values()],
+      notice:this.notice
     };
+  }
+
+  async answerUI(values) {
+    const request=this.uiRequests.get(values.id);
+    if(!request || (request.expiresAt && request.expiresAt<=Date.now())) throw Object.assign(new Error('request_expired'),{status:409,code:'request_expired'});
+    if(values.cancelled!==true) {
+      if(request.method==='confirm') {if(typeof values.confirmed!=='boolean')throw Object.assign(new Error('invalid_confirmation'),{status:400,code:'invalid_confirmation'});}
+      else if(typeof values.value!=='string'||values.value.length>20000 || (request.method==='select'&&!request.options?.includes(values.value))) throw Object.assign(new Error('invalid_ui_value'),{status:400,code:'invalid_ui_value'});
+    }
+    const response={type:'extension_ui_response',id:values.id,...(values.cancelled===true?{cancelled:true}:request.method==='confirm'?{confirmed:values.confirmed}:{value:values.value})};
+    await new Promise((resolve,reject)=>this.child.stdin.write(JSON.stringify(response)+'\n',err=>err?reject(err):resolve()));
+    this.uiRequests.delete(values.id);clearTimeout(this.uiTimers.get(values.id));this.uiTimers.delete(values.id);
   }
 
   stopWithError(error) {
     if (this.dead) return;
     this.dead = true;
+    for(const timer of this.uiTimers.values())clearTimeout(timer);this.uiTimers.clear();this.uiRequests.clear();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);

@@ -33,7 +33,7 @@ for await (const line of lines) {
   } else if (type === "get_messages") {
     output({ type: "response", id, command: type, success: true, data: { messages } });
   } else if (type === "prompt") {
-    messages.push({ role: "user", content: [{ type: "text", text: command.message }] });
+    messages.push({ role: "user", content: [{ type: "text", text: command.message },...(command.images||[])] });
     output({ type: "response", id, command: type, success: true });
     output({ type: "agent_start" });
     setTimeout(() => {

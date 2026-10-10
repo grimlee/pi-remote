@@ -49,6 +49,7 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
     return { status: 200, ok: true, json: async () => data };
   };
   const context = vm.createContext({ document, window, navigator: browserOptions.navigator || {}, location: browserOptions.location || {}, EventSource, fetch,
+    readImages:async()=>[],
     renderContent:(node,message)=>{node.textContent=typeof message.content==='string'?message.content:(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n');},contentForCopy:message=>(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n'),
     crypto: webcrypto, TextEncoder, RecoveryMemory, messageFingerprint, prefersPolling, AbortController, URLSearchParams,
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, fn); delays.set(id, delay); return id; },

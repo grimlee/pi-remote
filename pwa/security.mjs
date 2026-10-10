@@ -88,7 +88,8 @@ export function readJson(req, maxBytes = 65536) {
       size += chunk.length;
       if (size > maxBytes) {
         reject(Object.assign(new Error("Request is too large"), { status: 413 }));
-        req.destroy();
+        // Drain the request so the authenticated client receives a useful 413.
+        chunks.length = 0;
       } else chunks.push(chunk);
     });
     req.on("end", () => {

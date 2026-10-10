@@ -57,15 +57,19 @@
       </header>
       <div id="connection" class="connection" role="status">正在连接…</div>
       <div id="sessionStatus" class="session-status" role="status"></div>
+      <section id="interactiveRequests" class="interactive-requests" hidden aria-label="Pi 等待交互"></section>
       <div id="messages" class="messages">
         <div class="empty">选择左侧会话以开始，或从已有 Pi 会话继续工作。</div>
       </div>
       <button id="jumpLatest" class="jump-latest" type="button" hidden>↓ 回到最新</button>
       <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <input id="imagePicker" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
         <textarea id="prompt" rows="2" aria-label="发送给 Pi 的消息" placeholder="输入消息…" disabled></textarea>
         <div class="composer-bar">
           <span id="activity" class="activity">等待选择会话</span>
           <div class="composer-buttons">
+            <button id="attachImage" class="soft" type="button" disabled>图片</button>
             <button id="stop" class="soft" type="button" disabled>停止</button>
             <button id="send" type="submit" disabled>发送 ↑</button>
           </div>

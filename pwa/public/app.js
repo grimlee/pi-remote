@@ -1,4 +1,5 @@
 import { RecoveryMemory, messageFingerprint, prefersPolling } from "./recovery.js";
+import { readImages } from "./attachments.js";
 import { renderContent, contentForCopy } from "./transcript.js";
 const $ = id => document.getElementById(id);
 const loginView = $("loginView");
@@ -19,6 +20,10 @@ let controlMode="settings";
 let controlSession=null;
 let controls=null;
 let authoritativeState={};
+let attachments=[];
+let attachmentReading=false;
+let lastRequestSignature=null;
+let answeringRequest=false;
 let stream = null;
 let epoch = 0;
 let liveText = "";
@@ -347,6 +352,8 @@ function appendLive(delta) {
 }
 function renderSnapshot(data) {
   agentBusy = !!data.busy;
+  renderRequests(data.uiRequests || []);
+  if(data.notice?.message) $("sessionStatus").title=String(data.notice.message);
   authoritativeState=data.state || {};
   if(current && authoritativeState.sessionName) {current.name=authoritativeState.sessionName;$("sessionTitle").textContent=current.name;}
   if(current && authoritativeState.model) current.model=authoritativeState.model.provider+'/'+authoritativeState.model.id;
@@ -403,7 +410,7 @@ function processRpc(payload) {
   if (type === "tool_execution_start") {
     setActivity("正在执行工具：" + (payload.toolName || "tool"));
   }
-  if (type === "message_update" || type.startsWith("tool_execution_")) scheduleSync(280);
+  if (type === "message_update" || type.startsWith("tool_execution_") || type==="extension_ui_request" || type==="ui_expired") scheduleSync(280);
   if (type === "agent_settled" || type === "agent_end" || type === "turn_end" || type === "message_end") {
     setActivity("本轮结束");
     scheduleSync(type === "message_end" ? 350 : 0);
@@ -462,8 +469,8 @@ async function reconcileCommand(id, signal) {
     const receipt = await api("/api/commands/" + encodeURIComponent(pending.id), signal ? { signal } : {});
     if (memory.pending(id)?.id !== pending.id) return;
     if (receipt.status === "accepted") {
-      if (current?.id === id && await messageFingerprint(promptBox.value) === pending.fingerprint) {
-        promptBox.value = "";
+      if (current?.id === id && await submissionFingerprint(promptBox.value,attachments) === pending.fingerprint) {
+        promptBox.value = "";attachments=[];renderAttachments();
         resizeComposer();
       }
       if (memory.pending(id)?.id !== pending.id) return;
@@ -504,7 +511,7 @@ async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
-  agentBusy = false;controls=null;authoritativeState={};
+  agentBusy = false;controls=null;authoritativeState={};attachments=[];renderAttachments();lastRequestSignature=null;$("interactiveRequests").replaceChildren();$("interactiveRequests").hidden=true;$("attachImage").disabled=false;
   $('controlPanel').hidden=true;$('sessionSettings').disabled=false;
   memory.selected(session.id);
   pendingCommand = memory.pending(session.id);
@@ -540,6 +547,48 @@ async function openSession(session) {
       retryRecovery(thisEpoch);
     }
   }
+}
+async function submissionFingerprint(message,images) {return messageFingerprint(images.length?JSON.stringify([message,images]):message);}
+function renderAttachments() {
+  $('attachments').replaceChildren();
+  attachments.forEach((image,index)=>{
+    const box=document.createElement('div');const img=document.createElement('img');img.alt='待发送图片 '+(index+1);img.src='data:'+image.mimeType+';base64,'+image.data;
+    const remove=document.createElement('button');remove.type='button';remove.className='soft';remove.textContent='移除';remove.addEventListener('click',()=>{attachments.splice(index,1);renderAttachments();resizeComposer();});box.append(img,remove);$('attachments').append(box);
+  });
+  resizeComposer();
+}
+$('attachImage').addEventListener('click',()=>{if(current && !attachmentReading)$('imagePicker').click();});
+$('imagePicker').addEventListener('change',async()=>{
+  const expected=epoch;const files=[...$('imagePicker').files];if(attachmentReading)return;attachmentReading=true;$('attachImage').disabled=true;
+  try{const images=await readImages(files,attachments.length);if(expected===epoch){attachments.push(...images);renderAttachments();setActivity('图片已附加，发送前可以移除');}}
+  catch(err){if(expected===epoch)setActivity(err.message);}
+  finally{attachmentReading=false;$('imagePicker').value='';$('attachImage').disabled=!current;}
+});
+function renderRequests(requests) {
+  const signature=JSON.stringify(requests);if(signature===lastRequestSignature)return;lastRequestSignature=signature;
+  const view=$('interactiveRequests');view.replaceChildren();view.hidden=!requests.length;if(!requests.length)return;
+  const request=requests[0];const selected=current?{...current}:null;const expected=epoch;
+  const title=document.createElement('strong');title.textContent='Pi 等待你响应 · '+String(request.title||request.method);
+  const text=document.createElement('p');text.textContent=String(request.message||'')+(request.expiresAt?' · 超时后由 Pi 自动取消':'')+(requests.length>1?' · 还有 '+(requests.length-1)+' 个请求':'');
+  let field;
+  if(request.method==='select') {field=document.createElement('select');fillSelect(field,(request.options||[]).map(v=>[v,v]));}
+  else if(request.method==='input'||request.method==='editor'){field=document.createElement(request.method==='editor'?'textarea':'input');field.value=request.prefill||'';field.placeholder=request.placeholder||'';field.maxLength=20000;}
+  const error=document.createElement('p');error.className='error';
+  const actions=document.createElement('div');actions.className='control-actions';
+  const buttons=[];
+  const answer=async values=>{
+    if(answeringRequest||!selected||expected!==epoch)return;answeringRequest=true;for(const b of buttons)b.disabled=true;
+    try {
+      await operation(selected.id+'-ui-'+request.id,{type:'extension_ui_response',generation:selected.generation,requestId:request.id,...values},'/api/sessions/'+encodeURIComponent(selected.id)+'/commands');
+      if(expected===epoch){lastRequestSignature=null;await syncState(expected);}
+    } catch(err){if(expected===epoch){error.textContent=err.message;if(err.status===409){lastRequestSignature=null;void syncState(expected);}}}
+    finally{answeringRequest=false;for(const b of buttons)b.disabled=false;}
+  };
+  const add=(label,values,cls='soft')=>{const b=document.createElement('button');b.type='button';b.className=cls;b.textContent=label;b.addEventListener('click',()=>void answer(typeof values==='function'?values():values));buttons.push(b);actions.append(b);};
+  add('取消',{cancelled:true});
+  if(request.method==='confirm'){add('拒绝',{confirmed:false});add('确认',{confirmed:true},'');}
+  else add('提交',()=>({value:field.value}),'');
+  view.append(title,text);if(field)view.append(field);view.append(error,actions);
 }
 function readOperation(key) {try{return JSON.parse(storage?.getItem('pi-remote-operation-'+key)||'null');}catch{return null;}}
 function saveOperation(key,value){try{if(value)storage?.setItem('pi-remote-operation-'+key,JSON.stringify(value));else storage?.removeItem('pi-remote-operation-'+key);}catch{}}
@@ -634,13 +683,14 @@ $("composer").addEventListener("submit", async event => {
   if (!current || submitting) return;
   const sessionId = current.id;
   const message = promptBox.value;
-  if (!message.trim()) return;
+  if ((!message.trim() && !attachments.length) || attachmentReading) return;
+  const images=attachments.slice();
   submitting = true;
   pauseStateReads();
   $("send").disabled = true;
   setActivity("提交命令中…");
   try {
-    const fingerprint = await messageFingerprint(message);
+    const fingerprint = await submissionFingerprint(message,images);
     let command = memory.pending(sessionId) || pendingCommand;
     if (!command || command.fingerprint !== fingerprint || command.sessionId !== sessionId) {
       command = { id: crypto.randomUUID(), fingerprint, sessionId };
@@ -650,7 +700,7 @@ $("composer").addEventListener("submit", async event => {
     memory.pending(sessionId, command);
     const result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", message, commandId: command.id, generation:current?.id===sessionId?current.generation:undefined })
+      body: JSON.stringify({ type: "prompt", message, commandId: command.id, generation:current?.id===sessionId?current.generation:undefined, ...(images.length?{images}: {}) })
     });
     if (result.status === "unknown") {
       if (current?.id === sessionId) setActivity("命令状态未确认；再次发送将查询同一命令 ID，不会重复执行");
@@ -658,7 +708,8 @@ $("composer").addEventListener("submit", async event => {
     }
     memory.pending(sessionId, null);
     if (current?.id !== sessionId) return;
-    if (promptBox.value === message) {
+    if (promptBox.value === message && JSON.stringify(attachments)===JSON.stringify(images)) {
+      attachments=[];renderAttachments();
       promptBox.value = "";
       resizeComposer();
     }
@@ -667,6 +718,7 @@ $("composer").addEventListener("submit", async event => {
     setActivity("命令已接收，等待 Pi 输出…");
     scheduleSync(400);
   } catch (err) {
+    if ([400,409,413].includes(err.status)) {memory.pending(sessionId,null);pendingCommand=null;if(current?.id===sessionId)setActivity("命令未提交："+err.message);return;}
     if (current?.id === sessionId) {
       setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
       setConnection("命令状态：" + err.message, "bad");
