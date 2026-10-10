@@ -297,3 +297,65 @@ test('busy polling responds every second, backs off failures, and returns to idl
   assert.equal(b.calls.filter(c=>c.url.endsWith('/commands')).length,0);
   assert.equal(b.streams.length,0);
 });
+
+test('mobile sidebar has a dismissible backdrop and compact searchable workspace groups', async () => {
+  const b = await browser();
+  const backdrop = b.element('sidebarBackdrop');
+  b.element('openSidebar').handlers.click();
+  assert.equal(backdrop.hidden, false);
+  backdrop.handlers.click();
+  assert.equal(backdrop.hidden, true);
+  const list = b.element('sessions');
+  assert.equal(list.children.length, 1);
+  const workspace = list.children[0];
+  assert.match(workspace.children[0].children[0].textContent, /tmp \/ test/);
+  workspace.children[0].handlers.click();
+  assert.equal(list.children[0].children.length, 1, 'workspace should collapse');
+  const search = b.element('sessionSearch');
+  search.value = 'Disposable';
+  search.handlers.input();
+  assert.equal(list.children[0].children.length, 2, 'search expands matching collapsed group');
+  search.value = 'missing session';
+  search.handlers.input();
+  assert.match(list.children[0].textContent, /没有找到匹配/);
+});
+
+test('identical iOS polling snapshots preserve existing transcript DOM nodes', async () => {
+  const saved = storage();
+  new RecoveryMemory(saved).selected('browser-session-1234');
+  const b = await browser(saved, null, { navigator: { userAgent: 'iPhone' } });
+  const first = b.element('messages').children[0];
+  const poll = [...b.delays].find(([, delay]) => delay === 3000);
+  assert.ok(poll, 'a mobile polling timer is scheduled');
+  await b.timers.get(poll[0])();
+  assert.equal(b.element('messages').children[0], first);
+});
+
+test('repeated live snapshots do not append already-rendered text twice', async () => {
+  const saved = storage();
+  new RecoveryMemory(saved).selected('browser-session-1234');
+  const responseText = 'hello 🙂 '.repeat(1000);
+  const b = await browser(saved, async url => url.endsWith('/state') ? {
+    status: 200, ok: true, json: async () => ({
+      messages: [], cursor: 17, busy: true,
+      liveMessage: { role: 'assistant', content: [{ type: 'text', text: responseText }] }
+    })
+  } : null, { navigator: { userAgent: 'iPhone' } });
+  assert.equal(vm.runInContext('liveText', b.context), responseText);
+  const poll = [...b.delays].find(([, delay]) => delay === 1000);
+  assert.ok(poll);
+  await b.timers.get(poll[0])();
+  assert.equal(vm.runInContext('liveText', b.context), responseText);
+});
+
+test('message copy reads the current full message text', async () => {
+  let clipboardText;
+  const b = await browser(storage(), null, {
+    navigator: { clipboard: { writeText: async text => { clipboardText = text; } } }
+  });
+  const rendered = vm.runInContext('makeMessage("assistant", "copy this message")', b.context);
+  const copy = rendered.block.children[0].children[1];
+  copy.handlers.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(clipboardText, 'copy this message');
+});

@@ -81,3 +81,9 @@ Automated tests cover authentication/error paths, bounded replay, Pi 1.x delta
 reconstruction, browser reload and network recovery, ambiguous command IDs, and
 long text restoration. These tests use a fake Pi or browser harness; they must
 be supplemented by a real Pi prompt/background-tool/abort smoke test on the host.
+
+## Mobile UX experiment (`feature/pwa-mobile-ux`)
+
+This iteration keeps the Pi transport and server behavior unchanged. It adds a dismissible mobile session drawer with a backdrop, session search by name/workspace/model, collapsible workspace groups, short workspace labels with full-path tooltips, per-message copy, an explicit jump-to-latest control, and auto-sizing message input. The iOS polling renderer now skips complete transcript DOM replacement when the authoritative message list is unchanged and sets (rather than appends) identical live assistant snapshots. These changes aim to reduce large-output scroll jumps without changing command idempotency or recovery semantics.
+
+To validate, use `npm run test:pwa`, then verify iPhone Safari and standalone PWA behavior with keyboard shown, screen locked/unlocked, Wi-Fi/5G transitions and >10K-token replies. The service worker shell cache version is `v7`. Deploy from a separate checkout; do not overwrite the currently working live gateway without explicit user approval.
