@@ -1,0 +1,47 @@
+name: Tailcat browser WASM PoC
+on:
+  push:
+    branches: ["experiment/pwa-tailcat-wasm"]
+    paths:
+      - "pwa/tailcat-poc/**"
+      - ".github/workflows/tailcat-browser-poc.yml"
+  workflow_dispatch:
+jobs:
+  wasm-poc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Probe tests and JS validation
+        run: |
+          node --check pwa/tailcat-poc/client.js
+          node --check pwa/tailcat-poc/probe-server.mjs
+          node --test pwa/tailcat-poc/probe.test.mjs
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+      - name: Build official pinned Tailcat WASM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/tailscale/tailcat.git upstream-tailcat
+          git -C upstream-tailcat checkout --detach 790406204c002a6f109ef7c6a30a436601a1f6a8
+          ( cd upstream-tailcat && go run ./cmd/tailcat-webdist -o "$GITHUB_WORKSPACE/wasm-build" )
+          mkdir -p tailcat-browser-dist
+          cp pwa/tailcat-poc/index.html tailcat-browser-dist/
+          cp pwa/tailcat-poc/client.js tailcat-browser-dist/
+          cp wasm-build/wasm_exec.js wasm-build/main.wasm.gz tailcat-browser-dist/
+          cp upstream-tailcat/LICENSE tailcat-browser-dist/TAILCAT-LICENSE
+          gzip -t tailcat-browser-dist/main.wasm.gz
+          ls -lh tailcat-browser-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-remote-tailcat-browser-poc
+          path: tailcat-browser-dist/
+          if-no-files-found: error
+          retention-days: 14
