@@ -200,3 +200,20 @@ test("large session snapshots compress on the wire and retain complete history",
   assert.equal(uncompressed.headers.get("content-encoding"), null);
   assert.equal((await uncompressed.json()).messages.length, data.messages.length);
 });
+
+test("recovery entry and external script bypass shell paths with no-store and CSP", async t => {
+  const f = await fixture();
+  const app = createPwaServer({ token, stateDir: f.config, sessionDir: f.sessions, executable: fakePi });
+  await new Promise(resolve => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.close());
+  const base = "http://127.0.0.1:" + app.server.address().port;
+  const recovery = await fetch(base + "/recover");
+  assert.equal(recovery.status, 200);
+  assert.equal(recovery.headers.get("cache-control"), "no-store");
+  assert.match(recovery.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.match(await recovery.text(), /src="\/sw-reset.js"/);
+  const script = await fetch(base + "/sw-reset.js");
+  assert.equal(script.status, 200);
+  assert.equal(script.headers.get("cache-control"), "no-store");
+  assert.doesNotMatch(await script.text(), /localStorage\.(clear|removeItem)|document\.cookie\s*=/);
+});

@@ -11,6 +11,8 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
+  ["/recover", ["sw-reset.html", "text/html; charset=utf-8"]],
+  ["/sw-reset.js", ["sw-reset.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
@@ -116,7 +118,8 @@ export function createPwaServer(options = {}) {
         const data = await readFile(path.join(root, "public", file));
         res.writeHead(200, {
           "Content-Type": mime,
-          "Cache-Control": pathname === "/sw.js" ? "no-cache" : "max-age=0, must-revalidate"
+          "Cache-Control": ["/recover", "/sw-reset.js"].includes(pathname) ? "no-store"
+            : pathname === "/sw.js" ? "no-cache" : "max-age=0, must-revalidate"
         });
         res.end(data);
       } catch { error(res, 404, "not_found"); }

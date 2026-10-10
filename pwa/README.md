@@ -28,6 +28,8 @@ Open https://YOUR-HOST.YOUR-TAILNET.ts.net:10000/ in Safari with tailnet access,
 - SSE supports monotonic sequence IDs, bounded replay (1200 events / 2 MiB), and state refresh when replay is impossible.
 - Browser persists the selected session ID and restores it after reload. It rebuilds SSE on foreground, network recovery, and stream failure, with bounded backoff. Offline reloads recover without re-pairing.
 - Authoritative state includes the current partial assistant text, reconstructed from Pi 1.x delta-only RPC events, even when bounded event replay has expired.
+- Shell navigation ignores transport/version query parameters for cache lookup and falls back after an 8-second network deadline. Empty or unavailable caches return a valid offline response instead of a Safari null-response error.
+- If an older worker prevents opening the app, visit `/recover` on the same private HTTPS origin. This uncached route unregisters only the root Pi Remote worker and deletes only Pi Remote shell caches, preserving authentication cookies, selected session IDs, pending command metadata, and unrelated caches. It returns to `/?transport=poll&v=5`.
 - Large state responses use gzip when supported, retaining complete message history over slow mobile links.
 - iPhone/iPad default to short HTTPS state requests every three seconds, avoiding long-lived SSE on mobile VPN paths. Failed reads retry with bounded backoff. Use `?transport=poll` to opt into this mode on other browsers or `?transport=stream` for an explicit SSE test.
 - Desktop SSE has an 8-second connection deadline and a 45-second heartbeat deadline. A stalled stream switches to polling for the remainder of the page session, without an endless stream reconnect loop. Commands are never automatically replayed.
