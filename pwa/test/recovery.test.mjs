@@ -26,7 +26,7 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
   const session = { id: 'browser-session-1234', name: 'Disposable test', cwd: '/tmp/test' };
   const streams = [];
   const calls = [];
-  const window = { localStorage: saved, innerHeight:844, visualViewport:browserOptions.visualViewport, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
+  const window = { piRemoteTransport: browserOptions.transport, localStorage: saved, innerHeight:844, visualViewport:browserOptions.visualViewport, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
   const properties = new Map();
   const document = { hidden: false, handlers: {}, documentElement:{style:{setProperty:(k,v)=>properties.set(k,v),getPropertyValue:k=>properties.get(k)}}, getElementById: element,
     createElement: () => element(Math.random()), createDocumentFragment: () => element(Math.random()),
@@ -55,6 +55,73 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
   await new Promise(resolve => setImmediate(resolve));
   return { context, nodes, element, streams, calls, window, document, timers, delays, session, saved };
 }
+
+test('Tailcat session creation uses an inline form and the configured workspace even with no sessions', async()=>{
+  const calls=[];
+  const created={id:'created-session-1234',name:'Phone test',cwd:'/tmp/isolated'};
+  let done=false;
+  const transport={api:async(url,options={})=>{
+    calls.push({url,options});
+    if(url==='/api/sessions')return {sessions:done?[created]:[],workspaces:['/tmp/isolated']};
+    if(url.endsWith('/commands')) {done=true;return {status:'accepted',result:{sessionId:created.id}};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(storage(),null,{transport});
+  await b.element('newSession').handlers.click();
+  assert.equal(b.element('newSessionForm').hidden,false);
+  b.element('newSessionName').value='Phone test';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  const command=JSON.parse(calls.find(c=>c.url.endsWith('/commands')).options.body);
+  assert.equal(command.type,'create');assert.equal(command.cwd,'/tmp/isolated');
+  assert.equal(b.element('sessionTitle').textContent,'Phone test');
+  assert.equal(b.element('newSessionForm').hidden,true);
+});
+
+test('a recovered receipt for a different mutation does not consume a new create action',async()=>{
+  const saved=storage();
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify({id:'old-rename-command',sessionId:'old-session',type:'rename'}));
+  const commands=[];
+  const transport={api:async(url,options={})=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {status:'accepted'};
+    if(url.endsWith('/commands')) {commands.push(JSON.parse(options.body));return {status:'accepted',result:{sessionId:'created-session'}};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});
+  b.element('newSessionName').value='Next operation';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(commands.length,1);assert.equal(commands[0].type,'create');
+});
+
+test('a safely retired missing receipt releases a stale create ID and submits the new action once',async()=>{
+  const saved=storage();
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify({id:'stale-create-command',sessionId:'new_session',type:'create'}));
+  const commands=[];
+  const transport={api:async(url,options={})=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {commandId:'stale-create-command',status:'not_dispatched'};
+    if(url.endsWith('/commands')) {commands.push(JSON.parse(options.body));return {status:'accepted'};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});b.element('newSessionName').value='Phone retry';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(commands.length,1);
+  assert.notEqual(commands[0].commandId,'stale-create-command');
+  assert.equal(saved.getItem('pi-remote-pending-mutation'),null);
+});
+
+test('an unknown reserved receipt still blocks a new create without discarding its ID',async()=>{
+  const saved=storage(),previous={id:'uncertain-create-command',sessionId:'new_session',type:'create'};
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify(previous));let dispatched=0;
+  const transport={api:async(url)=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {status:'unknown'};
+    if(url.endsWith('/commands'))dispatched++;
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});b.element('newSessionName').value='Must not resend';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(dispatched,0);assert.deepEqual(JSON.parse(saved.getItem('pi-remote-pending-mutation')),previous);
+});
 
 test('browser reload restores the selected session and foreground/network replaces SSE', async () => {
   const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
@@ -401,4 +468,30 @@ test('the selected workspace header uses a compact label and preserves the full 
   const b=await browser(saved);
   assert.equal(b.element('sessionSub').textContent,'tmp / test');
   assert.equal(b.element('sessionSub').title,'/tmp/test');
+});
+
+test('Tailcat UI clears definitive rejection but preserves unknown mutations without resubmitting', async () => {
+  let mode = 'reject';
+  const dispatches = [];
+  const transport = {
+    api: async (url, options) => {
+      if (url === '/api/sessions') return {sessions: []};
+      if (url.startsWith('/api/commands/')) return {status: 'unknown'};
+      if (url.endsWith('/commands')) {
+        const command = JSON.parse(options.body); dispatches.push(command);
+        if (mode === 'reject') throw Object.assign(new Error('invalid_name'), {status: 400, definitive: true});
+        return {status: mode, commandId: command.commandId};
+      }
+      return {};
+    }
+  };
+  const b = await browser(storage(), null, {transport});
+  const change = () => vm.runInContext('tailcatMutation("browser-session-1234", {type:"rename", name:"example"})', b.context);
+  await assert.rejects(change(), /invalid_name/);
+  assert.equal(b.saved.getItem('pi-remote-pending-mutation'), null);
+  mode = 'unknown';
+  assert.equal((await change()).status, 'unknown');
+  assert.ok(b.saved.getItem('pi-remote-pending-mutation'));
+  await assert.rejects(change(), /上次操作结果未确认/);
+  assert.equal(dispatches.length, 2);
 });

@@ -118,6 +118,8 @@ export class PiRunner {
   constructor(session, options = {}) {
     this.session = session;
     this.executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
+    this.sessionDir = options.sessionDir;
+    this.strictCwd = options.strictCwd === true;
     this.pending = new Map();
     this.listeners = new Set();
     this.events = [];
@@ -134,12 +136,16 @@ export class PiRunner {
   }
 
   async start() {
+    if (this.dead) throw new Error("Pi RPC is stopped");
     if (this.child) return;
     let cwd = process.cwd();
     try {
       if ((await stat(this.session.cwd)).isDirectory()) cwd = this.session.cwd;
-    } catch {}
-    this.child = spawn(this.executable, ["--session", this.session.file, "--mode", "rpc"], {
+      else if (this.strictCwd) throw new Error('Workspace unavailable');
+    } catch (error) { if (this.strictCwd) throw error; }
+    if (this.dead) throw new Error("Pi RPC is stopped");
+    const args = ["--mode", "rpc", ...(this.session.file ? ["--session", this.session.file] : []), ...(this.sessionDir ? ["--session-dir", this.sessionDir] : [])];
+    this.child = spawn(this.executable, args, {
       cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"], shell: false
     });
     this.child.stdout.on("data", bytes => this.consume(bytes));
@@ -153,6 +159,9 @@ export class PiRunner {
 
   consume(bytes) {
     this.buffer += this.decoder.write(bytes);
+    if (Buffer.byteLength(this.buffer, "utf8") > 16 * 1024 * 1024) {
+      this.stop(); return;
+    }
     let next;
     while ((next = this.buffer.indexOf("\n")) >= 0) {
       const line = this.buffer.slice(0, next).trim();

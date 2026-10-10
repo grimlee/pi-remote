@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https://tailcat.dev https://*.ipn.dev wss://*.ipn.dev; img-src 'self'; base-uri 'none'; form-action 'self'">
+<title>Pi Remote · Tailcat Browser PoC</title>
+<link rel="stylesheet" href="./style.css">
+<script src="./wasm_exec.js" defer></script>
+<script type="module" src="./client.js"></script>
+</head>
+<body>
+<main>
+<h1>Pi Remote · Tailcat WASM</h1>
+<p>这是独立的连通性测试，不是完整 Agent 客户端。通过 Tailcat 浏览器 WASM → DERP → Omarchy 上的隔离 Echo 服务验证无 VPN 访问。</p>
+<label for="addr">Tailcat 临时地址（请从 Host 私下复制，不放进 URL）</label>
+<input id="addr" type="password" placeholder="tc…" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
+<label for="port">测试端口</label>
+<input id="port" type="number" value="17984" min="1024" max="65535" inputmode="numeric">
+<button id="connect" disabled>加载 Tailcat WASM…</button>
+<output id="status" role="status">正在初始化浏览器环境…</output>
+<small>此测试不会读取 Pi 会话，也不会保存地址、密钥或聊天内容。浏览器路径目前经 DERP 中继；Safari 真机连接成功后再开发有认证的 Agent 协议。</small>
+</main>
+</body></html>

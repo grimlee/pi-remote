@@ -1,5 +1,9 @@
 # Pi Remote PWA (experimental)
 
+The separate [authenticated browser Tailcat experiment](tailcat/README.md)
+implements an optional Worker transport and isolated pairing gateway. The live
+HTTPS/Tailscale installation and native client remain independent.
+
 Installable iOS Safari PWA plus standalone Node 22+ HTTPS/SSE gateway for existing Pi RPC sessions. No frontend build dependencies.
 
 ## Tailcat preservation and boundary

@@ -12,6 +12,7 @@ const jumpLatest = $("jumpLatest");
 const connection = $("connection");
 const activity = $("activity");
 let sessions = [];
+let workspaces = [];
 let current = null;
 let stream = null;
 let epoch = 0;
@@ -27,7 +28,7 @@ let submitting = false;
 let streamWatchdog = null;
 let pollTimer = null;
 let realtimeConnected = false;
-let pollingOnly = prefersPolling(navigator, location);
+let pollingOnly = window.piRemoteTransport ? false : prefersPolling(navigator, location);
 let agentBusy = false;
 let activeStateRead = null;
 let lastRenderedSnapshot = null;
@@ -80,6 +81,10 @@ function setConnection(message, kind = "") {
 }
 function setActivity(message) { activity.textContent = message; }
 async function api(url, options = {}) {
+  if (window.piRemoteTransport) {
+    try { return await window.piRemoteTransport.api(url, options); }
+    catch (error) { if (error.status === 401 && url !== "/api/login") showLogin(); throw error; }
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (options.signal?.aborted) abort();
@@ -209,6 +214,7 @@ function renderSessions() {
 }
 function acceptSessions(data) {
   sessions = data.sessions || [];
+  workspaces = data.workspaces || [];
   renderSessions();
   if (!current) setConnection("Host 已连接 · 等待选择会话", "good");
 }
@@ -406,7 +412,8 @@ function attachStream(id, since, expectedEpoch) {
   if (stream) stream.close();
   clearTimeout(streamWatchdog);
   realtimeConnected = false;
-  const source = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/events?since=" + since);
+  const source = window.piRemoteTransport ? window.piRemoteTransport.events(id, since)
+    : new EventSource("/api/sessions/" + encodeURIComponent(id) + "/events?since=" + since);
   stream = source;
   const active = () => expectedEpoch === epoch && stream === source;
   const fail = () => {
@@ -415,6 +422,7 @@ function attachStream(id, since, expectedEpoch) {
     source.close();
     stream = null;
     realtimeConnected = false;
+    if (window.piRemoteTransport) { retryRecovery(expectedEpoch); return; }
     // Latch to short requests instead of endlessly retrying a stalled stream.
     pollingOnly = true;
     clearTimeout(reconnectTimer);
@@ -446,7 +454,7 @@ function attachStream(id, since, expectedEpoch) {
   };
   source.onerror = fail;
   // Safari/VPN proxies can stall SSE without firing onerror.
-  watch(8000);
+  watch(window.piRemoteTransport ? 80000 : 8000);
 }
 async function reconcileCommand(id, signal) {
   const pending = memory.pending(id);
@@ -465,6 +473,9 @@ async function reconcileCommand(id, signal) {
         pendingCommand = null;
         setActivity("上次命令已确认接收");
       }
+    } else if (receipt.status === "not_dispatched") {
+      memory.pending(id, null);
+      if (current?.id === id) { pendingCommand = null; setActivity("上次命令未提交，未自动重发；可重新发送"); }
     } else if (current?.id === id) {
       setActivity("上次命令状态未确认；请检查会话，命令不会自动重发");
     }
@@ -606,7 +617,8 @@ $("stop").addEventListener("click", async () => {
   if (!current) return;
   try {
     pauseStateReads();
-    await api("/api/sessions/" + encodeURIComponent(current.id) + "/commands", {
+    if (window.piRemoteTransport) await tailcatMutation(current.id, {type: "abort"});
+    else await api("/api/sessions/" + encodeURIComponent(current.id) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "abort" })
     });
@@ -659,3 +671,99 @@ async function bootstrap() {
   }
 }
 void bootstrap();
+async function tailcatMutation(sessionId, command) {
+  const key = "pi-remote-pending-mutation";
+  const previous = memory.read(key);
+  if (previous) {
+    const receipt = await api("/api/commands/" + encodeURIComponent(previous.id));
+    if (!["accepted", "not_dispatched"].includes(receipt.status)) throw new Error("上次操作结果未确认，请检查会话；不会自动重发");
+    memory.write(key, null);
+    if (receipt.status === "accepted" && previous.type === command.type && previous.sessionId === sessionId) return receipt;
+  }
+  const id = crypto.randomUUID();
+  // Persist identifiers only for every mutation, including create/abort/model.
+  // A lost reply must be reconciled before another mutation can be dispatched.
+  memory.write(key, {id, sessionId, type: command.type});
+  let result;
+  try {
+    result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
+      method: "POST", body: JSON.stringify({...command, commandId: id})
+    });
+  } catch (error) {
+    if (error.definitive) memory.write(key, null);
+    throw error;
+  }
+  if (result.status === "accepted") memory.write(key, null);
+  return result;
+}
+if (window.piRemoteTransport) {
+  window.piRemoteTransport.onRecovered = () => {
+    pollingOnly = false;
+    void recoverSession();
+    const previous = memory.read("pi-remote-pending-mutation");
+    if (previous) void api("/api/commands/" + encodeURIComponent(previous.id)).then(receipt => {
+      if (["accepted", "not_dispatched"].includes(receipt.status)) {
+        memory.write("pi-remote-pending-mutation", null);
+        setActivity(receipt.status === "accepted" ? "上次操作已确认接收，请同步会话" : "上次操作未提交，未自动重发；可重新操作");
+      }
+    }).catch(() => {});
+  };
+  $("newSession").hidden = false;
+  $("renameSession").hidden = false;
+  $("chooseModel").hidden = false;
+  const change = tailcatMutation;
+  $("newSession").addEventListener("click", async () => {
+    $("newSessionForm").hidden = false;
+    $("newSessionName").focus?.();
+  });
+  $("cancelNewSession").addEventListener("click", () => { $("newSessionForm").hidden = true; });
+  $("newSessionForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    if ($("createSession").disabled) return;
+    const name = $("newSessionName").value;
+    if (!name?.trim()) return;
+    const status = $("newSessionStatus");
+    const report = text => { status.hidden = false; status.textContent = text; setActivity(text); };
+    const cwd = current?.cwd || sessions[0]?.cwd || workspaces[0];
+    if (!cwd) { report("Host 未配置允许的工作区"); return; }
+    $("createSession").disabled = true;
+    report("正在创建会话…");
+    try {
+      const result = await change("new_session", {type: "create", name, cwd});
+      if (result.status !== "accepted") { report("创建结果未确认，请刷新列表；不会自动重试"); return; }
+      await loadSessions();
+      const created = sessions.find(s => s.id === result.result?.sessionId);
+      if (created) {
+        $("newSessionForm").hidden = true; $("newSessionName").value = "";
+        report("会话已创建"); await openSession(created);
+      } else report("命令已接收，请更新会话列表确认");
+    } catch (e) { report("创建失败或结果未确认：" + e.message); }
+    finally { $("createSession").disabled = false; }
+  });
+  $("renameSession").addEventListener("click", async () => {
+    if (!current) return;
+    const name = window.prompt("会话名称", current.name);
+    if (!name?.trim()) return;
+    try { await change(current.id, {type: "rename", name}); await loadSessions(); }
+    catch (e) { setActivity("改名结果未确认：" + e.message); }
+  });
+  $("chooseModel").addEventListener("click", async () => {
+    if (!current) return;
+    try {
+      const {models} = await api("/api/sessions/" + encodeURIComponent(current.id) + "/models");
+      const picker = $("modelPicker"); picker.replaceChildren();
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = JSON.stringify([model.provider, model.id]); option.textContent = model.name || model.id;
+        picker.append(option);
+      }
+      picker.hidden = false; $("applyModel").hidden = false;
+    } catch (e) { setActivity("无法读取模型：" + e.message); }
+  });
+  $("applyModel").addEventListener("click", async () => {
+    if (!current || !$("modelPicker").value) return;
+    const [provider, modelId] = JSON.parse($("modelPicker").value);
+    try { await change(current.id, {type: "set_model", provider, modelId}); scheduleSync(0); }
+    catch (e) { setActivity("模型变更结果未确认：" + e.message); }
+  });
+}

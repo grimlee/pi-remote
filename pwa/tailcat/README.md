@@ -1,0 +1,261 @@
+# Authenticated browser Tailcat experiment
+
+Implements Issue #42 Phase 1 as a separate, reviewable transport. The owner has
+reported repeated iPhone Echo successes; this permits isolated development.
+The authenticated client still requires actual iPhone acceptance, including
+its Worker, WebCrypto, IndexedDB and background/network lifecycle.
+
+No production service is installed or restarted by building this directory.
+Keep the original Tailscale PWA, native Tailcat, T3, SSH and Serve routes as the
+fallback. Do not publish an Agent HTTP API or proxy one through the static site.
+Review authentication before starting a real-Agent test deployment.
+
+## Transport and trust
+
+* Public HTTPS serves program assets only. `static.mjs` verifies their manifest
+  hashes and has an exact filename allowlist. It rejects queries, POSTs, key
+  files and `/api` routes. It does not log URLs or forward requests to an Agent.
+* A module Worker runs the official Go 1.27.1 / Tailcat v0.6.0 build at commit
+  `790406204c002a6f109ef7c6a30a436601a1f6a8`. Browser TCP bytes travel over
+  Tailcat's encrypted DERP/WebSocket tunnel. No WebRTC fork is used.
+* The loopback gateway accepts a versioned framed protocol, not HTTP or arbitrary
+  Pi RPC. It shares `PiService`, `PiRunner` and the durable `CommandLedger` with
+  the existing private HTTPS adapter. Native transport code/keys stay unchanged.
+* Device authentication uses P-256 ECDSA/SHA-256. This avoids assuming optional
+  Ed25519/X25519 WebCrypto support on iOS; Tailcat's own WireGuard crypto is
+  unchanged. The browser tests sign/verify and structured-cloning of **nonextractable**
+  private keys. Actual iPhone support is a remaining acceptance gate.
+* The Host has a separate signing identity and owner grants in an isolated
+  browser state directory. A locally obtained one-time bundle pins the Host
+  key, Tailcat address, HTTPS origin, expiry and a 256-bit secret. Its signed
+  contents are pasted in-page or scanned as plain text; never use a URL query,
+  fragment, public QR, issue attachment or analytics event for pairing.
+* Pairing verifies device proof of key possession before consuming the invite.
+  A grant and the spent invite are persisted together by an atomic, fsynced
+  file replacement. Only the invite hash is stored. Invitations expire after
+  five minutes by default and cannot be reused by another device.
+* Every connection gets a signed random Host challenge. Device authentication
+  and each request bind its signature to that challenge, connection, Host,
+  device, sequence, request ID, operation and arguments. Captured requests or
+  authentication proofs do not work on another connection. Tailcat possession
+  alone never authorizes an Agent request.
+* Grants are checked again on requests and response/event sends. Local admin
+  revocation immediately closes that device's sockets. It prevents new control;
+  it cannot undo a tool/command already accepted by Pi.
+* IndexedDB stores the nonextractable signing and wrapping CryptoKeys. Host
+  configuration (including the sensitive Tailcat capability and pending command
+  IDs) is AES-GCM sealed with the nonextractable wrapping key. No bearer token or
+  plaintext Agent credentials go in localStorage. Static-origin JavaScript must
+  remain trusted: nonextractability does not prevent same-origin malicious code
+  from using a key. Do not claim this design has had an independent security audit.
+
+## Recovery and limits
+
+The Worker maintains one authenticated tunnel for multiplexed requests and
+subscriptions. It closes the tunnel on backgrounding, reconnects on foreground,
+online events and connection failure with 1–15 second backoff plus jitter, and
+the UI rebuilds subscriptions from authoritative snapshots and command receipts.
+15-second signed heartbeats refresh a 45-second Host lease. Pi runners survive
+browser disconnection; a gateway/process crash is not durable tool execution.
+
+All mutations reserve an fsynced receipt before dispatch. Their IDs survive in
+sealed browser state; after reconnect only receipt reads are retried. Missing or
+`unknown` receipts are retained for operator inspection and never automatically
+reissued. Oversized requests fail before reservation; authoritatively rejected
+validation requests clear their pending IDs. Prompt IDs also retain the existing UI recovery semantics. Unconfirmed
+operations deliberately block further mutations, except explicit abort. Inspect
+the Host's receipt and session before resolving ambiguous state; do not clear
+browser state and blindly resend. Cancellation drops a pending response; it is
+not an implicit Pi abort and cannot roll back a dispatched mutation.
+
+Budgets are explicit: 32 sockets, eight in-flight requests/socket, four streams,
+128 KiB incoming frames, 24 KiB response chunks, 8 MiB aggregate assembling or
+sending results, 2 MiB queued socket writes, and eight/1 MiB unacknowledged UI
+events. Slow/suspended clients disconnect rather than accumulate output.
+RPC stdout has a 16 MiB record budget. A connection rotates after 4096 requests.
+Session listing pages contain at most 100 entries (10,000 scanned maximum);
+state pages contain at most 160 messages and a cursor guards history changes.
+Large individual results fail explicitly rather than silently truncate.
+An old event cursor returns a reset and the client resynchronizes authoritative
+state. The existing transcript UI renders its latest 160-message window;
+historical pages are available through the transport API.
+
+The client maps pairing/login, list/create/rename, models, prompt, abort, state,
+receipts and subscriptions. New empty sessions are seeded with Pi's documented
+v3 header/name metadata because current Pi delays persisting new empty sessions
+until an assistant turn. Execution stays entirely in the existing RPC runner.
+The Tailcat adapter requires an explicit absolute executable and canonical
+workspace allowlist. It never falls back to the system `pi`. Session headers
+cannot expand the allowlist; sessions outside it, path traversal and files
+replaced by symlinks outside the session root are rejected before starting RPC.
+The existing HTTPS adapter retains its previous workspace policy.
+
+The Tailcat page has a local diagnostics panel with WASM startup, handshake,
+recovery and read-request samples (last 200 per category), p50/p95, connection
+attempts and a force-reconnect button. Its downloadable JSON contains no host
+address, invitation, device/session identifiers, keys or conversation data.
+Safari may not expose memory statistics; available JS heap figures exclude
+Worker/WASM and process memory. Samples reset on page reload. Attempt counters
+include attempts still in progress; they are not a final success-rate claim.
+
+## Build static artifacts
+
+The GitHub Actions workflow builds the pinned upstream WASM and packages both the
+Echo PoC and `pi-remote-tailcat-secure-static`. It does **not** publish Pages or
+configure a public Agent route. The Go runtime and WASM must come from the same
+build. Locally, point the builder at the verified Actions artifact directory:
+
+```sh
+node pwa/tailcat/build.mjs /absolute/pinned-wasm-artifact dist/tailcat-secure
+node pwa/tailcat/static.mjs dist/tailcat-secure 17989
+```
+
+The input must contain `main.wasm.gz`, `wasm_exec.js`, and `TAILCAT-LICENSE`.
+The static service listens only on `127.0.0.1`. Use an independently approved
+HTTPS static origin; enabling public GitHub Pages needs owner confirmation.
+The generated worker caches only enumerated static assets, including WASM, in
+a distinct content-versioned cache. It never caches API responses or pairing
+data. The legacy PWA shell cache is bumped to v7.3 for its optional adapter hook;
+the live installation is not changed by this branch.
+
+## Explicit isolated test deployment (after review)
+
+Use a separate checkout, new state directory and new Pi session directory. Check
+that 17987 and 17989 are free. Never point these examples at active native/PWA
+session directories or reuse native Tailcat private keys.
+
+```sh
+PI_REMOTE_BROWSER_STATE_DIR=/absolute/private/browser-test/state \
+PI_REMOTE_BROWSER_SESSION_DIR=/absolute/private/browser-test/sessions \
+PI_REMOTE_BROWSER_WORKSPACES='["/absolute/disposable/workspace"]' \
+PI_REMOTE_BROWSER_PI_COMMAND=/absolute/path/to/reviewed-mock-launcher \
+node pwa/tailcat/gateway.mjs
+```
+
+In another isolated process, expose **only** the new gateway port:
+
+```sh
+TAILCAT_ADDR_FILE=/absolute/private/browser-test/address.txt \
+XDG_CONFIG_HOME=/absolute/private/browser-test/tailcat-config \
+/absolute/path/to/tailcat serve --key=new 17987
+```
+
+The address is a private capability. Restrict its file/directory permissions and
+do not route 8792/8793, a production relay, shell, or arbitrary port range.
+Generate a private one-time bundle via the `0600` local admin socket:
+
+```sh
+node pwa/tailcat/admin.mjs pair /absolute/private/browser-test/state \
+  /absolute/private/browser-test/address.txt https://APPROVED-STATIC-ORIGIN \
+  /absolute/private/browser-test/pairing.txt 17987
+qrencode -o /absolute/private/browser-test/pairing.png \
+  < /absolute/private/browser-test/pairing.txt
+```
+
+Paste that file's contents into the HTTPS page's pairing field. The QR represents
+plain pairing text, not a URL. Keep it outside the static directory. Use `list`
+and `revoke` in `admin.mjs` to inspect/revoke browser devices. State/private files
+are `0600`; the state directory should be `0700`. Pairing is bound to an exact
+origin. Changing a temporary HTTPS hostname or losing browser keys requires a
+fresh invitation. Restarting an ephemeral Tailcat sidecar changes its capability;
+an address-update protocol and origin migration are not implemented in this draft.
+
+## Verification and remaining gates
+
+`npm run test:pwa` covers the legacy adapter and the new protocol/security tests.
+The optional browser harness runs official WASM and an ephemeral Tailcat CLI
+against **mock Pi only**; it deletes its isolated fixture afterward:
+
+```sh
+node pwa/tailcat/browser-smoke.mjs /absolute/wasm-artifact \
+  /absolute/tailcat chromium 10
+```
+
+Install Playwright locally or set `PI_REMOTE_PLAYWRIGHT_MODULE` to a module path.
+`PI_REMOTE_CHROMIUM` may select an existing Chromium executable. CI runs Chromium
+with the same pinned CLI checksum, no Agent credentials or provider calls.
+Local Chromium and desktop WebKit each passed 10 reconnects, key persistence,
+large Unicode streaming, and a lost accepted-command reply followed by reload,
+with zero duplicate prompts and zero API calls to the static origin. A local real
+Pi metadata-only check verified that created empty sessions reopen with the same
+ID/name; it sent no model prompt.
+
+Before promotion: review authentication; approve an isolated real-Agent test;
+test actual iPhone crypto/Worker/IndexedDB in Safari and Home Screen, lock/unlock,
+backgrounding, WebKit termination and Wi-Fi/5G changes; measure startup, p50/p95
+latency, at least 20 reconnects, completion rate and whole-process memory against
+the unchanged Tailscale baseline. Desktop/CI passes are not this acceptance.
+Preserve the original Echo test during that process and do not merge this Draft
+PR or replace working PWA/native services based only on CI.
+
+## Phase A: physical iPhone with Mock Pi only
+
+A Phase A deployment must explicitly select `pwa/test/fake-pi` through a reviewed
+launcher, use fresh state/session/workspace directories and start under a minimal
+environment. `PI_REMOTE_TEST_PERSIST=1` enables mock transcript persistence across
+Gateway restarts; `PI_REMOTE_TEST_AUDIT` records only RPC IDs/types and prompt
+hashes, never prompt contents. Mock Pi has no provider or tool execution path.
+On Linux, a separate network and mount namespace can additionally prevent the
+Mock from reaching providers or reading production credentials/sessions.
+Verify the running process environment, namespace and actual RPC responses.
+Do not treat an environment file as proof of isolation.
+
+Build with `node pwa/tailcat/build.mjs WASM_DIR OUTPUT --mock` to identify the page
+as a Mock test. Keep private runtime state outside OUTPUT. Use a dedicated HTTPS
+origin. A TryCloudflare Quick Tunnel is acceptable only for this temporary test:
+its hostname can change on restart and existing grants then require new pairing.
+Restarting `tailcat serve --key=new` also changes its address; to simulate an
+outage without replacing its identity, suspend/resume only the isolated test
+sidecar. Do not suspend the production sidecar.
+
+The Gateway CLI probes a leftover local admin socket after an unclean stop. It
+removes only an owned, unchanged Unix socket that refuses connections; it refuses
+an active socket or ordinary file. The signing identity and grants remain in
+browser-authority.json. Graceful shutdown still removes the admin socket.
+
+Only mint the five-minute phone invitation once services, static assets and
+acceptance checks are ready. Paste privately obtained text in the page; do not
+send a QR containing pairing text to a web search or online QR decoder. The
+current page intentionally disables camera permission; local QR generation is
+for a trusted offline decoder/copy workflow.
+
+Phone acceptance remains manual: Safari and Home Screen pairing/key persistence,
+1–10 minute lock/background, Wi-Fi↔5G switching, at least 20 reconnects, long_test
+stream integrity, offline UI and revocation. Preserve the Echo experiment and
+all production services. Passing Mock acceptance is not permission to change the
+executable to real Pi: request a separate real-Agent authorization afterward.
+
+The Tailcat pairing shell is visible before JavaScript/WASM initialization.
+A failed UI-module load shows a recovery link rather than hiding both screens.
+Foreground/pageshow resumes an unpaired device to the unpaired state; lifecycle
+messages are applied before asynchronous boot so a later suspend wins.
+`/recover.html` is a static-only recovery entry outside the shell cache. It
+unregisters only this origin's root `/sw.js` and deletes only Tailcat program
+caches; IndexedDB keys, grants, localStorage and pending command IDs are retained.
+The browser smoke also checks module failure, lifecycle events while WASM is
+loading, and identity-preserving cache recovery in fresh browser contexts.
+These simulated desktop checks still require physical iPhone confirmation.
+
+New sessions use an inline name form with visible progress/errors, including
+when the host has only an allowed workspace and no existing sessions. The
+browser smoke creates a Mock session and sends a prompt in it.
+
+Foreground recovery probes a socket still marked ready; a failed probe dials
+again without replaying commands. Suspend/forced recovery retires an in-flight
+WASM dial immediately, dials have a 30-second deadline, and late candidates or
+settlement cannot replace/clear a newer attempt. BFCache pageshow forces a fresh
+connection; a normal pageshow/focus performs a liveness check. Smoke coverage
+also closes a page and reopens it with the same device store and no reconnect
+button. Physical Safari termination and lock/network transitions remain manual.
+
+A stale browser mutation ID can outlive a request that never reached the Host.
+A `command_not_found` receipt used to block subsequent creates indefinitely.
+The Worker now resolves that case through authenticated `command.retire`:
+the Host synchronously persists a terminal `not_dispatched` reservation only
+if the ID is absent. Any late dispatch with that ID is rejected, including one
+already waiting for discovery before its final ledger lookup. Existing accepted
+or unknown reservations are returned unchanged. Browser pending IDs are cleared
+only after an accepted or terminal receipt; no old command is replayed.
+The sidebar shows the static build version. Smoke tests seed stale IDs in both
+localStorage and sealed IndexedDB, then verify create succeeds and a late old
+dispatch is rejected. Physical iPhone recovery still needs user confirmation.

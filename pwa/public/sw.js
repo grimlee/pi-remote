@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "pi-remote-shell-";
-const CACHE = CACHE_PREFIX + "v7.2";
+const CACHE = CACHE_PREFIX + "v7.3";
 const SHELL = ["/", "/app.js", "/recovery.js", "/styles.css", "/icon.svg", "/icon-180.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
