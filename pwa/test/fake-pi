@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+import { createInterface } from "node:readline";
+const messages = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+const output = event => process.stdout.write(JSON.stringify(event) + "\n");
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of lines) {
+  let command;
+  try { command = JSON.parse(line); } catch { continue; }
+  const { id, type } = command;
+  if (type === "get_state") {
+    output({ type: "response", id, command: type, success: true, data: { sessionId: "session_test_12345", isStreaming: false } });
+  } else if (type === "get_messages") {
+    output({ type: "response", id, command: type, success: true, data: { messages } });
+  } else if (type === "prompt") {
+    messages.push({ role: "user", content: [{ type: "text", text: command.message }] });
+    output({ type: "response", id, command: type, success: true });
+    output({ type: "agent_start" });
+    setTimeout(() => {
+      output({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "mock reply" } });
+      messages.push({ role: "assistant", content: [{ type: "text", text: "mock reply" }] });
+      output({ type: "message_end" });
+      output({ type: "turn_end" });
+      output({ type: "agent_end" });
+    }, 40);
+  } else if (type === "abort") {
+    output({ type: "response", id, command: type, success: true });
+  } else {
+    output({ type: "response", id, command: type, success: false, error: "unsupported test command" });
+  }
+}
