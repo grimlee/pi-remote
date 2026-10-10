@@ -12,6 +12,7 @@ import { Framer, frame, proof, MAX_FRAME, MAX_RESULT, publicKey } from '../tailc
 import { DeviceAuthority, signed, validSignature } from '../tailcat/authorization.mjs';
 import { deviceIdentity, signValue, verifySigned } from '../tailcat/identity.mjs';
 import { createTailcatGateway, prepareAdminSocket } from '../tailcat/gateway.mjs';
+import { PiService } from '../service.mjs';
 import { buildStatic } from '../tailcat/build.mjs';
 import { staticServer } from '../tailcat/static.mjs';
 
@@ -181,6 +182,42 @@ test('parallel command IDs reserve once and ambiguous receipts are never re-disp
   assert.equal((await f.app.service.snapshot('session_test_12345')).messages.filter(m=>m.content?.[0]?.text==='parallel').length,1);
   const before=f.app.service.ledger.get(cmd.commandId); f.app.service.ledger.save({...before,status:'unknown'});
   assert.equal((await f.app.service.command('session_test_12345',cmd)).status,'unknown');
+});
+test('authenticated retirement of a missing receipt durably rejects late dispatch without starting Pi',async t=>{
+  const f=await fixture(t);const {client}=await paired(t,f);const commandId=randomUUID();
+  await assert.rejects(client.call('command.receipt',{commandId}),/command_not_found/);
+  assert.equal((await client.call('command.retire',{commandId})).status,'not_dispatched');
+  const command={type:'create',commandId,cwd:f.root,name:'late request'};
+  await assert.rejects(client.call('command.dispatch',{sessionId:'new_session',command}),/command_retired/);
+  assert.equal((await client.call('sessions.list')).sessions.length,1);
+  assert.equal(f.app.service.runners.size,0);
+  const restarted=new PiService({stateDir:f.state,sessionDir:f.sessions,executable:fakePi,workspaces:[f.root],strictWorkspaces:true});
+  t.after(()=>restarted.close());
+  assert.equal(restarted.receipt(commandId).status,'not_dispatched');
+  await assert.rejects(restarted.command('new_session',command),/command_retired/);
+});
+test('retirement fences an already-arrived create awaiting discovery before reservation',async t=>{
+  const f=await fixture(t);const service=f.app.service,commandId=randomUUID();
+  const refresh=service.refreshSessions.bind(service);let release,entered;
+  const reached=new Promise(resolve=>{entered=resolve;});
+  service.refreshSessions=async(...args)=>{entered();await new Promise(resolve=>{release=resolve;});return refresh(...args);};
+  const creating=service.command('new_session',{type:'create',commandId,cwd:f.root,name:'must not execute'});
+  const rejected=assert.rejects(creating,/command_retired/);await reached;
+  assert.equal(service.retireMissing(commandId).status,'not_dispatched');release();await rejected;
+  assert.equal(service.temporaryRunners.size,0);assert.equal(service.runners.size,0);
+  assert.equal((await refresh()).length,1);
+});
+test('retirement preserves accepted and unknown receipts and rejects unauthenticated callers',async t=>{
+  const f=await fixture(t);const {client}=await paired(t,f);
+  const commandId=randomUUID();await client.call('command.dispatch',{sessionId:'session_test_12345',command:{type:'prompt',commandId,message:'only once'}});
+  assert.equal((await client.call('command.retire',{commandId})).status,'accepted');
+  const existing=f.app.service.ledger.get(commandId);f.app.service.ledger.save({...existing,status:'unknown'});
+  assert.equal((await client.call('command.retire',{commandId})).status,'unknown');
+  assert.equal((await f.app.service.snapshot('session_test_12345')).messages.filter(m=>m.content?.[0]?.text==='only once').length,1);
+  const anonymous=new Client(f.port);t.after(()=>anonymous.close());await anonymous.greet();anonymous.key=keypair();
+  const neverAuthorized=randomUUID(),closed=once(anonymous.socket,'close');
+  anonymous.request('command.retire',{commandId:neverAuthorized});await closed;
+  assert.equal(f.app.service.ledger.get(neverAuthorized),undefined);
 });
 test('local admin socket revokes an active connection immediately',async t=>{
   const f=await fixture(t); const {client,key}=await paired(t,f);

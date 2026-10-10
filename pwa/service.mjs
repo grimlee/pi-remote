@@ -81,6 +81,15 @@ export class PiService {
     if (!item) throw fault(404, 'command_not_found');
     return {commandId: item.id, sessionId: item.sessionId, status: item.status, ...(item.result ? {result: item.result} : {})};
   }
+  retireMissing(id) {
+    if (this.closed) throw fault(503, 'service_closed');
+    if (typeof id !== 'string' || !/^[\w-]{10,100}$/.test(id)) throw fault(400, 'invalid_command_id');
+    // Missing receipts are not proof that a delayed request cannot arrive.
+    // Reserve a durable terminal ID, synchronously, before releasing the client.
+    // An existing accepted/unknown reservation is never changed or re-executed.
+    if (!this.ledger.get(id)) this.ledger.save({id, sessionId: null, hash: null, status: 'not_dispatched', at: Date.now()});
+    return this.receipt(id);
+  }
   async command(id, body) {
     if (!body || !['prompt', 'abort', 'rename', 'set_model', 'create'].includes(body.type)) throw fault(400, 'unsupported_command');
     if (typeof body.commandId !== 'string' || !/^[\w-]{10,100}$/.test(body.commandId)) throw fault(400, 'invalid_command_id');
@@ -108,6 +117,7 @@ export class PiService {
     const hash = createHash('sha256').update(body.type === 'prompt' ? id + '\n' + body.message : JSON.stringify([id, body.type, values])).digest('hex');
     const prior = this.ledger.get(body.commandId);
     if (prior) {
+      if (prior.status === 'not_dispatched') throw fault(409, 'command_retired');
       if (prior.hash !== hash || prior.sessionId !== id) throw fault(409, 'command_id_conflict');
       return {...this.receipt(body.commandId), deduplicated: true};
     }
@@ -115,6 +125,7 @@ export class PiService {
     // There is no await between the final lookup and durable reservation.
     const raced = this.ledger.get(body.commandId);
     if (raced) {
+      if (raced.status === 'not_dispatched') throw fault(409, 'command_retired');
       if (raced.hash !== hash || raced.sessionId !== id) throw fault(409, 'command_id_conflict');
       return {...this.receipt(body.commandId), deduplicated: true};
     }

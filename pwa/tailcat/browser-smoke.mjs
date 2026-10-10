@@ -85,6 +85,15 @@ try {
     } catch(error) { return error.status; }
   });
   assert.equal(invalid,400,'a definitively rejected request must not block later mutations');
+  // Reproduce the phone's stale localStorage + sealed Worker ID, for which
+  // the Host has no receipt. A terminal ledger reservation must unblock create.
+  const staleId=await page.evaluate(async()=>{
+    const id=crypto.randomUUID();const pending={id,sessionId:'new_session',type:'create'};
+    localStorage.setItem('pi-remote-pending-mutation',JSON.stringify(pending));
+    const {loadDevice,saveDevice}=await import('/identity.mjs');const {identity,config}=await loadDevice();
+    config.pendingMutations=[pending];await saveDevice(identity,config);return id;
+  });
+  await page.reload();await page.locator('#appView').waitFor({state:'visible',timeout:90000});
   await page.locator('#openSidebar').click();
   await page.locator('#newSession').click();
   await page.locator('#newSessionName').fill('Phone created mock');
@@ -93,6 +102,13 @@ try {
   const createdList=await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions'));
   const created=createdList.sessions.find(s=>s.name==='Phone created mock');
   assert.ok(created,'inline creation reaches Mock Pi');
+  assert.equal(app.service.receipt(staleId).status,'not_dispatched');
+  assert.equal(await page.evaluate(()=>localStorage.getItem('pi-remote-pending-mutation')),null);
+  const late=await page.evaluate(async id=>{
+    try {await window.piRemoteTransport.api('/api/sessions/session_test_12345/commands',{method:'POST',body:JSON.stringify({type:'prompt',commandId:id,message:'must not execute'})});return null;}
+    catch(error){return error.message;}
+  },staleId);
+  assert.equal(late,'command_retired');
   await page.locator('#prompt').fill('created session prompt');
   await page.locator('#composer').evaluate(form=>form.requestSubmit());
   await page.waitForFunction(()=>document.getElementById('messages').textContent.includes('mock reply'));
@@ -161,7 +177,7 @@ try {
   assert.equal((await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'))).messages.filter(m=>m.content?.[0]?.text==='long_test').length,1);
   assert.equal(requests.some(p=>p.startsWith('/api/')),false,'no API request to static origin');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,startupFailureVisible:true,backgroundDuringStartup:true,cacheRecoveryPreservesIdentity:true,inlineSessionCreation:true,createdSessionPrompt:true,pageCloseReopenAutoConnect:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
+  console.log(JSON.stringify({kind,pairing:true,nonextractableKeys:true,workerWasm:true,diagnostics:true,startupFailureVisible:true,backgroundDuringStartup:true,cacheRecoveryPreservesIdentity:true,staleMissingReceiptRecovered:true,lateRetiredCommandRejected:true,inlineSessionCreation:true,createdSessionPrompt:true,pageCloseReopenAutoConnect:true,cancellation:true,longUnicodeReply:true,lostReplyReconciled:true,reload:true,duplicatePrompts:0,reconnects:timings.length,staticApiRequests:0}));
 } finally {
   await browser?.close();
   if(sidecar&&!sidecar.killed){const closed=once(sidecar,'exit');sidecar.kill('SIGTERM');await closed;}

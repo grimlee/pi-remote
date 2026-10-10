@@ -473,6 +473,9 @@ async function reconcileCommand(id, signal) {
         pendingCommand = null;
         setActivity("上次命令已确认接收");
       }
+    } else if (receipt.status === "not_dispatched") {
+      memory.pending(id, null);
+      if (current?.id === id) { pendingCommand = null; setActivity("上次命令未提交，未自动重发；可重新发送"); }
     } else if (current?.id === id) {
       setActivity("上次命令状态未确认；请检查会话，命令不会自动重发");
     }
@@ -673,9 +676,9 @@ async function tailcatMutation(sessionId, command) {
   const previous = memory.read(key);
   if (previous) {
     const receipt = await api("/api/commands/" + encodeURIComponent(previous.id));
-    if (receipt.status !== "accepted") throw new Error("上次操作结果未确认，请检查会话；不会自动重发");
+    if (!["accepted", "not_dispatched"].includes(receipt.status)) throw new Error("上次操作结果未确认，请检查会话；不会自动重发");
     memory.write(key, null);
-    if (previous.type === command.type && previous.sessionId === sessionId) return receipt;
+    if (receipt.status === "accepted" && previous.type === command.type && previous.sessionId === sessionId) return receipt;
   }
   const id = crypto.randomUUID();
   // Persist identifiers only for every mutation, including create/abort/model.
@@ -699,7 +702,10 @@ if (window.piRemoteTransport) {
     void recoverSession();
     const previous = memory.read("pi-remote-pending-mutation");
     if (previous) void api("/api/commands/" + encodeURIComponent(previous.id)).then(receipt => {
-      if (receipt.status === "accepted") { memory.write("pi-remote-pending-mutation", null); setActivity("上次操作已确认接收，请同步会话"); }
+      if (["accepted", "not_dispatched"].includes(receipt.status)) {
+        memory.write("pi-remote-pending-mutation", null);
+        setActivity(receipt.status === "accepted" ? "上次操作已确认接收，请同步会话" : "上次操作未提交，未自动重发；可重新操作");
+      }
     }).catch(() => {});
   };
   $("newSession").hidden = false;

@@ -91,7 +91,7 @@ function receive(message) {
     const partial = assembly.get(message.id);
     if (partial) { receivedBytes -= partial.bytes.length; assembly.delete(message.id); }
     const error = fail(message.status || 503, message.error || 'request_failed');
-    error.definitive = [400, 403, 404, 413, 429].includes(message.status);
+    error.definitive = [400, 403, 404, 413, 429].includes(message.status) || (message.status === 409 && message.error === 'command_retired');
     complete(message.id, null, error); return;
   }
   if (message.type === 'result.start') {
@@ -236,16 +236,25 @@ async function request(op, args, id = crypto.randomUUID(), timeout) {
     }
     throw error;
   }
-  if ((op === 'command.dispatch' || op === 'command.receipt') && value.status === 'accepted') {
+  if (['command.dispatch', 'command.receipt', 'command.retire'].includes(op) && ['accepted', 'not_dispatched'].includes(value.status)) {
     config.pendingMutations = (config.pendingMutations || []).filter(x => x.id !== value.commandId);
     await saveDevice(identity, config);
   }
   return value;
 }
+async function readReceipt(commandId, id) {
+  try { return await request('command.receipt', {commandId}, id); }
+  catch (error) {
+    if (error.status !== 404 || error.message !== 'command_not_found') throw error;
+    // Do not merely clear an absent receipt: a delayed dispatch must be fenced
+    // by the Gateway's durable ledger before this ID can be forgotten.
+    return request('command.retire', {commandId});
+  }
+}
 async function reconcilePending() {
   for (const pending of [...(config?.pendingMutations || [])]) {
     if (!ready) return;
-    try { await request('command.receipt', {commandId: pending.id}); } catch { /* Read-only reconciliation; retain missing/unknown receipts. */ }
+    try { await readReceipt(pending.id); } catch { /* Keep unresolved IDs; never re-dispatch. */ }
   }
 }
 async function pair(text, origin) {
@@ -281,7 +290,7 @@ self.onmessage = event => {
   const run = async () => {
     if (message.type === 'pair') return pair(message.text, message.origin);
     if (message.type === 'resume') return resumeConnection(message.force);
-    if (message.type === 'request') return request(message.op, message.args, message.id);
+    if (message.type === 'request') return message.op === 'command.receipt' ? readReceipt(message.args.commandId, message.id) : request(message.op, message.args, message.id);
     if (message.type === 'subscribe') {
       subscriptions.set(message.id, {sessionId: message.sessionId, since: message.since});
       try { return await request('session.subscribe', {sessionId: message.sessionId, since: message.since}, message.id); }

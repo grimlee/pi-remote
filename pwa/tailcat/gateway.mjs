@@ -97,6 +97,7 @@ export function createTailcatGateway(options) {
         }
         case 'models.list': return service.models(args.sessionId);
         case 'command.receipt': return service.receipt(args.commandId);
+        case 'command.retire': return service.retireMissing(args.commandId);
         case 'command.dispatch': return service.command(args.sessionId || 'new_session', args.command);
         case 'session.subscribe': {
           if (subscriptions.size >= 4 || !Number.isSafeInteger(args.since) || args.since < 0) throw fault(400, 'invalid_subscription');

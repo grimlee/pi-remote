@@ -93,6 +93,36 @@ test('a recovered receipt for a different mutation does not consume a new create
   assert.equal(commands.length,1);assert.equal(commands[0].type,'create');
 });
 
+test('a safely retired missing receipt releases a stale create ID and submits the new action once',async()=>{
+  const saved=storage();
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify({id:'stale-create-command',sessionId:'new_session',type:'create'}));
+  const commands=[];
+  const transport={api:async(url,options={})=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {commandId:'stale-create-command',status:'not_dispatched'};
+    if(url.endsWith('/commands')) {commands.push(JSON.parse(options.body));return {status:'accepted'};}
+    return {messages:[],busy:false,cursor:0};
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});b.element('newSessionName').value='Phone retry';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(commands.length,1);
+  assert.notEqual(commands[0].commandId,'stale-create-command');
+  assert.equal(saved.getItem('pi-remote-pending-mutation'),null);
+});
+
+test('an unknown reserved receipt still blocks a new create without discarding its ID',async()=>{
+  const saved=storage(),previous={id:'uncertain-create-command',sessionId:'new_session',type:'create'};
+  saved.setItem('pi-remote-pending-mutation',JSON.stringify(previous));let dispatched=0;
+  const transport={api:async(url)=>{
+    if(url==='/api/sessions')return {sessions:[],workspaces:['/tmp/isolated']};
+    if(url.startsWith('/api/commands/'))return {status:'unknown'};
+    if(url.endsWith('/commands'))dispatched++;
+  },events:()=>({addEventListener(){},close(){}})};
+  const b=await browser(saved,null,{transport});b.element('newSessionName').value='Must not resend';
+  await b.element('newSessionForm').handlers.submit({preventDefault(){}});
+  assert.equal(dispatched,0);assert.deepEqual(JSON.parse(saved.getItem('pi-remote-pending-mutation')),previous);
+});
+
 test('browser reload restores the selected session and foreground/network replaces SSE', async () => {
   const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
   const b = await browser(saved);

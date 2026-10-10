@@ -37,6 +37,9 @@ export async function buildStatic(wasmDir, output, {mock = false} = {}) {
   const manifest = {};
   for (const name of files) manifest[name] = createHash('sha256').update(await readFile(path.join(output, name))).digest('hex');
   const version = createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
+  html = html.replace('工作区与会话</div>', '工作区与会话 · 版本 ' + version.slice(0, 8) + '</div>');
+  await writeFile(path.join(output, 'index.html'), html);
+  manifest['index.html'] = createHash('sha256').update(html).digest('hex');
   const sw = `const CACHE = 'pi-remote-tailcat-shell-${version}';
 const FILES = ${JSON.stringify(['/', ...files.filter(f => f !== 'index.html' && !f.startsWith('recover.')).map(f => '/' + f)])};
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));

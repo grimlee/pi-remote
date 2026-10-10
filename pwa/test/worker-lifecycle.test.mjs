@@ -60,3 +60,15 @@ test('manual or BFCache resume can replace an in-flight dial before its timeout'
   assert.equal((await w.run('resumeConnection(true)')).configured,true);
   assert.equal(w.run('dials'),2);
 });
+test('a missing receipt is fenced before releasing it; unknown or offline results stay unresolved',async()=>{
+  const w=await worker();
+  w.run('globalThis.ops=[];request=async op=>{ops.push(op);if(op==="command.receipt")throw fail(404,"command_not_found");return {status:"not_dispatched"};};');
+  assert.equal((await w.run('readReceipt("old-create-command")')).status,'not_dispatched');
+  assert.equal(w.run('ops.join(",")'),'command.receipt,command.retire');
+  w.run('ops=[];request=async op=>{ops.push(op);return {status:"unknown"};};');
+  assert.equal((await w.run('readReceipt("unknown-command")')).status,'unknown');
+  assert.equal(w.run('ops.join(",")'),'command.receipt');
+  w.run('ops=[];request=async op=>{ops.push(op);throw fail(503,"offline");};');
+  await assert.rejects(w.run('readReceipt("offline-command")'),/offline/);
+  assert.equal(w.run('ops.join(",")'),'command.receipt');
+});

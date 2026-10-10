@@ -247,3 +247,15 @@ settlement cannot replace/clear a newer attempt. BFCache pageshow forces a fresh
 connection; a normal pageshow/focus performs a liveness check. Smoke coverage
 also closes a page and reopens it with the same device store and no reconnect
 button. Physical Safari termination and lock/network transitions remain manual.
+
+A stale browser mutation ID can outlive a request that never reached the Host.
+A `command_not_found` receipt used to block subsequent creates indefinitely.
+The Worker now resolves that case through authenticated `command.retire`:
+the Host synchronously persists a terminal `not_dispatched` reservation only
+if the ID is absent. Any late dispatch with that ID is rejected, including one
+already waiting for discovery before its final ledger lookup. Existing accepted
+or unknown reservations are returned unchanged. Browser pending IDs are cleared
+only after an accepted or terminal receipt; no old command is replayed.
+The sidebar shows the static build version. Smoke tests seed stale IDs in both
+localStorage and sealed IndexedDB, then verify create succeeds and a late old
+dispatch is rejected. Physical iPhone recovery still needs user confirmation.
