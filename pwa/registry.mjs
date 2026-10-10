@@ -124,6 +124,7 @@ export class PiRunner {
     this.eventBytes = 0;
     this.seq = 0;
     this.busy = false;
+    this.liveMessage = null;
     this.dead = false;
     this.lastActive = Date.now();
     this.buffer = "";
@@ -167,10 +168,28 @@ export class PiRunner {
         pending.resolve(message);
       } else if (message.type !== "response") {
         if (message.type === "agent_start") this.busy = true;
-        if (message.type === "agent_end" || message.type === "turn_end") this.busy = false;
+        if ((message.type === "agent_end" && !message.willRetry) || message.type === "agent_settled") this.busy = false;
+        if (message.type === "message_start" || message.type === "message_update") {
+          if (message.message?.role === "assistant") this.liveMessage = structuredClone(message.message);
+          else if (message.type === "message_update") this.applyTextUpdate(message.assistantMessageEvent);
+        }
+        if (message.type === "message_end" || message.type === "agent_settled") this.liveMessage = null;
         this.publish("rpc", message);
       }
     }
+  }
+
+  applyTextUpdate(update) {
+    // Pi 1.x RPC intentionally sends deltas, not cumulative SDK message snapshots.
+    if (!update || !["text_start", "text_delta", "text_end"].includes(update.type)) return;
+    if (!this.liveMessage) this.liveMessage = { role: "assistant", content: [] };
+    const index = Number.isSafeInteger(update.contentIndex) ? update.contentIndex : 0;
+    if (index < 0 || index > 10000) return;
+    const blocks = this.liveMessage.content;
+    if (!Array.isArray(blocks)) return;
+    if (!blocks[index] || blocks[index].type !== "text") blocks[index] = { type: "text", text: "" };
+    if (update.type === "text_delta" && typeof update.delta === "string") blocks[index].text += update.delta;
+    if (update.type === "text_end" && typeof update.content === "string") blocks[index].text = update.content;
   }
 
   publish(type, data) {
@@ -226,12 +245,15 @@ export class PiRunner {
 
   async snapshot() {
     const state = await this.request("get_state", {}, 30000);
+    // get_state covers retries/tool loops that can continue after turn_end.
+    this.busy = !!(state?.isStreaming || state?.isCompacting || state?.isRetrying);
     const data = await this.request("get_messages", {}, 30000);
     return {
       state: state || {},
       messages: Array.isArray(data?.messages) ? data.messages : (Array.isArray(data) ? data : []),
       cursor: this.seq,
-      busy: this.busy
+      busy: this.busy,
+      liveMessage: this.liveMessage
     };
   }
 

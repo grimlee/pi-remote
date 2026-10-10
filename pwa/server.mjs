@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { randomUUID, createHash } from "node:crypto";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { discoverSessions, publicSession, PiRunner, DEFAULT_SESSION_DIR } from "./registry.mjs";
@@ -11,10 +11,12 @@ const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
   ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json"]],
-  ["/icon.svg", ["icon.svg", "image/svg+xml"]]
+  ["/icon.svg", ["icon.svg", "image/svg+xml"]],
+  ...[180, 192, 512].map(size => ["/icon-" + size + ".png", ["icon-" + size + ".png", "image/png"]])
 ]);
 
 function json(res, status, value, headers = {}) {
@@ -123,6 +125,7 @@ export function createPwaServer(options = {}) {
         if (!auth.allowedAttempt(ip)) { error(res, 429, "too_many_attempts"); return; }
         const payload = await readJson(req, 4096);
         if (!auth.authenticate(payload?.token)) { error(res, 401, "invalid_token"); return; }
+        auth.attempts.delete(ip);
         json(res, 200, { ok: true }, { "Set-Cookie": auth.cookie(req) });
       } catch (e) { error(res, e.status || 400, "invalid_request"); }
       return;
@@ -143,9 +146,18 @@ export function createPwaServer(options = {}) {
       return;
     }
 
+    if (method === "GET" && /^\/api\/commands\/[\w-]{10,100}$/.test(pathname)) {
+      const receipt = ledger.get(pathname.split("/").pop());
+      if (!receipt) { error(res, 404, "command_not_found"); return; }
+      json(res, 200, { commandId: receipt.id, sessionId: receipt.sessionId, status: receipt.status });
+      return;
+    }
+
     const match = /^\/api\/sessions\/([^/]+)\/(state|events|commands)$/.exec(pathname);
     if (!match) { error(res, 404, "not_found"); return; }
-    const id = decodeURIComponent(match[1]);
+    let id;
+    try { id = decodeURIComponent(match[1]); }
+    catch { error(res, 400, "invalid_session"); return; }
     if (!/^[\w-]{8,128}$/.test(id)) { error(res, 400, "invalid_session"); return; }
     const action = match[2];
     try {
@@ -168,13 +180,15 @@ export function createPwaServer(options = {}) {
         res.write(": connected\n\n");
         const send = entry => {
           if (res.destroyed || res.writableEnded) return;
-          res.write("id: " + entry.id + "\nevent: " + entry.type
+          const writable = res.write("id: " + entry.id + "\nevent: " + entry.type
             + "\ndata: " + JSON.stringify(entry.data) + "\n\n");
+          // A suspended browser must not grow an unbounded response buffer.
+          if (!writable && res.writableLength > 2 * 1024 * 1024) res.end();
           if (entry.type === "reset" && entry.data?.reason === "rpc_exited") res.end();
         };
         const unsubscribe = runner.subscribe(send, since);
         const heartbeat = setInterval(() => {
-          if (!res.destroyed) res.write(": heartbeat\n\n");
+          if (!res.destroyed && !res.writableEnded && !res.write(": heartbeat\n\n")) res.end();
         }, 20000);
         const cleanup = () => { clearInterval(heartbeat); unsubscribe(); };
         res.once("close", cleanup);
@@ -226,6 +240,7 @@ export function createPwaServer(options = {}) {
     if (stopped) return;
     stopped = true;
     for (const runner of runners.values()) runner.stop();
+    server.closeIdleConnections();
     await new Promise(resolve => server.close(resolve));
   }
   return { server, auth, ledger, close };
@@ -242,7 +257,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   app.server.listen(port, bind, () => {
     console.log("Pi Remote PWA listening on http://" + bind + ":" + port);
     console.log("Use an HTTPS Tailnet-only reverse proxy (for example Tailscale Serve) for iPhone.");
-    console.log("PWA login token (keep private): " + app.auth.token);
+    console.log("Read the PWA login token privately from " + path.join(stateDir(), "access-token"));
     console.log("The native Tailcat Quick Connect launcher remains npm start.");
   });
   const stop = () => { app.close().then(() => process.exit(0)); };

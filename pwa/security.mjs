@@ -49,7 +49,9 @@ export class Authentication {
     if (!match) return false;
     const value = match[1];
     if (typeof value !== "string" || value.length !== this.cookieValue.length) return false;
-    return timingSafeEqual(Buffer.from(value), Buffer.from(this.cookieValue));
+    const actual = Buffer.from(value);
+    const expected = Buffer.from(this.cookieValue);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
   }
   cookie(req) {
     const host = String(req.headers["x-forwarded-host"] || req.headers.host || "");

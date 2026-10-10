@@ -1,3 +1,4 @@
+import { RecoveryMemory, messageFingerprint } from "./recovery.js";
 const $ = id => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
@@ -15,7 +16,20 @@ let liveText = "";
 let liveNode = null;
 let syncTimer = null;
 let pendingCommand = null;
-let synchronizing = false;
+let synchronizing = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+let submitting = false;
+let storage;
+try { storage = window.localStorage; } catch {}
+const memory = new RecoveryMemory(storage);
+function retryRecovery(expectedEpoch = epoch) {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    if (expectedEpoch === epoch) void recoverSession();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+}
 
 function setConnection(message, kind = "") {
   connection.textContent = message;
@@ -23,18 +37,27 @@ function setConnection(message, kind = "") {
 }
 function setActivity(message) { activity.textContent = message; }
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    cache: "no-store",
-    ...options
-  });
-  let value;
-  try { value = await response.json(); } catch { value = {}; }
-  if (response.status === 401 && url !== "/api/login") showLogin();
-  if (!response.ok) throw new Error(value.error || value.status || "HTTP " + response.status);
-  return value;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 45000);
+  try {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: controller.signal,
+      ...options
+    });
+    let value;
+    try { value = await response.json(); } catch { value = {}; }
+    if (response.status === 401 && url !== "/api/login") showLogin();
+    if (!response.ok) throw Object.assign(new Error(value.error || value.status || "HTTP " + response.status), { status: response.status });
+    return value;
+  } finally { clearTimeout(deadline); }
 }
 function showLogin() {
+  epoch++;
+  clearTimeout(reconnectTimer);
+  clearTimeout(syncTimer);
+  current = null;
   if (stream) { stream.close(); stream = null; }
   appView.hidden = true;
   loginView.hidden = false;
@@ -91,6 +114,10 @@ async function loadSessions() {
     if (!current) setConnection("Host 已连接 · 等待选择会话", "good");
   } catch (err) {
     setConnection("无法获取会话：" + err.message, "bad");
+    if (!appView.hidden && !current) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => void restoreSelection(), 3000);
+    }
   }
 }
 function textContentOf(message) {
@@ -124,6 +151,10 @@ function renderMessages(messages) {
     if (role === "assistant" || role === "user") {
       const text = textContentOf(message);
       if (text) fragment.append(makeMessage(role, text).block);
+      if (role === "assistant" && message.errorMessage) {
+        fragment.append(makeMessage(role, message.stopReason === "aborted" || /aborted/i.test(message.errorMessage)
+          ? "已停止" : "Pi 运行失败：" + message.errorMessage).block);
+      }
     } else if (role === "toolResult" || role === "tool") {
       const node = document.createElement("div");
       node.className = "tool";
@@ -148,18 +179,22 @@ function appendLive(delta) {
   liveNode.textContent = liveText;
   if (nearBottom) scrollBottom();
 }
+function renderSnapshot(data) {
+  renderMessages(data.messages);
+  if (data.busy && data.liveMessage) appendLive(textContentOf(data.liveMessage));
+}
 async function syncState(expectedEpoch = epoch) {
-  if (!current || expectedEpoch !== epoch || synchronizing) return;
-  synchronizing = true;
+  if (!current || expectedEpoch !== epoch || synchronizing === expectedEpoch) return;
+  synchronizing = expectedEpoch;
   try {
     const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state");
     if (expectedEpoch !== epoch) return;
-    renderMessages(data.messages);
+    renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在工作" : "会话已同步");
     setConnection("已连接 · 会话状态已同步", "good");
   } catch (err) {
     if (expectedEpoch === epoch) setConnection("同步失败，等待重新连接：" + err.message, "bad");
-  } finally { synchronizing = false; }
+  } finally { if (synchronizing === expectedEpoch) synchronizing = null; }
 }
 function scheduleSync(delay = 280) {
   clearTimeout(syncTimer);
@@ -176,40 +211,88 @@ function processRpc(payload) {
   if (type === "message_update") {
     const update = payload.assistantMessageEvent;
     if (update?.type === "text_delta" && typeof update.delta === "string") {
-      appendLive(update.delta);
+      if (payload.message?.role === "assistant") {
+        if (!liveNode) appendLive(" ");
+        liveText = textContentOf(payload.message);
+        liveNode.textContent = liveText;
+        if (atBottom()) scrollBottom();
+      } else appendLive(update.delta);
     }
   }
-  if (type === "agent_end" || type === "turn_end" || type === "message_end") {
+  if (type === "agent_settled" || type === "agent_end" || type === "turn_end" || type === "message_end") {
     setActivity("本轮结束");
     scheduleSync(type === "message_end" ? 350 : 0);
   }
 }
-function attachStream(id, cursor, expectedEpoch) {
+function attachStream(id, since, expectedEpoch) {
   if (stream) stream.close();
-  stream = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/events?since=" + cursor);
-  stream.addEventListener("rpc", event => {
-    if (expectedEpoch !== epoch) return;
+  const source = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/events?since=" + since);
+  stream = source;
+  source.addEventListener("rpc", event => {
+    if (expectedEpoch !== epoch || stream !== source) return;
     try { processRpc(JSON.parse(event.data)); } catch {}
   });
-  stream.addEventListener("reset", () => {
-    if (expectedEpoch === epoch) scheduleSync(120);
+  source.addEventListener("reset", () => {
+    if (expectedEpoch === epoch && stream === source) void recoverSession();
   });
-  stream.onopen = () => {
-    if (expectedEpoch !== epoch) return;
+  source.onopen = () => {
+    if (expectedEpoch !== epoch || stream !== source) return;
+    clearTimeout(reconnectTimer);
+    reconnectDelay = 1000;
     setConnection("实时事件流已连接", "good");
-    // A fresh authoritative snapshot after reconnect is safer than trusting an old UI cache.
     scheduleSync(180);
   };
-  stream.onerror = () => {
-    if (expectedEpoch !== epoch) return;
+  source.onerror = () => {
+    if (expectedEpoch !== epoch || stream !== source) return;
+    source.close();
+    stream = null;
     setConnection("连接暂时中断，正在自动恢复…", "bad");
+    retryRecovery(expectedEpoch);
   };
+}
+async function reconcileCommand(id) {
+  const pending = memory.pending(id);
+  if (!pending) return;
+  try {
+    const receipt = await api("/api/commands/" + encodeURIComponent(pending.id));
+    if (receipt.status === "accepted") {
+      memory.pending(id, null);
+      if (current?.id === id) pendingCommand = null;
+    } else if (current?.id === id) {
+      setActivity("上次命令状态未确认；请检查会话，命令不会自动重发");
+    }
+  } catch { /* A missing/ambiguous receipt is never automatically re-dispatched. */ }
+}
+async function recoverSession() {
+  if (!current) { if (!appView.hidden) await bootstrap(); return; }
+  const session = current;
+  const thisEpoch = ++epoch;
+  clearTimeout(reconnectTimer);
+  clearTimeout(syncTimer);
+  if (stream) { stream.close(); stream = null; }
+  try {
+    // Restore completed messages and the authoritative in-flight assistant snapshot.
+    const data = await api("/api/sessions/" + encodeURIComponent(session.id) + "/state");
+    if (thisEpoch !== epoch) return;
+    renderSnapshot(data);
+    setActivity(data.busy ? "Pi 正在运行" : "会话已恢复");
+    attachStream(session.id, data.cursor, thisEpoch);
+    await reconcileCommand(session.id);
+  } catch (err) {
+    if (thisEpoch !== epoch) return;
+    setConnection("恢复失败，正在自动重试：" + err.message, "bad");
+    retryRecovery(thisEpoch);
+  }
 }
 async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
-  pendingCommand = null;
+  memory.selected(session.id);
+  pendingCommand = memory.pending(session.id);
+  clearTimeout(reconnectTimer);
+  clearTimeout(syncTimer);
+  promptBox.value = "";
   if (stream) { stream.close(); stream = null; }
   sidebar.classList.remove("open");
   renderSessions();
@@ -223,11 +306,15 @@ async function openSession(session) {
   try {
     const data = await api("/api/sessions/" + encodeURIComponent(session.id) + "/state");
     if (thisEpoch !== epoch) return;
-    renderMessages(data.messages);
+    renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在运行" : "准备就绪");
     attachStream(session.id, data.cursor, thisEpoch);
+    await reconcileCommand(session.id);
   } catch (err) {
-    if (thisEpoch === epoch) setConnection("无法连接会话：" + err.message, "bad");
+    if (thisEpoch === epoch) {
+      setConnection("无法连接会话，正在重试：" + err.message, "bad");
+      retryRecovery(thisEpoch);
+    }
   }
 }
 $("loginForm").addEventListener("submit", async event => {
@@ -241,38 +328,49 @@ $("loginForm").addEventListener("submit", async event => {
     });
     $("token").value = "";
     showApp();
-    await loadSessions();
+    await restoreSelection();
   } catch (err) {
     $("loginError").textContent = "连接失败：" + err.message;
   }
 });
 $("composer").addEventListener("submit", async event => {
   event.preventDefault();
-  if (!current) return;
+  if (!current || submitting) return;
+  const sessionId = current.id;
   const message = promptBox.value;
   if (!message.trim()) return;
-  if (!pendingCommand || pendingCommand.message !== message || pendingCommand.sessionId !== current.id) {
-    pendingCommand = { id: crypto.randomUUID(), message, sessionId: current.id };
-  }
+  submitting = true;
   $("send").disabled = true;
   setActivity("提交命令中…");
   try {
-    const result = await api("/api/sessions/" + encodeURIComponent(current.id) + "/commands", {
+    const fingerprint = await messageFingerprint(message);
+    let command = memory.pending(sessionId) || pendingCommand;
+    if (!command || command.fingerprint !== fingerprint || command.sessionId !== sessionId) {
+      command = { id: crypto.randomUUID(), fingerprint, sessionId };
+    }
+    // Save before dispatch, so reloads and lost HTTP responses retain the same ID.
+    pendingCommand = command;
+    memory.pending(sessionId, command);
+    const result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", message, commandId: pendingCommand.id })
+      body: JSON.stringify({ type: "prompt", message, commandId: command.id })
     });
     if (result.status === "unknown") {
-      setActivity("命令状态未确认；再次发送将查询同一命令 ID，不会重复执行");
+      if (current?.id === sessionId) setActivity("命令状态未确认；再次发送将查询同一命令 ID，不会重复执行");
       return;
     }
-    promptBox.value = "";
+    memory.pending(sessionId, null);
+    if (current?.id !== sessionId) return;
+    if (promptBox.value === message) promptBox.value = "";
     pendingCommand = null;
     setActivity("命令已接收，等待 Pi 输出…");
     scheduleSync(400);
   } catch (err) {
-    setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
-    setConnection("命令状态：" + err.message, "bad");
-  } finally { $("send").disabled = false; }
+    if (current?.id === sessionId) {
+      setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
+      setConnection("命令状态：" + err.message, "bad");
+    }
+  } finally { submitting = false; $("send").disabled = !current; }
 });
 promptBox.addEventListener("keydown", event => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -294,18 +392,31 @@ $("refreshSessions").addEventListener("click", () => void loadSessions());
 $("syncButton").addEventListener("click", () => scheduleSync(0));
 $("openSidebar").addEventListener("click", () => sidebar.classList.add("open"));
 $("closeSidebar").addEventListener("click", () => sidebar.classList.remove("open"));
-window.addEventListener("online", () => { if (current) scheduleSync(0); });
+window.addEventListener("online", () => void recoverSession());
+window.addEventListener("pageshow", event => { if (event.persisted) void recoverSession(); });
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && current) scheduleSync(0);
+  if (!document.hidden) void recoverSession();
 });
+async function restoreSelection() {
+  await loadSessions();
+  const selected = sessions.find(s => s.id === memory.selected());
+  if (selected) await openSession(selected);
+}
 async function bootstrap() {
   if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
   try {
     await api("/api/auth");
+    clearTimeout(reconnectTimer);
     showApp();
-    await loadSessions();
-  } catch { showLogin(); }
+    await restoreSelection();
+  } catch (err) {
+    if (err.status === 401) { showLogin(); return; }
+    showApp();
+    setConnection("主机暂不可达，正在自动恢复…", "bad");
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => void bootstrap(), 3000);
+  }
 }
 void bootstrap();

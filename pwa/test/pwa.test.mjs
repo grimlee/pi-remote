@@ -42,6 +42,7 @@ test("auth, private cookie and origin checks", async () => {
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
   assert.equal(auth.isAuthorized({ headers: { cookie: cookie.split(";")[0] } }), true);
+  assert.equal(auth.isAuthorized({ headers: { cookie: "pr_session=" + "é".repeat(auth.cookieValue.length) } }), false);
   assert.equal(safeOrigin({ headers: { origin: "https://evil.invalid", host: "127.0.0.1:8792" } }), false);
 });
 
@@ -80,6 +81,12 @@ test("PWA API authenticates, streams, and deduplicates prompt IDs", async t => {
   });
   assert.equal(login.status, 200);
   const headers = { Cookie: login.headers.get("set-cookie").split(";")[0] };
+  for (let i = 0; i < 10; i++) {
+    assert.equal((await fetch(base + "/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token })
+    })).status, 200, "successful logins must not lock out the Tailnet proxy");
+  }
+  assert.equal((await fetch(base + "/api/sessions/%ZZ/state", { headers })).status, 400);
   const listing = await (await fetch(base + "/api/sessions", { headers })).json();
   assert.equal(listing.sessions.length, 1);
   assert.equal(listing.sessions[0].file, undefined);
@@ -107,7 +114,51 @@ test("PWA API authenticates, streams, and deduplicates prompt IDs", async t => {
   assert.match(buffer, /event: rpc/);
   controller.abort();
   await reader.cancel().catch(() => {});
+  const receipt = await (await fetch(base + "/api/commands/" + message.commandId, { headers })).json();
+  assert.equal(receipt.status, "accepted");
+  assert.equal(receipt.hash, undefined);
+  assert.equal((await fetch(base + "/api/commands/" + message.commandId)).status, 401);
   const ledger = new CommandLedger(f.config);
   assert.equal(ledger.get(message.commandId).status, "accepted");
   assert.doesNotMatch(await readFile(path.join(f.config, "command-receipts.jsonl"), "utf8"), /only once/);
+});
+
+
+test("tool turn_end keeps the runner busy and in-flight text survives bounded replay eviction", async () => {
+  const runner = new PiRunner({});
+  const consume = event => runner.consume(Buffer.from(JSON.stringify(event) + "\n"));
+  consume({ type: "agent_start" });
+  consume({ type: "turn_end" });
+  assert.equal(runner.busy, true);
+  const text = "长输出🙂".repeat(25000);
+  consume({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text }] } });
+  for (let i = 0; i < 1300; i++) runner.publish("rpc", { type: "message_update", delta: "test" });
+  assert.ok(runner.events.length <= 1200);
+  assert.ok(runner.eventBytes <= 2 * 1024 * 1024);
+  assert.equal(runner.liveMessage.content[0].text, text);
+  const replay = []; runner.subscribe(event => replay.push(event), 0)();
+  assert.equal(replay[0].type, "reset");
+  consume({ type: "agent_settled" });
+  assert.equal(runner.busy, false);
+  assert.equal(runner.liveMessage, null);
+});
+
+
+test("Pi 1.x delta-only streaming reconstructs a detached assistant without mutating replay", () => {
+  const runner = new PiRunner({});
+  const consume = event => runner.consume(Buffer.from(JSON.stringify(event) + "\n"));
+  consume({ type: "message_start", message: { role: "assistant", content: [] } });
+  const initialBytes = runner.eventBytes;
+  consume({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "first " } });
+  consume({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "second" } });
+  assert.equal(runner.liveMessage.content[0].text, "first second");
+  assert.deepEqual(runner.events[0].data.message.content, []);
+  assert.ok(runner.eventBytes > initialBytes);
+  consume({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "authoritative final text" } });
+  assert.equal(runner.liveMessage.content[0].text, "authoritative final text");
+  consume({ type: "agent_start" });
+  consume({ type: "agent_end", willRetry: true });
+  assert.equal(runner.busy, true);
+  consume({ type: "agent_settled" });
+  assert.equal(runner.liveMessage, null);
 });
