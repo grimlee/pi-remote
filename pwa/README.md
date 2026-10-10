@@ -28,6 +28,8 @@ Open https://YOUR-HOST.YOUR-TAILNET.ts.net:10000/ in Safari with tailnet access,
 - SSE supports monotonic sequence IDs, bounded replay (1200 events / 2 MiB), and state refresh when replay is impossible.
 - Browser persists the selected session ID and restores it after reload. It rebuilds SSE on foreground, network recovery, and stream failure, with bounded backoff. Offline reloads recover without re-pairing.
 - Authoritative state includes the current partial assistant text, reconstructed from Pi 1.x delta-only RPC events, even when bounded event replay has expired.
+- Large state responses use gzip when supported, retaining complete message history over slow mobile links.
+- SSE has an 8-second connection deadline and a 45-second heartbeat deadline. Stalled streams fall back to three-second authoritative state polling while reconnecting; commands are never automatically replayed.
 - Browser reloads authoritative Pi state on reconnect, on foreground, and on turn completion.
 - Browser stores pending command IDs and message fingerprints (never prompt text or credentials) before dispatch, and queries authenticated receipts on recovery. Storage-disabled browsers cannot retain this metadata across reloads.
 - Prompts use a persistent command receipt/idempotency key, stored BEFORE dispatch. Ambiguous status is not automatically retried. This favors at-most-once dispatch rather than duplicate tool execution; it is not full exactly-once semantics.

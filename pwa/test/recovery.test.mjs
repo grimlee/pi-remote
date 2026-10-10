@@ -35,6 +35,7 @@ async function browser(saved = storage(), fetchHook) {
     close() { this.closed = true; }
   }
   const timers = new Map();
+  const delays = new Map();
   let nextTimer = 0;
   const fetch = async (url, options) => {
     calls.push({ url, options });
@@ -45,12 +46,12 @@ async function browser(saved = storage(), fetchHook) {
   };
   const context = vm.createContext({ document, window, navigator: {}, location: {}, EventSource, fetch,
     crypto: webcrypto, TextEncoder, RecoveryMemory, messageFingerprint, AbortController,
-    setTimeout(fn) { const id = ++nextTimer; timers.set(id, fn); return id; },
-    clearTimeout(id) { timers.delete(id); } });
+    setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, fn); delays.set(id, delay); return id; },
+    clearTimeout(id) { timers.delete(id); delays.delete(id); } });
   const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   vm.runInContext(source.replace(/^import .*\n/, ''), context);
   await new Promise(resolve => setImmediate(resolve));
-  return { context, nodes, element, streams, calls, window, document, timers, session, saved };
+  return { context, nodes, element, streams, calls, window, document, timers, delays, session, saved };
 }
 
 test('browser reload restores the selected session and foreground/network replaces SSE', async () => {
@@ -126,4 +127,34 @@ test('offline reload recovers authentication and selected session without re-pai
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(b.streams.length, 1);
   assert.equal(b.element('sessionTitle').textContent, 'Disposable test');
+});
+
+
+test('session is usable before SSE opens; stalled SSE falls back to polling without prompt replay', async () => {
+  const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
+  const b = await browser(saved);
+  assert.match(b.element('connection').textContent, /Pi 会话已连接/);
+  const source = b.streams[0];
+  const watchdog = [...b.delays].find(([, delay]) => delay === 8000)[0];
+  b.timers.get(watchdog)();
+  assert.equal(source.closed, true);
+  assert.match(b.element('connection').textContent, /自动同步/);
+  const poll = [...b.delays].find(([, delay]) => delay === 0)[0];
+  await b.timers.get(poll)();
+  assert.ok(b.calls.filter(c => c.url.endsWith('/state')).length >= 2);
+  assert.equal(b.calls.filter(c => c.url.endsWith('/commands')).length, 0);
+});
+
+test('SSE heartbeat renews its deadline and a silently stalled live stream recovers', async () => {
+  const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
+  const b = await browser(saved);
+  const source = b.streams[0]; source.onopen();
+  assert.ok(![...b.delays.values()].includes(8000));
+  const original = [...b.delays].find(([, delay]) => delay === 45000)[0];
+  source.handlers.ping();
+  assert.equal(b.timers.has(original), false);
+  const watchdog = [...b.delays].find(([, delay]) => delay === 45000)[0];
+  b.timers.get(watchdog)();
+  assert.equal(source.closed, true);
+  assert.match(b.element('connection').textContent, /自动同步/);
 });

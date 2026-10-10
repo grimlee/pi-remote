@@ -1,4 +1,6 @@
 import test from "node:test";
+import { get } from "node:http";
+import { gunzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -161,4 +163,40 @@ test("Pi 1.x delta-only streaming reconstructs a detached assistant without muta
   assert.equal(runner.busy, true);
   consume({ type: "agent_settled" });
   assert.equal(runner.liveMessage, null);
+});
+
+
+test("large session snapshots compress on the wire and retain complete history", async t => {
+  const f = await fixture();
+  const app = createPwaServer({ token, stateDir: f.config, sessionDir: f.sessions, executable: fakePi });
+  await new Promise(resolve => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.close());
+  const base = "http://127.0.0.1:" + app.server.address().port;
+  const cookie = app.auth.cookie({ headers: { host: "localhost" } }).split(";")[0];
+  const headers = { Cookie: cookie };
+  const sessions = await (await fetch(base + "/api/sessions", { headers })).json();
+  const url = base + "/api/sessions/" + sessions.sessions[0].id;
+  const message = "long transport fixture ".repeat(1000);
+  assert.equal((await fetch(url + "/commands", {
+    method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "prompt", message, commandId: "long-transport-command-0001" })
+  })).status, 202);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const raw = await new Promise((resolve, reject) => {
+    get(url + "/state", { headers: { ...headers, "Accept-Encoding": "gzip" } }, res => {
+      const chunks = []; res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+  assert.equal(raw.headers["content-encoding"], "gzip");
+  assert.equal(raw.headers["cache-control"], "no-store");
+  assert.equal(raw.headers.vary, "Accept-Encoding");
+  const expanded = gunzipSync(raw.body);
+  assert.ok(raw.body.length < expanded.length / 4);
+  const data = JSON.parse(expanded);
+  assert.ok(data.messages.some(m => m.content?.[0]?.text === message));
+  const uncompressed = await fetch(url + "/state", { headers: { ...headers, "Accept-Encoding": "gzip;q=0, identity" } });
+  assert.equal(uncompressed.headers.get("content-encoding"), null);
+  assert.equal((await uncompressed.json()).messages.length, data.messages.length);
 });

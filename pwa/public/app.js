@@ -20,6 +20,25 @@ let synchronizing = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
 let submitting = false;
+let streamWatchdog = null;
+let pollTimer = null;
+let realtimeConnected = false;
+function clearRealtimeTimers() {
+  clearTimeout(streamWatchdog);
+  clearTimeout(pollTimer);
+  streamWatchdog = pollTimer = null;
+  realtimeConnected = false;
+}
+function startPolling(expectedEpoch) {
+  clearTimeout(pollTimer);
+  setConnection("会话已连接 · 实时流暂不可用，自动同步中", "good");
+  const poll = async () => {
+    if (expectedEpoch !== epoch || realtimeConnected || !current) return;
+    await syncState(expectedEpoch);
+    if (expectedEpoch === epoch && !realtimeConnected && current) pollTimer = setTimeout(poll, 3000);
+  };
+  pollTimer = setTimeout(poll, 0);
+}
 let storage;
 try { storage = window.localStorage; } catch {}
 const memory = new RecoveryMemory(storage);
@@ -57,6 +76,7 @@ function showLogin() {
   epoch++;
   clearTimeout(reconnectTimer);
   clearTimeout(syncTimer);
+  clearRealtimeTimers();
   current = null;
   if (stream) { stream.close(); stream = null; }
   appView.hidden = true;
@@ -191,7 +211,7 @@ async function syncState(expectedEpoch = epoch) {
     if (expectedEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在工作" : "会话已同步");
-    setConnection("已连接 · 会话状态已同步", "good");
+    setConnection(realtimeConnected ? "已连接 · 会话状态已同步" : "会话已连接 · 自动同步中", "good");
   } catch (err) {
     if (expectedEpoch === epoch) setConnection("同步失败，等待重新连接：" + err.message, "bad");
   } finally { if (synchronizing === expectedEpoch) synchronizing = null; }
@@ -226,29 +246,47 @@ function processRpc(payload) {
 }
 function attachStream(id, since, expectedEpoch) {
   if (stream) stream.close();
+  clearTimeout(streamWatchdog);
+  realtimeConnected = false;
   const source = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/events?since=" + since);
   stream = source;
+  const active = () => expectedEpoch === epoch && stream === source;
+  const fail = () => {
+    if (!active()) return;
+    clearTimeout(streamWatchdog);
+    source.close();
+    stream = null;
+    realtimeConnected = false;
+    startPolling(expectedEpoch);
+    retryRecovery(expectedEpoch);
+  };
+  const watch = delay => {
+    clearTimeout(streamWatchdog);
+    streamWatchdog = setTimeout(fail, delay);
+  };
   source.addEventListener("rpc", event => {
-    if (expectedEpoch !== epoch || stream !== source) return;
+    if (!active()) return;
+    watch(45000);
     try { processRpc(JSON.parse(event.data)); } catch {}
   });
+  source.addEventListener("ping", () => { if (active()) watch(45000); });
   source.addEventListener("reset", () => {
-    if (expectedEpoch === epoch && stream === source) void recoverSession();
+    if (active()) void recoverSession();
   });
   source.onopen = () => {
-    if (expectedEpoch !== epoch || stream !== source) return;
+    if (!active()) return;
     clearTimeout(reconnectTimer);
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    realtimeConnected = true;
     reconnectDelay = 1000;
+    watch(45000);
     setConnection("实时事件流已连接", "good");
     scheduleSync(180);
   };
-  source.onerror = () => {
-    if (expectedEpoch !== epoch || stream !== source) return;
-    source.close();
-    stream = null;
-    setConnection("连接暂时中断，正在自动恢复…", "bad");
-    retryRecovery(expectedEpoch);
-  };
+  source.onerror = fail;
+  // Safari/VPN proxies can stall SSE without firing onerror.
+  watch(8000);
 }
 async function reconcileCommand(id) {
   const pending = memory.pending(id);
@@ -266,9 +304,11 @@ async function reconcileCommand(id) {
 async function recoverSession() {
   if (!current) { if (!appView.hidden) await bootstrap(); return; }
   const session = current;
+  const wasPolling = pollTimer !== null;
   const thisEpoch = ++epoch;
   clearTimeout(reconnectTimer);
   clearTimeout(syncTimer);
+  clearRealtimeTimers();
   if (stream) { stream.close(); stream = null; }
   try {
     // Restore completed messages and the authoritative in-flight assistant snapshot.
@@ -276,7 +316,9 @@ async function recoverSession() {
     if (thisEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在运行" : "会话已恢复");
+    setConnection("Pi 会话已连接 · 正在建立实时连接…", "good");
     attachStream(session.id, data.cursor, thisEpoch);
+    if (wasPolling) startPolling(thisEpoch);
     await reconcileCommand(session.id);
   } catch (err) {
     if (thisEpoch !== epoch) return;
@@ -293,6 +335,7 @@ async function openSession(session) {
   clearTimeout(reconnectTimer);
   clearTimeout(syncTimer);
   promptBox.value = "";
+  clearRealtimeTimers();
   if (stream) { stream.close(); stream = null; }
   sidebar.classList.remove("open");
   renderSessions();
@@ -308,6 +351,7 @@ async function openSession(session) {
     if (thisEpoch !== epoch) return;
     renderSnapshot(data);
     setActivity(data.busy ? "Pi 正在运行" : "准备就绪");
+    setConnection("Pi 会话已连接 · 正在建立实时连接…", "good");
     attachStream(session.id, data.cursor, thisEpoch);
     await reconcileCommand(session.id);
   } catch (err) {

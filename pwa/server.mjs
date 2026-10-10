@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -20,12 +21,22 @@ const files = new Map([
 ]);
 
 function json(res, status, value, headers = {}) {
+  let body = Buffer.from(JSON.stringify(value));
+  // Keep small/authentication responses uncompressed; compress large state snapshots.
+  const acceptsGzip = /(?:^|,)\s*gzip(?:\s*;\s*q=(?!0(?:\.0*)?(?:\s*,|\s*$))[0-9.]+)?\s*(?:,|$)/i.test(res.req?.headers["accept-encoding"] || "");
+  const compress = body.length >= 2048 && acceptsGzip;
+  if (body.length >= 2048) headers = { Vary: "Accept-Encoding", ...headers };
+  if (compress) {
+    body = gzipSync(body, { level: 4 });
+    headers = { ...headers, "Content-Encoding": "gzip" };
+  }
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    ...headers
+    ...headers,
+    "Content-Length": body.length
   });
-  res.end(JSON.stringify(value));
+  res.end(body);
 }
 function error(res, status, code) {
   json(res, status, { error: code });
@@ -177,6 +188,7 @@ export function createPwaServer(options = {}) {
           "Connection": "keep-alive",
           "X-Accel-Buffering": "no"
         });
+        res.flushHeaders();
         res.write(": connected\n\n");
         const send = entry => {
           if (res.destroyed || res.writableEnded) return;
@@ -188,7 +200,7 @@ export function createPwaServer(options = {}) {
         };
         const unsubscribe = runner.subscribe(send, since);
         const heartbeat = setInterval(() => {
-          if (!res.destroyed && !res.writableEnded && !res.write(": heartbeat\n\n")) res.end();
+          if (!res.destroyed && !res.writableEnded && !res.write("event: ping\ndata: {}\n\n")) res.end();
         }, 20000);
         const cleanup = () => { clearInterval(heartbeat); unsubscribe(); };
         res.once("close", cleanup);
