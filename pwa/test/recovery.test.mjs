@@ -255,7 +255,45 @@ test('a truncated successful HTTP response is a failed sync and does not erase h
   } : null, {navigator:{userAgent:'iPhone'}});
   assert.equal(vm.runInContext('liveText',b.context),'preserved partial history');
   broken = true;
-  const timer = [...b.delays].find(([,delay])=>delay===3000)[0];await b.timers.get(timer)();
+  const timer = [...b.delays].find(([,delay])=>delay===1000)[0];await b.timers.get(timer)();
   assert.equal(vm.runInContext('liveText',b.context),'preserved partial history');
   assert.match(b.element('connection').textContent,/Load failed/);
+});
+
+
+test('startup authenticates through the session list without a redundant auth request', async () => {
+  const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
+  const b = await browser(saved, null, {navigator:{userAgent:'iPhone'}});
+  assert.equal(b.calls.filter(c => c.url === '/api/auth').length, 0);
+  assert.equal(b.calls.filter(c => c.url === '/api/sessions').length, 1);
+  assert.equal(b.calls.filter(c => c.url.endsWith('/state')).length, 1);
+  const denied = await browser(saved, async url => url === '/api/sessions' ? {
+    status:401,ok:false,json:async()=>({error:'not_authenticated'})
+  } : null);
+  assert.equal(denied.element('loginView').hidden, false);
+  assert.equal(denied.calls.filter(c=>c.url.endsWith('/state')).length, 0);
+});
+
+test('busy polling responds every second, backs off failures, and returns to idle cadence', async () => {
+  const saved = storage(); new RecoveryMemory(saved).selected('browser-session-1234');
+  let busy = true, failed = false;
+  const b = await browser(saved, async url => {
+    if (url.endsWith('/state')) {
+      if (failed) throw new TypeError('Load failed');
+      return {status:200,ok:true,json:async()=>({messages:[],busy,cursor:12})};
+    }
+  }, {navigator:{userAgent:'iPhone'}});
+  const fire = async delay => {
+    const entry = [...b.delays].find(([, d])=>d===delay);
+    assert.ok(entry, 'expected polling interval '+delay);
+    const fn=b.timers.get(entry[0]);b.timers.delete(entry[0]);b.delays.delete(entry[0]);await fn();
+  };
+  failed=true; await fire(1000);
+  assert.ok([...b.delays.values()].includes(2000));
+  failed=false; await fire(2000);
+  assert.ok([...b.delays.values()].includes(1000));
+  busy=false; await fire(1000);
+  assert.ok([...b.delays.values()].includes(3000));
+  assert.equal(b.calls.filter(c=>c.url.endsWith('/commands')).length,0);
+  assert.equal(b.streams.length,0);
 });

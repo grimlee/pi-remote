@@ -22,11 +22,14 @@ const files = new Map([
   ...[180, 192, 512].map(size => ["/icon-" + size + ".png", ["icon-" + size + ".png", "image/png"]])
 ]);
 
+function acceptsGzip(req) {
+  return /(?:^|,)\s*gzip(?:\s*;\s*q=(?!0(?:\.0*)?(?:\s*,|\s*$))[0-9.]+)?\s*(?:,|$)/i.test(req?.headers["accept-encoding"] || "");
+}
+
 function json(res, status, value, headers = {}) {
   let body = Buffer.from(JSON.stringify(value));
   // Keep small/authentication responses uncompressed; compress large state snapshots.
-  const acceptsGzip = /(?:^|,)\s*gzip(?:\s*;\s*q=(?!0(?:\.0*)?(?:\s*,|\s*$))[0-9.]+)?\s*(?:,|$)/i.test(res.req?.headers["accept-encoding"] || "");
-  const compress = body.length >= 2048 && acceptsGzip;
+  const compress = body.length >= 2048 && acceptsGzip(res.req);
   if (body.length >= 2048) headers = { Vary: "Accept-Encoding", ...headers };
   if (compress) {
     body = gzipSync(body, { level: 4 });
@@ -115,9 +118,15 @@ export function createPwaServer(options = {}) {
     if (method === "GET" && files.has(pathname)) {
       const [file, mime] = files.get(pathname);
       try {
-        const data = await readFile(path.join(root, "public", file));
+        let data = await readFile(path.join(root, "public", file));
+        const compressible = /^(?:text\/|application\/(?:json|manifest\+json))/.test(mime) || mime === "image/svg+xml";
+        const compress = compressible && data.length >= 1024 && acceptsGzip(req);
+        if (compress) data = gzipSync(data, { level: 4 });
         res.writeHead(200, {
           "Content-Type": mime,
+          ...(compressible ? { Vary: "Accept-Encoding" } : {}),
+          ...(compress ? { "Content-Encoding": "gzip" } : {}),
+          "Content-Length": data.length,
           "Cache-Control": ["/recover", "/sw-reset.js"].includes(pathname) ? "no-store"
             : pathname === "/sw.js" ? "no-cache" : "max-age=0, must-revalidate"
         });

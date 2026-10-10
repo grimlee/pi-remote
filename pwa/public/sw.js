@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "pi-remote-shell-";
-const CACHE = CACHE_PREFIX + "v5";
+const CACHE = CACHE_PREFIX + "v6";
 const SHELL = ["/", "/app.js", "/recovery.js", "/styles.css", "/icon.svg", "/icon-180.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -22,6 +22,12 @@ function unavailable(navigation) {
 }
 
 async function shellResponse(request, key, navigation) {
+  // Shell contents are versioned together by CACHE. A warm launch needs no network.
+  // Bump the cache version whenever shell assets change; APIs always bypass this worker.
+  try {
+    const cached = await (await caches.open(CACHE)).match(key);
+    if (cached) return cached;
+  } catch {}
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   let networkResponse;
@@ -29,10 +35,6 @@ async function shellResponse(request, key, navigation) {
     networkResponse = await fetch(request, { signal: controller.signal });
     if (networkResponse.ok) return networkResponse;
   } catch {} finally { clearTimeout(timer); }
-  try {
-    const cached = await (await caches.open(CACHE)).match(key);
-    if (cached) return cached;
-  } catch {}
   return networkResponse || unavailable(navigation);
 }
 

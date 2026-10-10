@@ -24,6 +24,7 @@ let streamWatchdog = null;
 let pollTimer = null;
 let realtimeConnected = false;
 let pollingOnly = prefersPolling(navigator, location);
+let agentBusy = false;
 let activeStateRead = null;
 function pauseStateReads() {
   clearTimeout(pollTimer);
@@ -46,11 +47,12 @@ function clearRealtimeTimers() {
 function startPolling(expectedEpoch, immediate = false) {
   clearTimeout(pollTimer);
   setConnection(pollingOnly ? "Pi 会话已连接 · 稳定同步模式" : "会话已连接 · 自动同步中", "good");
-  let delay = 3000;
+  const interval = () => agentBusy ? 1000 : 3000;
+  let delay = interval();
   const poll = async () => {
     if (expectedEpoch !== epoch || realtimeConnected || !current || submitting) return;
     const ok = await syncState(expectedEpoch);
-    delay = ok ? 3000 : Math.min(delay * 2, 15000);
+    delay = ok ? interval() : Math.min(delay * 2, 15000);
     if (expectedEpoch === epoch && !realtimeConnected && current && !submitting) pollTimer = setTimeout(poll, delay);
   };
   pollTimer = setTimeout(poll, immediate ? 0 : delay);
@@ -104,6 +106,7 @@ function showLogin() {
   clearRealtimeTimers();
   pauseStateReads();
   current = null;
+  agentBusy = false;
   if (stream) { stream.close(); stream = null; }
   appView.hidden = true;
   loginView.hidden = false;
@@ -152,12 +155,15 @@ function renderSessions() {
   }
   if (!sessions.length) sessionsView.textContent = "没有发现 Pi JSONL 会话。先在 Host 上使用 Pi 创建一个会话。";
 }
+function acceptSessions(data) {
+  sessions = data.sessions || [];
+  renderSessions();
+  if (!current) setConnection("Host 已连接 · 等待选择会话", "good");
+}
 async function loadSessions() {
   try {
     const data = await api("/api/sessions");
-    sessions = data.sessions || [];
-    renderSessions();
-    if (!current) setConnection("Host 已连接 · 等待选择会话", "good");
+    acceptSessions(data);
   } catch (err) {
     setConnection("无法获取会话：" + err.message, "bad");
     if (!appView.hidden && !current) {
@@ -226,6 +232,7 @@ function appendLive(delta) {
   if (nearBottom) scrollBottom();
 }
 function renderSnapshot(data) {
+  agentBusy = !!data.busy;
   renderMessages(data.messages);
   if (data.busy && data.liveMessage) appendLive(textContentOf(data.liveMessage));
 }
@@ -372,6 +379,7 @@ async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
+  agentBusy = false;
   memory.selected(session.id);
   pendingCommand = memory.pending(session.id);
   clearTimeout(reconnectTimer);
@@ -450,6 +458,7 @@ $("composer").addEventListener("submit", async event => {
     if (current?.id !== sessionId) return;
     if (promptBox.value === message) promptBox.value = "";
     pendingCommand = null;
+    agentBusy = true;
     setActivity("命令已接收，等待 Pi 输出…");
     scheduleSync(400);
   } catch (err) {
@@ -490,8 +499,9 @@ window.addEventListener("pageshow", event => { if (event.persisted) void recover
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void recoverSession();
 });
-async function restoreSelection() {
-  await loadSessions();
+async function restoreSelection(data) {
+  if (data) acceptSessions(data);
+  else await loadSessions();
   const selected = sessions.find(s => s.id === memory.selected());
   if (selected) await openSession(selected);
 }
@@ -500,10 +510,11 @@ async function bootstrap() {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
   try {
-    await api("/api/auth");
+    // The session list is authenticated already; avoid a separate mobile round trip.
+    const data = await api("/api/sessions");
     clearTimeout(reconnectTimer);
     showApp();
-    await restoreSelection();
+    await restoreSelection(data);
   } catch (err) {
     if (err.status === 401) { showLogin(); return; }
     showApp();

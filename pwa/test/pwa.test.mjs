@@ -217,3 +217,28 @@ test("recovery entry and external script bypass shell paths with no-store and CS
   assert.equal(script.headers.get("cache-control"), "no-store");
   assert.doesNotMatch(await script.text(), /localStorage\.(clear|removeItem)|document\.cookie\s*=/);
 });
+
+test("shell resources compress without changing their contents or MIME types", async t => {
+  const f = await fixture();
+  const app = createPwaServer({ token, stateDir: f.config, sessionDir: f.sessions, executable: fakePi });
+  await new Promise(resolve => app.server.listen(0, "127.0.0.1", resolve));
+  t.after(() => app.close());
+  const base = "http://127.0.0.1:" + app.server.address().port;
+  for (const route of ["/", "/app.js", "/styles.css", "/sw.js"]) {
+    const raw = await new Promise((resolve, reject) => {
+      get(base + route, { headers: { "Accept-Encoding": "gzip" } }, response => {
+        const chunks = [];
+        response.on("data", chunk => chunks.push(chunk));
+        response.on("end", () => resolve({ headers: response.headers, body: Buffer.concat(chunks) }));
+        response.on("error", reject);
+      }).on("error", reject);
+    });
+    const identity = await fetch(base + route, { headers: { "Accept-Encoding": "gzip;q=0, identity" } });
+    assert.equal(raw.headers["content-encoding"], "gzip");
+    assert.equal(raw.headers.vary, "Accept-Encoding");
+    assert.equal(raw.headers["content-type"], identity.headers.get("content-type"));
+    assert.equal(identity.headers.get("content-encoding"), null);
+    assert.deepEqual(gunzipSync(raw.body), Buffer.from(await identity.arrayBuffer()));
+    assert.ok(raw.body.length < Number(identity.headers.get("content-length")));
+  }
+});

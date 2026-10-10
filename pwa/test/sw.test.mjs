@@ -77,17 +77,27 @@ test("API, recovery entry point, foreign origins, and POSTs bypass worker", asyn
 });
 
 test("activation deletes only obsolete Pi Remote shell caches", async () => {
-  const w = worker({ names: ["pi-remote-shell-v4", "pi-remote-shell-v5", "other-app-cache"] });
+  const w = worker({ names: ["pi-remote-shell-v4", "pi-remote-shell-v6", "other-app-cache"] });
   await w.activate();
   assert.deepEqual(w.deleted, ["pi-remote-shell-v4"]);
   assert.equal(w.claimed(), true);
 });
 
 
-test("a stalled network request reaches the deadline and uses cached HTML", async () => {
+test("a stalled uncached request reaches the deadline and returns a valid response", async () => {
   const network = (_request, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
-  const w = worker({ network, fastDeadline: true, entries: new Map([["/", new Response("cached shell")]]) });
+  const w = worker({ network, fastDeadline: true });
+  assert.equal((await w.request("/?transport=poll")).status, 503);
+});
+
+
+test("a warm shell launch returns cached assets without any network wait", async () => {
+  let networkCalls = 0;
+  const network = async () => { networkCalls++; return new Response("new shell"); };
+  const w = worker({ network, entries: new Map([["/", new Response("cached shell")], ["/app.js", new Response("cached script")]]) });
   assert.equal(await (await w.request("/?transport=poll")).text(), "cached shell");
+  assert.equal(await (await w.request("/app.js")).text(), "cached script");
+  assert.equal(networkCalls, 0);
 });
