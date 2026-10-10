@@ -19,7 +19,9 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
       addEventListener(type, fn) { this.handlers[type] = fn; },
       append(...items) { this.children.push(...items); for (const item of items) item.parentElement = this; },
       remove() { const items=this.parentElement?.children; if(items) items.splice(items.indexOf(this),1); },
-      replaceChildren(...items) { this.children = items; },
+      replaceChildren(...items) { this.children = items; for(const item of items) item.parentElement=this; },
+      insertBefore(item, before) {const i=this.children.indexOf(before);if(i<0)this.append(item);else{this.children.splice(i,0,item);item.parentElement=this;}},
+      replaceWith(item) {const a=this.parentElement?.children;if(a){a.splice(a.indexOf(this),1,item);item.parentElement=this.parentElement;}},
     });
     return nodes.get(id);
   };
@@ -47,11 +49,13 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
     return { status: 200, ok: true, json: async () => data };
   };
   const context = vm.createContext({ document, window, navigator: browserOptions.navigator || {}, location: browserOptions.location || {}, EventSource, fetch,
+    readImages:async()=>[],
+    renderContent:(node,message)=>{node.textContent=typeof message.content==='string'?message.content:(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n');},contentForCopy:message=>(message.content||[]).filter(p=>p?.type==='text').map(p=>p.text).join('\n'),
     crypto: webcrypto, TextEncoder, RecoveryMemory, messageFingerprint, prefersPolling, AbortController, URLSearchParams,
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, fn); delays.set(id, delay); return id; },
     clearTimeout(id) { timers.delete(id); delays.delete(id); } });
   const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-  vm.runInContext(source.replace(/^import .*\n/, ''), context);
+  vm.runInContext(source.replace(/^import .*\n/gm, ''), context);
   await new Promise(resolve => setImmediate(resolve));
   return { context, nodes, element, streams, calls, window, document, timers, delays, session, saved };
 }
@@ -401,4 +405,37 @@ test('the selected workspace header uses a compact label and preserves the full 
   const b=await browser(saved);
   assert.equal(b.element('sessionSub').textContent,'tmp / test');
   assert.equal(b.element('sessionSub').title,'/tmp/test');
+});
+
+test('304 state sync preserves transcript and does not erase recovered selection',async()=>{
+ const saved=storage();new RecoveryMemory(saved).selected('browser-session-1234');let unchanged=false;
+ const b=await browser(saved,async url=>url.endsWith('/state')&&unchanged?{status:304,ok:false}:null,{navigator:{userAgent:'iPhone'}});
+ const first=b.element('messages').children[0];b.element('connection').textContent='网络请求失败';unchanged=true;
+ const timer=[...b.delays].find(([,d])=>d===3000)[0];await b.timers.get(timer)();assert.equal(b.element('messages').children[0],first);assert.match(b.element('connection').textContent,/稳定同步模式/);
+ assert.equal(new RecoveryMemory(saved).selected(),'browser-session-1234');assert.equal(b.calls.filter(c=>c.url.endsWith('/commands')).length,0);
+});
+test('history windows preserve existing rows, can load older and return to latest',async()=>{
+ const b=await browser();
+ const messages=Array.from({length:160},(_,i)=>({role:'user',content:[{type:'text',text:'row '+(i+160)}]}));
+ b.context.fixture=messages;
+ vm.runInContext('renderSnapshot({messages:fixture,busy:false,history:{start:160,end:320,total:320,revision:"r1"}})',b.context);
+ assert.equal(vm.runInContext('historyStart',b.context),160);assert.equal(b.element('loadOlder').hidden,false);
+ const original=vm.runInContext('renderedNodes.get("160").block',b.context);
+ vm.runInContext('browsingOlder=true;historyStart=80;historyMessages=[...Array.from({length:80},(_,i)=>({role:"user",content:[{type:"text",text:"older "+i}]})),...historyMessages];renderMessages(historyMessages)',b.context);
+ assert.equal(vm.runInContext('renderedNodes.get("160").block',b.context),original);
+ b.element('jumpLatest').handlers.click();assert.equal(vm.runInContext('historyStart',b.context),160);assert.equal(vm.runInContext('browsingOlder',b.context),false);
+});
+test('final authoritative assistant removes the live row without duplicate content',async()=>{
+ const b=await browser();b.context.reply={role:'assistant',timestamp:123,content:[{type:'text',text:'final reply'}]};
+ vm.runInContext('renderSnapshot({messages:[],busy:true,liveMessage:reply});renderSnapshot({messages:[reply],busy:true,liveMessage:reply})',b.context);
+ assert.equal(vm.runInContext('liveNode',b.context),null);assert.equal(vm.runInContext('renderedNodes.size',b.context),1);
+});
+
+test('late model metadata cannot overwrite settings after selecting another session',async()=>{
+ const saved=storage();new RecoveryMemory(saved).selected('browser-session-1234');let resolveControls;
+ const b=await browser(saved,async url=>url.endsWith('/controls')?await new Promise(resolve=>{resolveControls=resolve;}):null,{navigator:{userAgent:'iPhone'}});
+ const showing=vm.runInContext('showControls("settings")',b.context);await new Promise(r=>setImmediate(r));
+ await vm.runInContext('openSession({id:"other-session-1234",name:"Other",cwd:"/tmp/other",generation:2})',b.context);
+ resolveControls({status:200,ok:true,json:async()=>({models:[{provider:'mock',id:'stale'}],levels:['high'],commands:[]})});await showing;
+ assert.equal(vm.runInContext('controls',b.context),null);assert.equal(b.element('controlPanel').hidden,true);
 });

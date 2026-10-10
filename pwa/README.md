@@ -1,3 +1,5 @@
+> Core parity development milestone (Issue #41): see [features, APIs, validation and limits](docs/core-parity.md). This branch is not deployed. Its default session root is isolated under the PWA state directory; never point a test gateway at native or existing gateway sessions.
+
 # Pi Remote PWA (experimental)
 
 Installable iOS Safari PWA plus standalone Node 22+ HTTPS/SSE gateway for existing Pi RPC sessions. No frontend build dependencies.

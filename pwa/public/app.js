@@ -1,4 +1,6 @@
 import { RecoveryMemory, messageFingerprint, prefersPolling } from "./recovery.js";
+import { readImages } from "./attachments.js";
+import { renderContent, contentForCopy } from "./transcript.js";
 const $ = id => document.getElementById(id);
 const loginView = $("loginView");
 const appView = $("appView");
@@ -13,6 +15,16 @@ const connection = $("connection");
 const activity = $("activity");
 let sessions = [];
 let current = null;
+let controlBusy=false;
+let controlMode="settings";
+let controlTicket=0;
+let controlSession=null;
+let controls=null;
+let authoritativeState={};
+let attachments=[];
+let attachmentReading=false;
+let lastRequestSignature=null;
+let answeringRequest=false;
 let stream = null;
 let epoch = 0;
 let liveText = "";
@@ -31,6 +43,16 @@ let pollingOnly = prefersPolling(navigator, location);
 let agentBusy = false;
 let activeStateRead = null;
 let lastRenderedSnapshot = null;
+let lastStateEtag=null;
+let historyMeta=null;
+let historyStart=0;
+let historyMessages=[];
+let latestSnapshot=null;
+let browsingOlder=false;
+let loadingOlder=false;
+const renderedNodes = new Map();
+let liveSignature = null;
+let renderTools = {};
 const collapsedWorkspaces = new Set();
 function pauseStateReads() {
   clearTimeout(pollTimer);
@@ -92,6 +114,7 @@ async function api(url, options = {}) {
       ...options,
       signal: controller.signal
     });
+    if(response.status===304)return {unchanged:true};
     let value;
     try { value = await response.json(); } catch (err) {
       if (response.ok) throw err;
@@ -99,6 +122,7 @@ async function api(url, options = {}) {
     }
     if (response.status === 401 && url !== "/api/login") showLogin();
     if (!response.ok) throw Object.assign(new Error(value.error || value.status || "HTTP " + response.status), { status: response.status });
+    if(response.headers?.get && value && typeof value==='object') value.etag=response.headers.get('etag');
     return value;
   } finally {
     clearTimeout(deadline);
@@ -269,7 +293,7 @@ async function copyMessage(text) {
     setActivity("无法自动复制，请长按选中文字");
   }
 }
-function makeMessage(role, text) {
+function makeMessage(role, text, message = null) {
   const block = document.createElement("section");
   block.className = "message " + role;
   const heading = document.createElement("div");
@@ -286,46 +310,38 @@ function makeMessage(role, text) {
   copy.textContent = "复制";
   copy.setAttribute?.("aria-label", "复制消息内容");
   copy.addEventListener("click", () => {
-    if (body.textContent) void copyMessage(body.textContent);
+    void copyMessage(message ? contentForCopy(message) : body.textContent);
   });
   heading.append(label, copy);
   block.append(heading, body);
+  if (message) renderContent(body, message, copyMessage, renderTools);
   return { block, body };
 }
 function renderMessages(messages) {
-  const visible = (messages || []).slice(-160);
-  const signature = JSON.stringify(visible);
-  // iOS polls once a second while busy. Don't rebuild 160 message nodes when
-  // the persisted transcript hasn't changed; it loses selection and scroll.
-  if (signature === lastRenderedSnapshot) {
-    updateJumpButton();
-    return;
-  }
+  const visible = (messages || []).slice(-320);
+  const signature = JSON.stringify([visible, renderTools]);
+  if (signature === lastRenderedSnapshot) { updateJumpButton(); return; }
   lastRenderedSnapshot = signature;
   const nearBottom = atBottom();
-  const fragment = document.createDocumentFragment();
-  for (const message of visible) {
-    const role = message?.role;
-    if (role === "assistant" || role === "user") {
-      const text = textContentOf(message);
-      if (text) fragment.append(makeMessage(role, text).block);
-      if (role === "assistant" && message.errorMessage) {
-        fragment.append(makeMessage(role, message.stopReason === "aborted" || /aborted/i.test(message.errorMessage)
-          ? "已停止" : "Pi 运行失败：" + message.errorMessage).block);
-      }
-    } else if (role === "toolResult" || role === "tool") {
-      const node = document.createElement("div");
-      node.className = "tool";
-      node.textContent = "工具完成：" + String(message.toolName || message.name || "tool");
-      fragment.append(node);
+  const keep = new Set();
+  for (let i=0; i<visible.length; i++) {
+    const message = visible[i]; if (!message) continue;
+    const key = String(historyStart + (messages || []).length - visible.length + i);
+    keep.add(key);
+    const sig = JSON.stringify([message,(message.content||[]).filter?.(c=>c?.type==='toolCall')?.map(c=>renderTools[c.id])]);
+    let item = renderedNodes.get(key);
+    if (!item || item.signature !== sig) {
+      const open = item?.body.querySelectorAll?.('details[open]');
+      const opened = new Set(open ? [...open].map(d=>d.dataset.detailKey) : []);
+      const next = makeMessage(message.role, '', message); next.signature = sig;
+      if (item) item.block.replaceWith(next.block);
+      else {const following=[...renderedNodes.entries()].find(([k])=>Number(k)>Number(key))?.[1]?.block;messagesView.insertBefore(next.block,following||liveBlock);}
+      for (const detail of next.body.querySelectorAll?.('details') || []) detail.open = opened.has(detail.dataset.detailKey);
+      item = next; renderedNodes.set(key,item);
     }
   }
-  messagesView.replaceChildren(fragment);
-  liveNode = null;
-  liveBlock = null;
-  liveText = "";
-  if (nearBottom) scrollBottom();
-  else updateJumpButton();
+  for (const [key,item] of renderedNodes) if (!keep.has(key)) {item.block.remove(); renderedNodes.delete(key);}
+  if (nearBottom) scrollBottom(); else updateJumpButton();
 }
 function setLiveText(text) {
   if (!current || !text || text === liveText) return;
@@ -345,15 +361,35 @@ function appendLive(delta) {
   if (delta) setLiveText(liveText + delta);
 }
 function renderSnapshot(data) {
+  if(data.etag)lastStateEtag=data.etag;
   agentBusy = !!data.busy;
-  renderMessages(data.messages);
-  const text = data.busy && data.liveMessage ? textContentOf(data.liveMessage) : "";
-  if (text) setLiveText(text);
-  else if (liveNode) {
-    liveBlock?.remove();
-    liveBlock = liveNode = null;
-    liveText = "";
-    updateJumpButton();
+  renderRequests(data.uiRequests || []);
+  if(data.notice?.message) $("sessionStatus").title=String(data.notice.message);
+  authoritativeState=data.state || {};
+  if(current && authoritativeState.sessionName) {current.name=authoritativeState.sessionName;$("sessionTitle").textContent=current.name;}
+  if(current && authoritativeState.model) current.model=authoritativeState.model.provider+'/'+authoritativeState.model.id;
+  const ctx=data.contextUsage || controls?.stats?.contextUsage;
+  $('sessionStatus').textContent=[authoritativeState.model?.name||authoritativeState.model?.id,authoritativeState.thinkingLevel ? 'Thinking '+authoritativeState.thinkingLevel : '',ctx?.percent!=null?'上下文 '+ctx.percent.toFixed(1)+'%':'',data.busy?'运行中':'空闲'].filter(Boolean).join(' · ');
+  renderTools = {};
+  for (const m of data.messages || []) if (m?.role==='toolResult') renderTools[m.toolCallId] = {status:m.isError?'失败':'成功'};
+  for (const t of data.tools || []) renderTools[t.toolCallId] = {status:t.status};
+  ingestHistory(data);
+  renderMessages(historyMessages);
+  renderToolProgress(data.tools||[]);
+  const last=data.messages?.at(-1);
+  const sameLive=last?.role==='assistant' && data.liveMessage && (last.timestamp && last.timestamp===data.liveMessage.timestamp || JSON.stringify(last)===JSON.stringify(data.liveMessage));
+  const message = data.busy && !sameLive && data.liveMessage;
+  const sig = message ? JSON.stringify([message,renderTools]) : null;
+  if (message && sig !== liveSignature) {
+    const nearBottom = atBottom();
+    if (!liveNode) {const item=makeMessage('assistant','');liveNode=item.body;liveBlock=item.block;messagesView.append(item.block);}
+    const opened = new Set([...(liveNode.querySelectorAll?.('details[open]') || [])].map(d=>d.dataset.detailKey));
+    renderContent(liveNode,message,copyMessage,renderTools);
+    for (const d of liveNode.querySelectorAll?.('details') || []) d.open=opened.has(d.dataset.detailKey);
+    liveText=textContentOf(message);liveSignature=sig;
+    if(nearBottom) scrollBottom();else updateJumpButton();
+  } else if (!message && liveNode) {
+    liveBlock?.remove();liveBlock=liveNode=null;liveText='';liveSignature=null;updateJumpButton();
   }
 }
 async function syncState(expectedEpoch = epoch) {
@@ -362,10 +398,12 @@ async function syncState(expectedEpoch = epoch) {
   const read = new AbortController();
   activeStateRead = read;
   try {
-    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state", { signal: read.signal });
+    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state", { signal: read.signal, headers:lastStateEtag?{'If-None-Match':lastStateEtag}:{} });
     if (expectedEpoch !== epoch) return;
+    if(data.unchanged){setConnection(realtimeConnected ? '实时事件流已连接' : 'Pi 会话已连接 · 稳定同步模式','good');await reconcileCommand(current.id,read.signal);return true;}
+    lastStateEtag=data.etag||null;
     renderSnapshot(data);
-    setActivity(data.busy ? "Pi 正在工作" : "会话已同步");
+    setActivity(data.uiRequests?.length ? "Pi 等待你响应" : data.busy ? "Pi 正在工作" : "会话已同步");
     setConnection(realtimeConnected ? "已连接 · 会话状态已同步" : "Pi 会话已连接 · 稳定同步模式", "good");
     await reconcileCommand(current.id, read.signal);
     return true;
@@ -389,14 +427,7 @@ function processRpc(payload) {
   if (type === "tool_execution_start") {
     setActivity("正在执行工具：" + (payload.toolName || "tool"));
   }
-  if (type === "message_update") {
-    const update = payload.assistantMessageEvent;
-    if (update?.type === "text_delta" && typeof update.delta === "string") {
-      if (payload.message?.role === "assistant") {
-        setLiveText(textContentOf(payload.message));
-      } else appendLive(update.delta);
-    }
-  }
+  if (type === "message_update" || type.startsWith("tool_execution_") || type==="extension_ui_request" || type==="ui_expired") scheduleSync(280);
   if (type === "agent_settled" || type === "agent_end" || type === "turn_end" || type === "message_end") {
     setActivity("本轮结束");
     scheduleSync(type === "message_end" ? 350 : 0);
@@ -455,8 +486,8 @@ async function reconcileCommand(id, signal) {
     const receipt = await api("/api/commands/" + encodeURIComponent(pending.id), signal ? { signal } : {});
     if (memory.pending(id)?.id !== pending.id) return;
     if (receipt.status === "accepted") {
-      if (current?.id === id && await messageFingerprint(promptBox.value) === pending.fingerprint) {
-        promptBox.value = "";
+      if (current?.id === id && await submissionFingerprint(promptBox.value,attachments) === pending.fingerprint) {
+        promptBox.value = "";attachments=[];renderAttachments();
         resizeComposer();
       }
       if (memory.pending(id)?.id !== pending.id) return;
@@ -497,7 +528,8 @@ async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
-  agentBusy = false;
+  agentBusy = false;lastStateEtag=null;historyMeta=null;historyStart=0;historyMessages=[];latestSnapshot=null;browsingOlder=false;controls=null;authoritativeState={};attachments=[];renderAttachments();lastRequestSignature=null;$("interactiveRequests").replaceChildren();$("interactiveRequests").hidden=true;$("attachImage").disabled=false;
+  $('controlPanel').hidden=true;$('sessionSettings').disabled=false;
   memory.selected(session.id);
   pendingCommand = memory.pending(session.id);
   clearTimeout(reconnectTimer);
@@ -516,6 +548,7 @@ async function openSession(session) {
   $("send").disabled = false;
   $("stop").disabled = false;
   lastRenderedSnapshot = null;
+  renderedNodes.clear();liveSignature=null;liveBlock=liveNode=null;liveText="";
   messagesView.textContent = "正在载入会话…";
   setConnection("连接 Pi RPC…");
   try {
@@ -532,6 +565,164 @@ async function openSession(session) {
     }
   }
 }
+function ingestHistory(data) {
+  if(!data.history) {historyMessages=data.messages||[];historyStart=0;return;}
+  latestSnapshot=data;
+  const page=data.history;
+  if(!browsingOlder || !historyMeta || page.total<historyMeta.total) {
+    historyMessages=data.messages;historyStart=page.start;browsingOlder=false;
+  } else {
+    // A reader looking at an older window keeps that bounded window. Newest
+    // messages remain in latestSnapshot until they choose "回到最新".
+    const end=historyStart+historyMessages.length;
+    for(let index=Math.max(historyStart,page.start);index<Math.min(end,page.end);index++) historyMessages[index-historyStart]=data.messages[index-page.start];
+  }
+  historyMeta=page;
+  $('loadOlder').hidden=historyStart<=0;
+  $('historyStatus').textContent='显示 '+(historyMessages.length?historyStart+1:0)+'–'+(historyStart+historyMessages.length)+' / '+page.total;
+}
+$('loadOlder').addEventListener('click',async()=>{
+  if(!current||loadingOlder||!historyMeta||historyStart<=0)return;
+  loadingOlder=true;$('loadOlder').disabled=true;const expected=epoch;const oldHeight=messagesView.scrollHeight;const oldTop=messagesView.scrollTop;
+  const viewportTop=messagesView.getBoundingClientRect?.().top;
+  const anchor=[...renderedNodes.values()].find(item=>item.block.getBoundingClientRect?.().bottom>viewportTop)?.block;
+  const anchorTop=anchor?.getBoundingClientRect?.().top;
+  try {
+    const data=await api('/api/sessions/'+encodeURIComponent(current.id)+'/state?limit=80&before='+historyStart+'&revision='+encodeURIComponent(historyMeta.revision));
+    if(expected!==epoch)return;
+    const combined=[...data.messages,...historyMessages];
+    const dropped=Math.max(0,combined.length-320);
+    historyMessages=combined.slice(0,320);historyStart=data.history.start;browsingOlder=true;
+    // Render messages chronologically, inserting older rows before the existing
+    // ones while preserving nodes and expansion state for overlapping rows.
+    lastRenderedSnapshot=null;renderMessages(historyMessages);
+    messagesView.scrollTop=anchor?.isConnected && anchorTop!==undefined ? oldTop+anchor.getBoundingClientRect().top-anchorTop : oldTop+(messagesView.scrollHeight-oldHeight);
+    $('loadOlder').hidden=historyStart<=0;
+    $('historyStatus').textContent='显示 '+(historyStart+1)+'–'+(historyStart+historyMessages.length)+' / '+historyMeta.total;
+    if(dropped)setActivity('保留最近阅读的 320 条记录；点击回到最新返回当前回复');
+  } catch(err){if(expected===epoch){setActivity(err.status===409?'历史已更新，请同步后再次载入':err.message);if(err.status===409){browsingOlder=false;lastStateEtag=null;void syncState(expected);}}}
+  finally{loadingOlder=false;$('loadOlder').disabled=false;}
+});
+function renderToolProgress(tools) {
+  const view=$('toolProgress');const active=tools.filter(t=>t.status==='运行中').slice(-6);const sig=JSON.stringify(active);if(view.dataset?.signature===sig)return;
+  if(view.dataset)view.dataset.signature=sig;view.replaceChildren();view.hidden=!active.length;
+  for(const tool of active){const item=makeMessage('toolResult','',{role:'toolResult',toolName:tool.toolName,toolCallId:tool.toolCallId,content:[{type:'text',text:tool.partialSummary||'工具正在运行…'}]});item.body.querySelector?.('summary')?.replaceChildren(document.createTextNode('运行中 · '+tool.toolName));view.append(item.body);}
+}
+async function submissionFingerprint(message,images) {return messageFingerprint(images.length?JSON.stringify([message,images]):message);}
+function renderAttachments() {
+  $('attachments').replaceChildren();
+  attachments.forEach((image,index)=>{
+    const box=document.createElement('div');const img=document.createElement('img');img.alt='待发送图片 '+(index+1);img.src='data:'+image.mimeType+';base64,'+image.data;
+    const remove=document.createElement('button');remove.type='button';remove.className='soft';remove.textContent='移除';remove.addEventListener('click',()=>{attachments.splice(index,1);renderAttachments();resizeComposer();});box.append(img,remove);$('attachments').append(box);
+  });
+  resizeComposer();
+}
+$('attachImage').addEventListener('click',()=>{if(current && !attachmentReading)$('imagePicker').click();});
+$('imagePicker').addEventListener('change',async()=>{
+  const expected=epoch;const files=[...$('imagePicker').files];if(attachmentReading)return;attachmentReading=true;$('attachImage').disabled=true;
+  try{const images=await readImages(files,attachments.length);if(expected===epoch){attachments.push(...images);renderAttachments();setActivity('图片已附加，发送前可以移除');}}
+  catch(err){if(expected===epoch)setActivity(err.message);}
+  finally{attachmentReading=false;$('imagePicker').value='';$('attachImage').disabled=!current;}
+});
+function renderRequests(requests) {
+  const signature=JSON.stringify(requests);if(signature===lastRequestSignature)return;lastRequestSignature=signature;
+  const view=$('interactiveRequests');view.replaceChildren();view.hidden=!requests.length;if(!requests.length)return;
+  const request=requests[0];const selected=current?{...current}:null;const expected=epoch;
+  const title=document.createElement('strong');title.textContent='Pi 等待你响应 · '+String(request.title||request.method);
+  const text=document.createElement('p');text.textContent=String(request.message||'')+(request.expiresAt?' · 超时后由 Pi 自动取消':'')+(requests.length>1?' · 还有 '+(requests.length-1)+' 个请求':'');
+  let field;
+  if(request.method==='select') {field=document.createElement('select');fillSelect(field,(request.options||[]).map(v=>[v,v]));}
+  else if(request.method==='input'||request.method==='editor'){field=document.createElement(request.method==='editor'?'textarea':'input');field.value=request.prefill||'';field.placeholder=request.placeholder||'';field.maxLength=20000;}
+  const error=document.createElement('p');error.className='error';
+  const actions=document.createElement('div');actions.className='control-actions';
+  const buttons=[];
+  const answer=async values=>{
+    if(answeringRequest||!selected||expected!==epoch)return;answeringRequest=true;for(const b of buttons)b.disabled=true;
+    try {
+      await operation(selected.id+'-ui-'+request.id,{type:'extension_ui_response',generation:selected.generation,requestId:request.id,...values},'/api/sessions/'+encodeURIComponent(selected.id)+'/commands');
+      if(expected===epoch){lastRequestSignature=null;await syncState(expected);}
+    } catch(err){if(expected===epoch){error.textContent=err.message;if(err.status===409){lastRequestSignature=null;void syncState(expected);}}}
+    finally{answeringRequest=false;for(const b of buttons)b.disabled=false;}
+  };
+  const add=(label,values,cls='soft')=>{const b=document.createElement('button');b.type='button';b.className=cls;b.textContent=label;b.addEventListener('click',()=>void answer(typeof values==='function'?values():values));buttons.push(b);actions.append(b);};
+  add('取消',{cancelled:true});
+  if(request.method==='confirm'){add('拒绝',{confirmed:false});add('确认',{confirmed:true},'');}
+  else add('提交',()=>({value:field.value}),'');
+  view.append(title,text);if(field)view.append(field);view.append(error,actions);
+}
+function readOperation(key) {try{return JSON.parse(storage?.getItem('pi-remote-operation-'+key)||'null');}catch{return null;}}
+function saveOperation(key,value){try{if(value)storage?.setItem('pi-remote-operation-'+key,JSON.stringify(value));else storage?.removeItem('pi-remote-operation-'+key);}catch{}}
+async function operation(key, values, url) {
+  const fingerprint=await messageFingerprint(JSON.stringify(values));
+  let pending=readOperation(key);
+  if(pending && pending.fingerprint!==fingerprint) {
+    const receipt=await api('/api/commands/'+pending.id).catch(()=>null);
+    if(receipt?.status!=='accepted' && receipt?.status!=='rejected')throw new Error('上次操作结果未知，请先同步核对；不会自动重复执行');
+    saveOperation(key,null);pending=null;
+  }
+  const id=pending?.id||crypto.randomUUID();saveOperation(key,{id,fingerprint});
+  const result=await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...values,commandId:id})});
+  if(result.status==='unknown')throw new Error('操作结果未知，请同步后核对，再重试同一操作');
+  if(result.status==='rejected') {saveOperation(key,null);throw new Error('Pi 拒绝了操作');}
+  saveOperation(key,null);return result;
+}
+function fillSelect(node, values, selected) {
+  node.replaceChildren();for(const [value,label] of values) {const o=document.createElement('option');o.value=value;o.textContent=label;node.append(o);}node.value=selected||values[0]?.[0]||'';
+}
+async function showControls(mode) {
+  if(controlBusy) return;
+  const ticket=++controlTicket;
+  controlMode=mode;controlSession=current?{...current}:null;
+  const expected=epoch;
+  $('controlError').textContent='';$('controlPanel').hidden=false;
+  $('controlTitle').textContent=mode==='new'?'新建会话':'会话设置';
+  $('workspaceField').hidden=mode!=='new';for(const id of ['nameField','modelField','thinkingField','commandField']) $(id).hidden=mode==='new';
+  $('applyControl').disabled=true;
+  try {
+    if(mode==='new') {
+      const data=await api('/api/workspaces');if(ticket!==controlTicket||expected!==epoch)return;fillSelect($('workspaceSelect'),data.workspaces.map(w=>[w.id,w.name]));
+      const pending=readOperation('create');if(pending) {
+        const receipt=await api('/api/commands/'+pending.id).catch(()=>null);
+        if(receipt?.status==='accepted' && receipt.result) {saveOperation('create',null);await loadSessions();await openSession(receipt.result);return;}
+      }
+    } else {
+      if(!controlSession)throw new Error('请先选择会话');
+      const data=await api('/api/sessions/'+encodeURIComponent(controlSession.id)+'/controls');
+      if(expected!==epoch||ticket!==controlTicket)return;controls=data;
+      fillSelect($('commandSelect'),controls.commands.map(c=>[c.name,'/'+c.name+' · '+(c.description||c.source)]));
+      $('sessionName').value=authoritativeState.sessionName||controlSession.name;
+      fillSelect($('modelSelect'),controls.models.map(m=>[JSON.stringify([m.provider,m.id]),m.provider+' / '+(m.name||m.id)]),authoritativeState.model?JSON.stringify([authoritativeState.model.provider,authoritativeState.model.id]):null);
+      fillSelect($('thinkingSelect'),controls.levels.map(l=>[l,l]),authoritativeState.thinkingLevel);
+    }
+    if(expected===epoch&&ticket===controlTicket)$('applyControl').disabled=false;
+  } catch(err){if(expected===epoch&&ticket===controlTicket)$('controlError').textContent=err.message;}
+}
+$('insertCommand').addEventListener('click',()=>{const name=$('commandSelect').value;if(name){promptBox.value='/'+name+' ';$('controlPanel').hidden=true;resizeComposer();promptBox.focus();}});
+$('newSession').addEventListener('click',()=>void showControls('new'));
+$('sessionSettings').addEventListener('click',()=>void showControls('settings'));
+$('closeControl').addEventListener('click',()=>{controlTicket++;$('controlPanel').hidden=true;});
+$('controlForm').addEventListener('submit',async event=>{
+  event.preventDefault();if(controlBusy)return;controlBusy=true;$('applyControl').disabled=true;$('controlError').textContent='';
+  const selected=controlSession;const expected=epoch;
+  try {
+    if(controlMode==='new') {const result=await operation('create',{workspaceId:$('workspaceSelect').value},'/api/sessions');await loadSessions();if(expected===epoch && result.session)await openSession(result.session);}
+    else {
+      if(!selected || current?.id!==selected.id || selected.generation!==current.generation)throw new Error('会话已切换，请重新打开设置');
+      const url='/api/sessions/'+encodeURIComponent(selected.id)+'/commands';
+      const command=async (type,values)=>{if(expected!==epoch)throw new Error('会话已切换');return operation(selected.id+'-'+type,{type,generation:selected.generation,...values},url);};
+      const [provider,modelId]=JSON.parse($('modelSelect').value);
+      if(authoritativeState.model?.provider!==provider||authoritativeState.model?.id!==modelId) {await command('set_model',{provider,modelId});
+        controls=await api('/api/sessions/'+encodeURIComponent(selected.id)+'/controls');
+      }
+      const level=$('thinkingSelect').value;
+      if(level!==authoritativeState.thinkingLevel) {if(!controls.levels.includes(level))throw new Error('新模型不支持所选 Thinking，请重新打开设置');await command('set_thinking_level',{level});}
+      const name=$('sessionName').value.trim();if(name!==selected.name)await command('set_session_name',{name});
+      await loadSessions();if(expected===epoch)await syncState(expected);
+    }
+    if(expected===epoch)$('controlPanel').hidden=true;
+  }catch(err){if(expected===epoch)$('controlError').textContent=err.message;}
+  finally{controlBusy=false;$('applyControl').disabled=false;}
+});
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault();
   const token = $("token").value;
@@ -553,13 +744,14 @@ $("composer").addEventListener("submit", async event => {
   if (!current || submitting) return;
   const sessionId = current.id;
   const message = promptBox.value;
-  if (!message.trim()) return;
+  if ((!message.trim() && !attachments.length) || attachmentReading) return;
+  const images=attachments.slice();
   submitting = true;
   pauseStateReads();
   $("send").disabled = true;
   setActivity("提交命令中…");
   try {
-    const fingerprint = await messageFingerprint(message);
+    const fingerprint = await submissionFingerprint(message,images);
     let command = memory.pending(sessionId) || pendingCommand;
     if (!command || command.fingerprint !== fingerprint || command.sessionId !== sessionId) {
       command = { id: crypto.randomUUID(), fingerprint, sessionId };
@@ -569,7 +761,7 @@ $("composer").addEventListener("submit", async event => {
     memory.pending(sessionId, command);
     const result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", message, commandId: command.id })
+      body: JSON.stringify({ type: "prompt", message, commandId: command.id, generation:current?.id===sessionId?current.generation:undefined, ...(images.length?{images}: {}) })
     });
     if (result.status === "unknown") {
       if (current?.id === sessionId) setActivity("命令状态未确认；再次发送将查询同一命令 ID，不会重复执行");
@@ -577,7 +769,8 @@ $("composer").addEventListener("submit", async event => {
     }
     memory.pending(sessionId, null);
     if (current?.id !== sessionId) return;
-    if (promptBox.value === message) {
+    if (promptBox.value === message && JSON.stringify(attachments)===JSON.stringify(images)) {
+      attachments=[];renderAttachments();
       promptBox.value = "";
       resizeComposer();
     }
@@ -586,6 +779,7 @@ $("composer").addEventListener("submit", async event => {
     setActivity("命令已接收，等待 Pi 输出…");
     scheduleSync(400);
   } catch (err) {
+    if ([400,409,413,422].includes(err.status)) {memory.pending(sessionId,null);pendingCommand=null;if(current?.id===sessionId)setActivity("命令未提交："+err.message);return;}
     if (current?.id === sessionId) {
       setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
       setConnection("命令状态：" + err.message, "bad");
@@ -620,7 +814,7 @@ $("openSidebar").addEventListener("click", () => setSidebarOpen(true));
 $("closeSidebar").addEventListener("click", () => setSidebarOpen(false));
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 sessionSearch.addEventListener("input", () => renderSessions());
-jumpLatest.addEventListener("click", () => scrollBottom());
+jumpLatest.addEventListener("click",()=>{if(browsingOlder && latestSnapshot){browsingOlder=false;lastRenderedSnapshot=null;ingestHistory(latestSnapshot);renderMessages(historyMessages);}scrollBottom();});
 messagesView.addEventListener("scroll", updateJumpButton, { passive: true });
 promptBox.addEventListener("input", resizeComposer);
 document.addEventListener("keydown", event => {

@@ -78,3 +78,13 @@
 /* Match Safari keyboard viewport and keep the history control above the composer. */
 .shell{height:var(--app-height,100dvh)}
 .jump-latest{bottom:calc(var(--composer-height,127px) + 16px)}
+
+.content {white-space:normal;overflow-wrap:anywhere;min-width:0}.content .rich-text{white-space:normal}.user .rich-text{white-space:pre-wrap} .content pre{position:relative;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;padding:12px;background:#0d1117;border-radius:8px} .content code{font-family:monospace}.content table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}.content th,.content td{border:1px solid #384352;padding:6px}.content a{color:#86bcff}.content img{max-width:100%;max-height:280px}.content details{margin:8px 0;padding:10px;border:1px solid #35404f;border-radius:8px}.content summary{cursor:pointer;color:#aebdd0}.content .raw-output{max-height:360px}.content h1{font-size:1.5em}.content h2{font-size:1.25em}.math{max-width:100%;overflow:auto}
+
+.session-status{padding:6px 16px;color:#aab7c8;font-size:12px;overflow-wrap:anywhere}.control-panel{position:fixed;inset:0;z-index:60;background:#000a;display:flex;align-items:center;justify-content:center;padding:14px}.control-card{background:#17202c;padding:20px;border-radius:12px;width:min(480px,100%);max-height:calc(var(--app-height,100dvh) - 32px);overflow:auto}.control-card label{display:block;margin:10px 0}.control-card input,.control-card select{display:block;width:100%;max-width:100%;min-width:0;margin-top:5px;padding:10px;background:#101820;color:#eee;border:1px solid #384352;border-radius:6px;font-size:16px}.control-actions{display:flex;justify-content:flex-end;gap:8px}
+
+.attachments{display:flex;gap:8px;overflow:auto}.attachments>div{display:flex;align-items:center;gap:5px}.attachments img{width:64px;height:64px;object-fit:cover;border-radius:8px}.interactive-requests{padding:12px 16px;background:#29291b;border-bottom:1px solid #6b633c;max-height:35%;overflow:auto;min-height:0}.interactive-requests input,.interactive-requests select,.interactive-requests textarea{width:100%;padding:10px;background:#101820;color:#eee;border:1px solid #625e47;border-radius:6px;font-size:16px}.interactive-requests textarea{min-height:80px;max-height:180px}.interactive-requests .control-actions{margin-top:8px}.composer-buttons{flex-wrap:wrap}
+
+.history-controls{display:flex;align-items:center;gap:10px;padding:5px 14px;font-size:11px;color:#8da4b8}.history-controls button{font-size:12px;padding:8px}.tool-progress{max-height:25%;overflow:auto;padding:0 14px}.composer-bar .activity{flex:1;min-width:0}.composer-buttons{flex:none}.raw-output{white-space:pre-wrap;overflow-wrap:anywhere}
+
+.content pre,.control-card,.interactive-requests{color:#e8ebf0}

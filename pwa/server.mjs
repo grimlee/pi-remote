@@ -1,12 +1,15 @@
 import { createServer } from "node:http";
 import { gzipSync } from "node:zlib";
 import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { discoverSessions, publicSession, PiRunner, DEFAULT_SESSION_DIR } from "./registry.mjs";
+import { discoverSessions, publicSession, PiRunner } from "./registry.mjs";
 import { Authentication, CommandLedger, safeOrigin, readJson, stateDir } from "./security.mjs";
 
+import { historyPage } from "./history.mjs";
+import { validateImages, MAX_IMAGE_REQUEST } from "./images.mjs";
+import { OwnedSessions, publicModel, validateControl, invalid } from "./control.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -15,6 +18,8 @@ const files = new Map([
   ["/sw-reset.js", ["sw-reset.js", "text/javascript; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
+  ["/attachments.js", ["attachments.js", "text/javascript; charset=utf-8"]],
+  ["/transcript.js", ["transcript.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
   ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json"]],
@@ -56,16 +61,25 @@ function securityHeaders(res) {
 
 export function createPwaServer(options = {}) {
   const dir = options.stateDir || stateDir();
-  const auth = new Authentication({ dir, ...(options.token ? { token: options.token } : {}) });
+  const auth = new Authentication({ dir, ...(options.cookieName?{cookieName:options.cookieName}:{}), ...(options.token ? { token: options.token } : {}) });
   const ledger = new CommandLedger(dir);
-  const sessionRoot = options.sessionDir || DEFAULT_SESSION_DIR;
+  // Only explicitly configured PWA-owned storage is opened. Native Pi sessions
+  // are never the implicit default for this branch.
+  const sessionRoot = options.sessionDir || process.env.PI_CODING_AGENT_SESSION_DIR || path.join(dir,'sessions');
+  const workspacePaths=options.workspaces || (process.env.PI_REMOTE_PWA_WORKSPACES ? JSON.parse(process.env.PI_REMOTE_PWA_WORKSPACES) : undefined);
+  const owned=new OwnedSessions(dir,sessionRoot,workspacePaths);
+  let creationLock=false;
   const executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
   const runners = new Map();
   let records = new Map();
   let stopped = false;
 
   async function refreshSessions() {
-    const list = await discoverSessions(sessionRoot);
+    await owned.ready;
+    const discovered=await discoverSessions(sessionRoot);
+    const found=new Map(discovered.map(s=>[s.id,{...s,generation:owned.items.get(s.id)?.generation || s.generation}]));
+    for(const [id,s] of owned.items) if(!found.has(id)) found.set(id,s);
+    const list=[...found.values()].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
     records = new Map(list.map(s => [s.id, s]));
     return list;
   }
@@ -79,19 +93,20 @@ export function createPwaServer(options = {}) {
     if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
     let runner = runners.get(id);
     if (runner && runner.session.generation !== session.generation) {
+      if(runner.busy || runner.uiRequests.size || runner.pending.size)throw invalid('session_generation_changed',409);
       runner.stop();
       runners.delete(id);
       runner = null;
     }
     if (!runner || runner.dead) {
       if (runners.size >= 8) {
-        const idle = [...runners.entries()].find(([, value]) => !value.busy);
+        const idle = [...runners.entries()].find(([, value]) => !value.busy && !value.uiRequests.size && !value.pending.size);
         if (!idle) throw Object.assign(new Error("Too many active sessions"), { status: 429 });
         idle[1].stop();
         runners.delete(idle[0]);
       }
       runner = new PiRunner(session, {
-        executable,
+        executable, sessionDir:owned.root, extraArgs:options.piArgs,
         onClosed(closed) {
           if (runners.get(id) === closed) runners.delete(id);
         }
@@ -115,8 +130,8 @@ export function createPwaServer(options = {}) {
       json(res, 200, { ok: true });
       return;
     }
-    if (method === "GET" && files.has(pathname)) {
-      const [file, mime] = files.get(pathname);
+    if (method === "GET" && (files.has(pathname) || /^\/vendor\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(pathname))) {
+      const [file, mime] = files.get(pathname) || [pathname.slice(1), pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : pathname.endsWith('.css') ? 'text/css; charset=utf-8' : pathname.endsWith('.woff2') ? 'font/woff2' : pathname.endsWith('.woff') ? 'font/woff' : 'application/octet-stream'];
       try {
         let data = await readFile(path.join(root, "public", file));
         const compressible = /^(?:text\/|application\/(?:json|manifest\+json))/.test(mime) || mime === "image/svg+xml";
@@ -161,6 +176,38 @@ export function createPwaServer(options = {}) {
       json(res, 200, { authenticated: true });
       return;
     }
+    if(pathname==='/api/workspaces' && method==='GET') {
+      try {await owned.ready;json(res,200,{workspaces:owned.workspaces.map(({cwd,...w})=>w)});}catch{error(res,503,'workspaces_unavailable');}return;
+    }
+    if(pathname==='/api/sessions' && method==='POST') {
+      let runner;
+      try {
+        await owned.ready;
+        const body=await readJson(req,4096);
+        if(!/^[\w-]{10,100}$/.test(body?.commandId||''))throw invalid('invalid_command_id');
+        const workspace=owned.workspaces.find(w=>w.id===body.workspaceId);if(!workspace)throw invalid('invalid_workspace');
+        const hash=createHash('sha256').update('create\n'+workspace.id).digest('hex');
+        const prior=ledger.get(body.commandId);
+        if(prior) {if(prior.hash!==hash)throw invalid('command_id_conflict',409);json(res,200,{status:prior.status,deduplicated:true,session:prior.result});return;}
+        if(creationLock || runners.size>=8 || owned.items.size>=500)throw invalid('session_limit',429);
+        creationLock=true;
+        const receipt={id:body.commandId,sessionId:'new',hash,status:'unknown',at:Date.now()};ledger.save(receipt);
+        try {
+          runner=new PiRunner({cwd:workspace.cwd},{executable,sessionDir:owned.root,extraArgs:options.piArgs});await runner.start();
+          const result=await runner.request('new_session',{},30000);if(result?.cancelled)throw invalid('creation_cancelled',409);
+          await runner.request('set_session_name',{name:'新会话'});
+          const state=await runner.request('get_state');
+          if(!/^[\w-]{8,128}$/.test(state?.sessionId||'') || !owned.contains(state.sessionFile))throw invalid('invalid_created_session',503);
+          const session={id:state.sessionId,file:state.sessionFile,cwd:workspace.cwd,name:state.sessionName||'新会话',model:state.model?state.model.provider+'/'+state.model.id:null,generation:Date.now(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+          await owned.save(session);runner.session=session;runner.ready=Promise.resolve();
+          runner.onClosed=closed=>{if(runners.get(session.id)===closed)runners.delete(session.id);};runners.set(session.id,runner);
+          records.set(session.id,session);receipt.sessionId=session.id;receipt.status='accepted';receipt.result=publicSession(session);ledger.save(receipt);
+          json(res,201,{status:'accepted',session:receipt.result});
+        }catch(e){runner?.stop();if(e.code==='creation_cancelled'){receipt.status='rejected';ledger.save(receipt);throw e;}json(res,503,{status:'unknown',commandId:body.commandId});}
+        finally {creationLock=false;}
+      }catch(e){error(res,e.status||503,e.code||'creation_unavailable');}
+      return;
+    }
     if (pathname === "/api/sessions" && method === "GET") {
       try {
         const sessions = await refreshSessions();
@@ -172,11 +219,11 @@ export function createPwaServer(options = {}) {
     if (method === "GET" && /^\/api\/commands\/[\w-]{10,100}$/.test(pathname)) {
       const receipt = ledger.get(pathname.split("/").pop());
       if (!receipt) { error(res, 404, "command_not_found"); return; }
-      json(res, 200, { commandId: receipt.id, sessionId: receipt.sessionId, status: receipt.status });
+      json(res, 200, { commandId: receipt.id, sessionId: receipt.sessionId, status: receipt.status, ...(receipt.result ? {result:receipt.result}: {}) });
       return;
     }
 
-    const match = /^\/api\/sessions\/([^/]+)\/(state|events|commands)$/.exec(pathname);
+    const match = /^\/api\/sessions\/([^/]+)\/(state|events|commands|controls)$/.exec(pathname);
     if (!match) { error(res, 404, "not_found"); return; }
     let id;
     try { id = decodeURIComponent(match[1]); }
@@ -187,7 +234,13 @@ export function createPwaServer(options = {}) {
       const runner = await runnerFor(id);
       if (action === "state" && method === "GET") {
         const snapshot = await runner.snapshot();
-        json(res, 200, snapshot);
+        const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):160;
+        const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):undefined;
+        const page=historyPage(snapshot.messages,{limit,before,revision:url.searchParams.get('revision')||undefined});
+        const value={...snapshot,...page};
+        const etag='"'+createHash('sha256').update(JSON.stringify(value)).digest('hex')+'"';
+        if(req.headers['if-none-match']===etag){res.writeHead(304,{'ETag':etag,'Cache-Control':'no-store'});res.end();return;}
+        json(res, 200, value, {ETag:etag});
         return;
       }
       if (action === "events" && method === "GET") {
@@ -218,21 +271,62 @@ export function createPwaServer(options = {}) {
         res.once("close", cleanup);
         return;
       }
+      if(action==='controls' && method==='GET') {
+        const models=await runner.request('get_available_models');
+        const levels=await runner.request('get_available_thinking_levels');
+        const commands=await runner.request('get_commands');
+        const stats=await runner.request('get_session_stats');
+        const {sessionFile,...safeStats}=stats||{};
+        json(res,200,{models:(models?.models||[]).map(publicModel),levels:levels?.levels||[],commands:(commands?.commands||[]).map(c=>({name:c.name,description:c.description,source:c.source})),stats:safeStats});return;
+      }
       if (action === "commands" && method === "POST") {
-        const body = await readJson(req);
-        if (!body || !["prompt", "abort"].includes(body.type)) {
+        const body = await readJson(req, MAX_IMAGE_REQUEST);
+        if (!body || !["prompt", "abort", "set_session_name", "set_model", "set_thinking_level", "extension_ui_response"].includes(body.type)) {
           error(res, 400, "unsupported_command"); return;
         }
+        if (body.generation!==undefined && body.generation!==runner.session.generation) {error(res,409,'stale_session_generation');return;}
+        if(body.type==='extension_ui_response') {
+          if(body.generation!==runner.session.generation)throw invalid('stale_session_generation',409);
+          if(!/^[\w-]{10,100}$/.test(body.commandId||'')||typeof body.requestId!=='string')throw invalid('invalid_ui_response');
+          const values={id:body.requestId,...(body.cancelled===true?{cancelled:true}:typeof body.confirmed==='boolean'?{confirmed:body.confirmed}:{value:body.value})};
+          const hash=createHash('sha256').update(JSON.stringify([id,runner.session.generation,'ui',values])).digest('hex');
+          const prior=ledger.get(body.commandId);if(prior){if(prior.hash!==hash||prior.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:prior.status,deduplicated:true});return;}
+          // Validate without consuming before recording, including stale/expired requests.
+          const request=runner.uiRequests.get(body.requestId);if(!request || (request.expiresAt&&request.expiresAt<=Date.now()))throw invalid('request_expired',409);
+          if(!values.cancelled && (request.method==='confirm'?typeof values.confirmed!=='boolean':typeof values.value!=='string'||values.value.length>20000||(request.method==='select'&&!request.options?.includes(values.value))))throw invalid('invalid_ui_value');
+          const receipt={id:body.commandId,sessionId:id,hash,status:'unknown',at:Date.now()};ledger.save(receipt);
+          try{await runner.answerUI(values);receipt.status='accepted';ledger.save(receipt);json(res,202,{status:'accepted'});}catch(e){if(e.code)throw e;json(res,503,{status:'unknown'});}return;
+        }
+        if(!['prompt','abort'].includes(body.type)) {
+          if(body.generation!==runner.session.generation)throw invalid('stale_session_generation',409);
+          const values=validateControl(body);
+          const hash=createHash('sha256').update(JSON.stringify([id,runner.session.generation,body.type,values])).digest('hex');
+          const prior=ledger.get(body.commandId);
+          if(prior){if(prior.hash!==hash||prior.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:prior.status,deduplicated:true,commandId:body.commandId});return;}
+          const state=await runner.request('get_state');if(state.isStreaming||state.isCompacting||state.isRetrying)throw invalid('session_busy',409);
+          if(body.type==='set_model') {const models=await runner.request('get_available_models');if(!models.models?.some(m=>m.provider===values.provider&&m.id===values.modelId))throw invalid('unsupported_model');}
+          if(body.type==='set_thinking_level'){const levels=await runner.request('get_available_thinking_levels');if(!levels.levels?.includes(values.level))throw invalid('unsupported_thinking_level');}
+          const raced=ledger.get(body.commandId);if(raced){if(raced.hash!==hash||raced.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:raced.status,deduplicated:true,commandId:body.commandId});return;}
+          const receipt={id:body.commandId,sessionId:id,hash,status:'unknown',at:Date.now()};ledger.save(receipt);
+          try{await runner.request(body.type,values);receipt.status='accepted';ledger.save(receipt);
+            if(body.type==='set_session_name'){runner.session.name=values.name;runner.session.updatedAt=new Date().toISOString();await owned.save(runner.session);}
+            if(body.type==='set_model'){runner.session.model=values.provider+'/'+values.modelId;await owned.save(runner.session);}
+            if(body.type==='set_thinking_level'){runner.session.thinkingLevel=values.level;await owned.save(runner.session);}
+            json(res,202,{status:'accepted',commandId:body.commandId});
+          }catch(e){if(e.rpcRejected){receipt.status='rejected';ledger.save(receipt);error(res,422,'rpc_rejected');}else json(res,503,{status:'unknown',commandId:body.commandId});}return;
+        }
         if (body.type === "abort") {
+          await runner.request("get_state");
           await runner.request("abort", {});
           json(res, 200, { status: "accepted" });
           return;
         }
-        if (typeof body.message !== "string" || !body.message.trim() || body.message.length > 50000
+        if (typeof body.message !== "string" || (!body.message.trim() && !body.images?.length) || body.message.length > 50000
           || typeof body.commandId !== "string" || !/^[\w-]{10,100}$/.test(body.commandId)) {
           error(res, 400, "invalid_prompt"); return;
         }
-        const hash = createHash("sha256").update(id + "\n" + body.message).digest("hex");
+        const images=validateImages(body.images);
+        const hash = createHash("sha256").update(JSON.stringify([id,body.message,images])).digest("hex");
         const prior = ledger.get(body.commandId);
         if (prior) {
           if (prior.hash !== hash || prior.sessionId !== id) {
@@ -241,14 +335,23 @@ export function createPwaServer(options = {}) {
           json(res, 200, { status: prior.status, deduplicated: true, commandId: body.commandId });
           return;
         }
+        const promptState=await runner.request('get_state');
+        if(images.length && !promptState.model?.input?.includes('image'))throw invalid('model_does_not_support_images');
+        if(body.message.trimStart().startsWith('/')) {
+          const name=body.message.trimStart().split(/\s/)[0].slice(1);
+          const commands=await runner.request('get_commands');if(!commands?.commands?.some(c=>c.name===name))throw invalid('unsupported_slash_command');
+          const raced=ledger.get(body.commandId);if(raced){if(raced.hash!==hash||raced.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:raced.status,deduplicated:true,commandId:body.commandId});return;}
+        }
+        const raced=ledger.get(body.commandId);if(raced){if(raced.hash!==hash||raced.sessionId!==id)throw invalid('command_id_conflict',409);json(res,200,{status:raced.status,deduplicated:true,commandId:body.commandId});return;}
         const receipt = { id: body.commandId, sessionId: id, hash, status: "unknown", at: Date.now() };
         ledger.save(receipt);
         try {
-          await runner.request("prompt", { message: body.message }, 30000);
+          await runner.request("prompt", { message: body.message, ...(images.length?{images}: {}) }, 30000);
           receipt.status = "accepted";
           ledger.save(receipt);
           json(res, 202, { status: "accepted", commandId: body.commandId });
-        } catch {
+        } catch (e) {
+          if(e.rpcRejected){receipt.status="rejected";ledger.save(receipt);error(res,422,"rpc_rejected");return;}
           // Unknown is intentionally not re-dispatched automatically: at-most-once over double execution.
           json(res, 503, { status: "unknown", commandId: body.commandId });
         }
@@ -256,7 +359,7 @@ export function createPwaServer(options = {}) {
       }
       error(res, 405, "method_not_allowed");
     } catch (e) {
-      error(res, e.status || 503, e.status === 404 ? "session_not_found" : "backend_unavailable");
+      error(res, e.status || 503, e.code || (e.status === 404 ? "session_not_found" : "backend_unavailable"));
     }
   });
 

@@ -4,6 +4,7 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
+import { publicState } from "./control.mjs";
 import path from "node:path";
 import os from "node:os";
 
@@ -118,6 +119,8 @@ export class PiRunner {
   constructor(session, options = {}) {
     this.session = session;
     this.executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
+    this.sessionDir = options.sessionDir;
+    this.extraArgs = options.extraArgs || [];
     this.pending = new Map();
     this.listeners = new Set();
     this.events = [];
@@ -125,6 +128,10 @@ export class PiRunner {
     this.seq = 0;
     this.busy = false;
     this.liveMessage = null;
+    this.tools = new Map();
+    this.uiRequests = new Map();
+    this.uiTimers = new Map();
+    this.notice = null;
     this.dead = false;
     this.lastActive = Date.now();
     this.buffer = "";
@@ -139,7 +146,16 @@ export class PiRunner {
     try {
       if ((await stat(this.session.cwd)).isDirectory()) cwd = this.session.cwd;
     } catch {}
-    this.child = spawn(this.executable, ["--session", this.session.file, "--mode", "rpc"], {
+    const args=["--mode","rpc",...this.extraArgs];
+    if(this.session.file && await stat(this.session.file).then(()=>true).catch(()=>false)) args.push('--session',this.session.file);
+    else if(this.session.id) {
+      args.push('--session-id',this.session.id);
+      if(this.session.name) args.push('--name',this.session.name);
+      if(this.session.model) {const split=this.session.model.indexOf('/');if(split>0)args.push('--provider',this.session.model.slice(0,split),'--model',this.session.model.slice(split+1));}
+      if(this.session.thinkingLevel) args.push('--thinking',this.session.thinkingLevel);
+    }
+    if(this.sessionDir) args.push('--session-dir',this.sessionDir);
+    this.child = spawn(this.executable, args, {
       cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"], shell: false
     });
     this.child.stdout.on("data", bytes => this.consume(bytes));
@@ -174,22 +190,41 @@ export class PiRunner {
           else if (message.type === "message_update") this.applyTextUpdate(message.assistantMessageEvent);
         }
         if (message.type === "message_end" || message.type === "agent_settled") this.liveMessage = null;
+        if(message.type==='extension_ui_request') {
+          if(['confirm','input','select','editor'].includes(message.method) && typeof message.id==='string') {
+            if(this.uiRequests.size>=32 || Buffer.byteLength(JSON.stringify(message))>128*1024) {
+              this.child?.stdin.write(JSON.stringify({type:'extension_ui_response',id:message.id,cancelled:true})+'\n');
+              this.notice={message:'交互请求过多或过大，已安全取消',notifyType:'warning'};continue;
+            }
+            const request={...message,receivedAt:Date.now(),expiresAt:typeof message.timeout==='number' && Number.isFinite(message.timeout)?Date.now()+Math.max(0,message.timeout):null};
+            this.uiRequests.set(message.id,request);
+            if(request.expiresAt && message.timeout<2147483647){const timer=setTimeout(()=>{this.uiRequests.delete(message.id);this.uiTimers.delete(message.id);this.publish('rpc',{type:'ui_expired',id:message.id});},Math.max(0,message.timeout));this.uiTimers.set(message.id,timer);}
+          }else if(message.method==='notify') this.notice={message:message.message,notifyType:message.notifyType};
+        }
+        if (message.type === 'tool_execution_start') {
+          this.tools.set(message.toolCallId,{toolCallId:message.toolCallId,toolName:message.toolName,status:'运行中'});
+          while(this.tools.size>100) this.tools.delete(this.tools.keys().next().value);
+        }
+        if (message.type === 'tool_execution_update') {const tool=this.tools.get(message.toolCallId);if(tool)tool.partialSummary=(message.partialResult?.content||[]).filter(c=>c?.type==='text').map(c=>c.text).join('\n').slice(0,8000);}
+        if (message.type === 'tool_execution_end') this.tools.set(message.toolCallId,{toolCallId:message.toolCallId,toolName:message.toolName,status:message.isError?'失败':'成功'});
+        while(this.tools.size>100)this.tools.delete(this.tools.keys().next().value);
         this.publish("rpc", message);
       }
     }
   }
 
   applyTextUpdate(update) {
-    // Pi 1.x RPC intentionally sends deltas, not cumulative SDK message snapshots.
-    if (!update || !["text_start", "text_delta", "text_end"].includes(update.type)) return;
+    if (!update || !Number.isSafeInteger(update.contentIndex ?? 0)) return;
     if (!this.liveMessage) this.liveMessage = { role: "assistant", content: [] };
-    const index = Number.isSafeInteger(update.contentIndex) ? update.contentIndex : 0;
-    if (index < 0 || index > 10000) return;
-    const blocks = this.liveMessage.content;
-    if (!Array.isArray(blocks)) return;
-    if (!blocks[index] || blocks[index].type !== "text") blocks[index] = { type: "text", text: "" };
-    if (update.type === "text_delta" && typeof update.delta === "string") blocks[index].text += update.delta;
-    if (update.type === "text_end" && typeof update.content === "string") blocks[index].text = update.content;
+    const index=update.contentIndex ?? 0; if(index<0 || index>10000) return;
+    const blocks=this.liveMessage.content; if(!Array.isArray(blocks)) return;
+    const family=update.type?.split('_')[0];
+    if (family==='text' || family==='thinking') {
+      const key=family==='text'?'text':'thinking';
+      if(blocks[index]?.type!==family) blocks[index]={type:family,[key]:''};
+      if(update.type.endsWith('_delta') && typeof update.delta==='string') blocks[index][key]+=update.delta;
+      if(update.type.endsWith('_end') && typeof update.content==='string') blocks[index][key]=update.content;
+    } else if(family==='toolcall' && update.type==='toolcall_end' && update.toolCall) blocks[index]=structuredClone(update.toolCall);
   }
 
   publish(type, data) {
@@ -238,7 +273,8 @@ export class PiRunner {
         }
       });
     }).then(response => {
-      if (response.success === false) throw new Error(response.error || "Pi RPC " + type + " rejected");
+      if (response.success === false) throw Object.assign(new Error('Pi RPC rejected '+type),{rpcRejected:true,status:422,code:'rpc_rejected'});
+      if(type==='get_state' && this.session.id && response.data?.sessionId!==this.session.id)throw Object.assign(new Error('session_identity_changed'),{status:409,code:'session_identity_changed'});
       return response.data;
     });
   }
@@ -248,18 +284,37 @@ export class PiRunner {
     // get_state covers retries/tool loops that can continue after turn_end.
     this.busy = !!(state?.isStreaming || state?.isCompacting || state?.isRetrying);
     const data = await this.request("get_messages", {}, 30000);
+    const stats = await this.request("get_session_stats", {}, 30000);
     return {
-      state: state || {},
+      state: publicState(state || {}),
+      contextUsage: stats?.contextUsage || null,
+      session: {id:this.session.id,generation:this.session.generation},
       messages: Array.isArray(data?.messages) ? data.messages : (Array.isArray(data) ? data : []),
       cursor: this.seq,
       busy: this.busy,
-      liveMessage: this.liveMessage
+      liveMessage: this.liveMessage,
+      tools: [...this.tools.values()],
+      uiRequests:[...this.uiRequests.values()],
+      notice:this.notice
     };
+  }
+
+  async answerUI(values) {
+    const request=this.uiRequests.get(values.id);
+    if(!request || (request.expiresAt && request.expiresAt<=Date.now())) throw Object.assign(new Error('request_expired'),{status:409,code:'request_expired'});
+    if(values.cancelled!==true) {
+      if(request.method==='confirm') {if(typeof values.confirmed!=='boolean')throw Object.assign(new Error('invalid_confirmation'),{status:400,code:'invalid_confirmation'});}
+      else if(typeof values.value!=='string'||values.value.length>20000 || (request.method==='select'&&!request.options?.includes(values.value))) throw Object.assign(new Error('invalid_ui_value'),{status:400,code:'invalid_ui_value'});
+    }
+    const response={type:'extension_ui_response',id:values.id,...(values.cancelled===true?{cancelled:true}:request.method==='confirm'?{confirmed:values.confirmed}:{value:values.value})};
+    this.uiRequests.delete(values.id);clearTimeout(this.uiTimers.get(values.id));this.uiTimers.delete(values.id);
+    await new Promise((resolve,reject)=>this.child.stdin.write(JSON.stringify(response)+'\n',err=>err?reject(err):resolve()));
   }
 
   stopWithError(error) {
     if (this.dead) return;
     this.dead = true;
+    for(const timer of this.uiTimers.values())clearTimeout(timer);this.uiTimers.clear();this.uiRequests.clear();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);

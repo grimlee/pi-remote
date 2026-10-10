@@ -259,3 +259,21 @@ test("side-by-side ports use independent cookie names without replacing stable a
   assert.equal(ux.isAuthorized({ headers: { cookie: stableCookie } }), false);
   assert.throws(() => new Authentication({ dir: f.config, token, cookieName: "bad; cookie" }), /Invalid PWA cookie name/);
 });
+
+test('thinking deltas and completed tool calls reconstruct structured live content',()=>{
+  const runner=new PiRunner({});
+  const send=assistantMessageEvent=>runner.consume(Buffer.from(JSON.stringify({type:'message_update',assistantMessageEvent})+'\n'));
+  send({type:'thinking_start',contentIndex:0});send({type:'thinking_delta',contentIndex:0,delta:'reason'});send({type:'thinking_end',contentIndex:0,content:'final reason'});
+  send({type:'toolcall_end',contentIndex:1,toolCall:{type:'toolCall',id:'tool1',name:'bash',arguments:{command:'true'}}});
+  assert.equal(runner.liveMessage.content[0].thinking,'final reason');assert.equal(runner.liveMessage.content[1].name,'bash');
+  runner.consume(Buffer.from(JSON.stringify({type:'tool_execution_start',toolCallId:'tool1',toolName:'bash'})+'\n'));
+  assert.equal(runner.tools.get('tool1').status,'运行中');
+  runner.consume(Buffer.from(JSON.stringify({type:'tool_execution_end',toolCallId:'tool1',toolName:'bash',isError:true})+'\n'));
+  assert.equal(runner.tools.get('tool1').status,'失败');
+});
+
+test('RPC identity changes reject stale state instead of writing to a new session',async()=>{
+ const runner=new PiRunner({id:'original-session'});
+ runner.child={stdin:{writable:true,write(line,done){const command=JSON.parse(line);queueMicrotask(()=>runner.consume(Buffer.from(JSON.stringify({type:'response',id:command.id,success:true,data:{sessionId:'switched-session'}})+'\n')));done?.();}}};
+ await assert.rejects(()=>runner.request('get_state'),/session_identity_changed/);runner.stopWithError(new Error('finished'));
+});

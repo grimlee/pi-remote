@@ -11,6 +11,17 @@
     "test": "npm --prefix host test && npm --prefix relay test",
     "typecheck": "npm --prefix host run typecheck && npm --prefix relay run typecheck",
     "build:control-plane": "npm --prefix relay run build && npm --prefix host run build",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "build:pwa": "node pwa/build.mjs"
+  },
+  "dependencies": {
+    "dompurify": "3.4.16",
+    "highlight.js": "11.11.1",
+    "katex": "0.19.0",
+    "marked": "16.4.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.11",
+    "jsdom": "27.0.1"
   }
 }
