@@ -679,9 +679,15 @@ async function tailcatMutation(sessionId, command) {
   // Persist identifiers only for every mutation, including create/abort/model.
   // A lost reply must be reconciled before another mutation can be dispatched.
   memory.write(key, {id, sessionId, type: command.type});
-  const result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
-    method: "POST", body: JSON.stringify({...command, commandId: id})
-  });
+  let result;
+  try {
+    result = await api("/api/sessions/" + encodeURIComponent(sessionId) + "/commands", {
+      method: "POST", body: JSON.stringify({...command, commandId: id})
+    });
+  } catch (error) {
+    if (error.definitive) memory.write(key, null);
+    throw error;
+  }
   if (result.status === "accepted") memory.write(key, null);
   return result;
 }

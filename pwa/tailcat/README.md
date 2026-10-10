@@ -61,7 +61,8 @@ browser disconnection; a gateway/process crash is not durable tool execution.
 All mutations reserve an fsynced receipt before dispatch. Their IDs survive in
 sealed browser state; after reconnect only receipt reads are retried. Missing or
 `unknown` receipts are retained for operator inspection and never automatically
-reissued. Prompt IDs also retain the existing UI recovery semantics. Unconfirmed
+reissued. Oversized requests fail before reservation; authoritatively rejected
+validation requests clear their pending IDs. Prompt IDs also retain the existing UI recovery semantics. Unconfirmed
 operations deliberately block further mutations, except explicit abort. Inspect
 the Host's receipt and session before resolving ambiguous state; do not clear
 browser state and blindly resend. Cancellation drops a pending response; it is

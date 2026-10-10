@@ -80,7 +80,9 @@ function receive(message) {
     const partial = assembly.get(message.id);
     if (partial) { receivedBytes -= partial.bytes.length; assembly.delete(message.id); }
     cancelled.delete(message.id);
-    complete(message.id, null, fail(message.status || 503, message.error || 'request_failed')); return;
+    const error = fail(message.status || 503, message.error || 'request_failed');
+    error.definitive = [400, 403, 404, 413, 429].includes(message.status);
+    complete(message.id, null, error); return;
   }
   if (message.type === 'result.start') {
     if (!Number.isInteger(message.bytes) || message.bytes < 0 || message.bytes > MAX_RESULT || assembly.has(message.id) || assembly.size >= 32 || receivedBytes + message.bytes > MAX_RESULT) throw fail(413, 'response_budget_exceeded');
@@ -158,8 +160,12 @@ async function connect(pairing) {
   return connectPromise;
 }
 async function request(op, args, id = crypto.randomUUID(), timeout) {
+  // Reject oversized requests before reserving an uncertain mutation or dialing.
+  try { frame({v: VERSION, type: 'request', id, seq: 999999, op, args, signature: 'x'.repeat(86)}); }
+  catch { throw Object.assign(fail(413, 'request_too_large'), {definitive: true}); }
   if (cancelled.delete(id)) throw fail(499, "request_cancelled");
-  await connect();
+  try { await connect(); }
+  catch (error) { error.definitive = true; throw error; } // This operation has not been sent.
   if (cancelled.delete(id)) throw fail(499, "request_cancelled");
   if (op === 'command.dispatch') {
     const commandId = args.command?.commandId;
@@ -176,7 +182,15 @@ async function request(op, args, id = crypto.randomUUID(), timeout) {
   response.catch(() => {});
   try { await write({v: VERSION, type: 'request', id, op, args}); }
   catch (e) { complete(id, null, e); }
-  const value = await response;
+  let value;
+  try { value = await response; }
+  catch (error) {
+    if (op === 'command.dispatch' && error.definitive) {
+      config.pendingMutations = (config.pendingMutations || []).filter(x => x.id !== args.command.commandId);
+      await saveDevice(identity, config);
+    }
+    throw error;
+  }
   if ((op === 'command.dispatch' || op === 'command.receipt') && value.status === 'accepted') {
     config.pendingMutations = (config.pendingMutations || []).filter(x => x.id !== value.commandId);
     await saveDevice(identity, config);
@@ -234,5 +248,5 @@ self.onmessage = event => {
     }
     throw fail(400, 'unsupported_worker_message');
   };
-  void run().then(value => post({type: 'reply', id: message.id, value})).catch(e => post({type: 'reply', id: message.id, error: e.message?.replace(/tc[A-Za-z0-9_-]{20,}/g, 'tc[REDACTED]'), status: e.status || 503}));
+  void run().then(value => post({type: 'reply', id: message.id, value})).catch(e => post({type: 'reply', id: message.id, error: e.message?.replace(/tc[A-Za-z0-9_-]{20,}/g, 'tc[REDACTED]'), status: e.status || 503, definitive: e.definitive === true}));
 };

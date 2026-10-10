@@ -64,6 +64,13 @@ try {
     return {privateExtractable:identity.privateKey.extractable,wrappingExtractable:identity.wrappingKey.extractable,grant:config.grant.role};
   });
   assert.deepEqual(cryptoState,{privateExtractable:false,wrappingExtractable:false,grant:'owner'});
+  const invalid = await page.evaluate(async () => {
+    try {
+      await window.piRemoteTransport.api('/api/sessions/session_test_12345/commands', {method:'POST',body:JSON.stringify({type:'prompt',commandId:crypto.randomUUID(),message:''})});
+      return 0;
+    } catch(error) { return error.status; }
+  });
+  assert.equal(invalid,400,'a definitively rejected request must not block later mutations');
   await page.locator('#prompt').fill('long_test'); await page.locator('#composer').evaluate(form=>form.requestSubmit());
   await page.waitForFunction(()=>document.getElementById('messages').textContent.includes('长🙂'),{timeout:30000});
   const transcript=await page.evaluate(()=>window.piRemoteTransport.api('/api/sessions/session_test_12345/state'));

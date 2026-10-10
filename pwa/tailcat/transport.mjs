@@ -28,7 +28,7 @@ export function createTransport() {
       const pending = waiting.get(data.id);
       if (!pending) return;
       waiting.delete(data.id); pending.cleanup();
-      if (data.error) pending.reject(Object.assign(new Error(data.error), {status: data.status}));
+      if (data.error) pending.reject(Object.assign(new Error(data.error), {status: data.status, definitive: data.definitive}));
       else pending.resolve(data.value);
     } else if (data.type === 'event') {
       try { streams.get(data.subscription)?.emit(data.event.type, {data: JSON.stringify(data.event.data), lastEventId: String(data.event.id)}); }

@@ -26,7 +26,7 @@ async function browser(saved = storage(), fetchHook, browserOptions = {}) {
   const session = { id: 'browser-session-1234', name: 'Disposable test', cwd: '/tmp/test' };
   const streams = [];
   const calls = [];
-  const window = { localStorage: saved, innerHeight:844, visualViewport:browserOptions.visualViewport, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
+  const window = { piRemoteTransport: browserOptions.transport, localStorage: saved, innerHeight:844, visualViewport:browserOptions.visualViewport, handlers: {}, addEventListener(k, fn) { this.handlers[k] = fn; } };
   const properties = new Map();
   const document = { hidden: false, handlers: {}, documentElement:{style:{setProperty:(k,v)=>properties.set(k,v),getPropertyValue:k=>properties.get(k)}}, getElementById: element,
     createElement: () => element(Math.random()), createDocumentFragment: () => element(Math.random()),
@@ -401,4 +401,30 @@ test('the selected workspace header uses a compact label and preserves the full 
   const b=await browser(saved);
   assert.equal(b.element('sessionSub').textContent,'tmp / test');
   assert.equal(b.element('sessionSub').title,'/tmp/test');
+});
+
+test('Tailcat UI clears definitive rejection but preserves unknown mutations without resubmitting', async () => {
+  let mode = 'reject';
+  const dispatches = [];
+  const transport = {
+    api: async (url, options) => {
+      if (url === '/api/sessions') return {sessions: []};
+      if (url.startsWith('/api/commands/')) return {status: 'unknown'};
+      if (url.endsWith('/commands')) {
+        const command = JSON.parse(options.body); dispatches.push(command);
+        if (mode === 'reject') throw Object.assign(new Error('invalid_name'), {status: 400, definitive: true});
+        return {status: mode, commandId: command.commandId};
+      }
+      return {};
+    }
+  };
+  const b = await browser(storage(), null, {transport});
+  const change = () => vm.runInContext('tailcatMutation("browser-session-1234", {type:"rename", name:"example"})', b.context);
+  await assert.rejects(change(), /invalid_name/);
+  assert.equal(b.saved.getItem('pi-remote-pending-mutation'), null);
+  mode = 'unknown';
+  assert.equal((await change()).status, 'unknown');
+  assert.ok(b.saved.getItem('pi-remote-pending-mutation'));
+  await assert.rejects(change(), /上次操作结果未确认/);
+  assert.equal(dispatches.length, 2);
 });
