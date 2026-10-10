@@ -11,7 +11,8 @@ let sessionId='session_test_12345';try{sessionId=JSON.parse(readFileSync(file,'u
 let sessionName;let level='low';
 let model={provider:'mock',id:'test',name:'Test model',reasoning:true,input:['text','image'],contextWindow:200000,headers:{Authorization:'NEVER_SEND_SECRET'},baseUrl:'https://private.invalid?key=SECRET'};
 const models=[model,{...model,id:'other',name:'Other model'}];
-const messages = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+let messages;try{messages=readFileSync(file,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)).filter(v=>v.type==='message').map(v=>v.message);}catch{}
+messages ||= [{role:'user',content:[{type:'text',text:'hello'}]}];
 const output = event => process.stdout.write(JSON.stringify(event) + "\n");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of lines) {
@@ -32,9 +33,13 @@ for await (const line of lines) {
   } else if(type==='get_session_stats') {output({type:'response',id,command:type,success:true,data:{sessionId,sessionFile:file,contextUsage:{percent:5,tokens:10000,contextWindow:200000}}});
   } else if (type === "get_messages") {
     output({ type: "response", id, command: type, success: true, data: { messages } });
+  } else if(type==='extension_ui_response') {
+    messages.push({role:'custom',customType:'browser-interaction-result',content:command.cancelled?'cancelled':String(command.confirmed ?? command.value)});
+    output({type:'message_end'});
   } else if (type === "prompt") {
     messages.push({ role: "user", content: [{ type: "text", text: command.message },...(command.images||[])] });
     output({ type: "response", id, command: type, success: true });
+    if(command.message==='/test-command') {output({type:'extension_ui_request',id:'browser-request-0001',method:'confirm',title:'Browser test approval',message:'Choose explicitly'});continue;}
     output({ type: "agent_start" });
     setTimeout(() => {
       output({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "mock reply" } });

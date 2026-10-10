@@ -42,7 +42,7 @@ export function richText(node, text, copy) {
       while ((match=pattern.exec(target.textContent))) {
         fragment.append(document.createTextNode(target.textContent.slice(offset,match.index)));
         const span=document.createElement('span');span.className='math';
-        span.innerHTML=DOMPurify.sanitize(katex.renderToString(match[1]||match[2],{displayMode:!!match[1],throwOnError:false,trust:false,maxExpand:1000,maxSize:20}),{USE_PROFILES:{html:true,mathMl:true,svg:true}});
+        span.innerHTML=DOMPurify.sanitize(katex.renderToString(match[1]||match[2],{displayMode:!!match[1],output:'mathml',throwOnError:false,trust:false,maxExpand:1000,maxSize:20}),{USE_PROFILES:{html:true,mathMl:true,svg:true}});
         fragment.append(span);offset=pattern.lastIndex;
       }
       fragment.append(document.createTextNode(target.textContent.slice(offset)));target.replaceWith(fragment);

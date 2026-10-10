@@ -1,10 +1,10 @@
 name: PWA checks
 on:
   push:
-    branches: ["feature/pwa-remote"]
-    paths: ["pwa/**", "package.json", ".github/workflows/pwa-check.yml"]
+    branches: ["feature/pwa-remote", "feature/pwa-mobile-ux", "feature/pwa-core-parity"]
+    paths: ["pwa/**", "package.json", "package-lock.json", ".github/workflows/pwa-check.yml"]
   pull_request:
-    paths: ["pwa/**", "package.json", ".github/workflows/pwa-check.yml"]
+    paths: ["pwa/**", "package.json", "package-lock.json", ".github/workflows/pwa-check.yml"]
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -14,6 +14,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify local vendor build
+        run: |
+          npm run build:pwa
+          git diff --exit-code -- pwa/public/vendor
       - name: Syntax validation
         run: |
           node --check pwa/registry.mjs

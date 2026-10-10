@@ -271,3 +271,9 @@ test('thinking deltas and completed tool calls reconstruct structured live conte
   runner.consume(Buffer.from(JSON.stringify({type:'tool_execution_end',toolCallId:'tool1',toolName:'bash',isError:true})+'\n'));
   assert.equal(runner.tools.get('tool1').status,'失败');
 });
+
+test('RPC identity changes reject stale state instead of writing to a new session',async()=>{
+ const runner=new PiRunner({id:'original-session'});
+ runner.child={stdin:{writable:true,write(line,done){const command=JSON.parse(line);queueMicrotask(()=>runner.consume(Buffer.from(JSON.stringify({type:'response',id:command.id,success:true,data:{sessionId:'switched-session'}})+'\n')));done?.();}}};
+ await assert.rejects(()=>runner.request('get_state'),/session_identity_changed/);runner.stopWithError(new Error('finished'));
+});

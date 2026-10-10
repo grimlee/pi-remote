@@ -17,6 +17,7 @@ let sessions = [];
 let current = null;
 let controlBusy=false;
 let controlMode="settings";
+let controlTicket=0;
 let controlSession=null;
 let controls=null;
 let authoritativeState={};
@@ -42,6 +43,13 @@ let pollingOnly = prefersPolling(navigator, location);
 let agentBusy = false;
 let activeStateRead = null;
 let lastRenderedSnapshot = null;
+let lastStateEtag=null;
+let historyMeta=null;
+let historyStart=0;
+let historyMessages=[];
+let latestSnapshot=null;
+let browsingOlder=false;
+let loadingOlder=false;
 const renderedNodes = new Map();
 let liveSignature = null;
 let renderTools = {};
@@ -106,6 +114,7 @@ async function api(url, options = {}) {
       ...options,
       signal: controller.signal
     });
+    if(response.status===304)return {unchanged:true};
     let value;
     try { value = await response.json(); } catch (err) {
       if (response.ok) throw err;
@@ -113,6 +122,7 @@ async function api(url, options = {}) {
     }
     if (response.status === 401 && url !== "/api/login") showLogin();
     if (!response.ok) throw Object.assign(new Error(value.error || value.status || "HTTP " + response.status), { status: response.status });
+    if(response.headers?.get && value && typeof value==='object') value.etag=response.headers.get('etag');
     return value;
   } finally {
     clearTimeout(deadline);
@@ -308,7 +318,7 @@ function makeMessage(role, text, message = null) {
   return { block, body };
 }
 function renderMessages(messages) {
-  const visible = (messages || []).slice(-160);
+  const visible = (messages || []).slice(-320);
   const signature = JSON.stringify([visible, renderTools]);
   if (signature === lastRenderedSnapshot) { updateJumpButton(); return; }
   lastRenderedSnapshot = signature;
@@ -316,16 +326,16 @@ function renderMessages(messages) {
   const keep = new Set();
   for (let i=0; i<visible.length; i++) {
     const message = visible[i]; if (!message) continue;
-    const key = String((messages || []).length - visible.length + i);
+    const key = String(historyStart + (messages || []).length - visible.length + i);
     keep.add(key);
-    const sig = JSON.stringify([message, renderTools]);
+    const sig = JSON.stringify([message,(message.content||[]).filter?.(c=>c?.type==='toolCall')?.map(c=>renderTools[c.id])]);
     let item = renderedNodes.get(key);
     if (!item || item.signature !== sig) {
       const open = item?.body.querySelectorAll?.('details[open]');
       const opened = new Set(open ? [...open].map(d=>d.dataset.detailKey) : []);
       const next = makeMessage(message.role, '', message); next.signature = sig;
       if (item) item.block.replaceWith(next.block);
-      else messagesView.insertBefore(next.block, liveBlock);
+      else {const following=[...renderedNodes.entries()].find(([k])=>Number(k)>Number(key))?.[1]?.block;messagesView.insertBefore(next.block,following||liveBlock);}
       for (const detail of next.body.querySelectorAll?.('details') || []) detail.open = opened.has(detail.dataset.detailKey);
       item = next; renderedNodes.set(key,item);
     }
@@ -351,19 +361,24 @@ function appendLive(delta) {
   if (delta) setLiveText(liveText + delta);
 }
 function renderSnapshot(data) {
+  if(data.etag)lastStateEtag=data.etag;
   agentBusy = !!data.busy;
   renderRequests(data.uiRequests || []);
   if(data.notice?.message) $("sessionStatus").title=String(data.notice.message);
   authoritativeState=data.state || {};
   if(current && authoritativeState.sessionName) {current.name=authoritativeState.sessionName;$("sessionTitle").textContent=current.name;}
   if(current && authoritativeState.model) current.model=authoritativeState.model.provider+'/'+authoritativeState.model.id;
-  const ctx=controls?.stats?.contextUsage;
+  const ctx=data.contextUsage || controls?.stats?.contextUsage;
   $('sessionStatus').textContent=[authoritativeState.model?.name||authoritativeState.model?.id,authoritativeState.thinkingLevel ? 'Thinking '+authoritativeState.thinkingLevel : '',ctx?.percent!=null?'上下文 '+ctx.percent.toFixed(1)+'%':'',data.busy?'运行中':'空闲'].filter(Boolean).join(' · ');
   renderTools = {};
   for (const m of data.messages || []) if (m?.role==='toolResult') renderTools[m.toolCallId] = {status:m.isError?'失败':'成功'};
   for (const t of data.tools || []) renderTools[t.toolCallId] = {status:t.status};
-  renderMessages(data.messages);
-  const message = data.busy && data.liveMessage;
+  ingestHistory(data);
+  renderMessages(historyMessages);
+  renderToolProgress(data.tools||[]);
+  const last=data.messages?.at(-1);
+  const sameLive=last?.role==='assistant' && data.liveMessage && (last.timestamp && last.timestamp===data.liveMessage.timestamp || JSON.stringify(last)===JSON.stringify(data.liveMessage));
+  const message = data.busy && !sameLive && data.liveMessage;
   const sig = message ? JSON.stringify([message,renderTools]) : null;
   if (message && sig !== liveSignature) {
     const nearBottom = atBottom();
@@ -383,10 +398,12 @@ async function syncState(expectedEpoch = epoch) {
   const read = new AbortController();
   activeStateRead = read;
   try {
-    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state", { signal: read.signal });
+    const data = await api("/api/sessions/" + encodeURIComponent(current.id) + "/state", { signal: read.signal, headers:lastStateEtag?{'If-None-Match':lastStateEtag}:{} });
     if (expectedEpoch !== epoch) return;
+    if(data.unchanged){setConnection(realtimeConnected ? '实时事件流已连接' : 'Pi 会话已连接 · 稳定同步模式','good');await reconcileCommand(current.id,read.signal);return true;}
+    lastStateEtag=data.etag||null;
     renderSnapshot(data);
-    setActivity(data.busy ? "Pi 正在工作" : "会话已同步");
+    setActivity(data.uiRequests?.length ? "Pi 等待你响应" : data.busy ? "Pi 正在工作" : "会话已同步");
     setConnection(realtimeConnected ? "已连接 · 会话状态已同步" : "Pi 会话已连接 · 稳定同步模式", "good");
     await reconcileCommand(current.id, read.signal);
     return true;
@@ -511,7 +528,7 @@ async function openSession(session) {
   epoch++;
   const thisEpoch = epoch;
   current = session;
-  agentBusy = false;controls=null;authoritativeState={};attachments=[];renderAttachments();lastRequestSignature=null;$("interactiveRequests").replaceChildren();$("interactiveRequests").hidden=true;$("attachImage").disabled=false;
+  agentBusy = false;lastStateEtag=null;historyMeta=null;historyStart=0;historyMessages=[];latestSnapshot=null;browsingOlder=false;controls=null;authoritativeState={};attachments=[];renderAttachments();lastRequestSignature=null;$("interactiveRequests").replaceChildren();$("interactiveRequests").hidden=true;$("attachImage").disabled=false;
   $('controlPanel').hidden=true;$('sessionSettings').disabled=false;
   memory.selected(session.id);
   pendingCommand = memory.pending(session.id);
@@ -547,6 +564,49 @@ async function openSession(session) {
       retryRecovery(thisEpoch);
     }
   }
+}
+function ingestHistory(data) {
+  if(!data.history) {historyMessages=data.messages||[];historyStart=0;return;}
+  latestSnapshot=data;
+  const page=data.history;
+  if(!browsingOlder || !historyMeta || page.total<historyMeta.total) {
+    historyMessages=data.messages;historyStart=page.start;browsingOlder=false;
+  } else {
+    // A reader looking at an older window keeps that bounded window. Newest
+    // messages remain in latestSnapshot until they choose "回到最新".
+    const end=historyStart+historyMessages.length;
+    for(let index=Math.max(historyStart,page.start);index<Math.min(end,page.end);index++) historyMessages[index-historyStart]=data.messages[index-page.start];
+  }
+  historyMeta=page;
+  $('loadOlder').hidden=historyStart<=0;
+  $('historyStatus').textContent='显示 '+(historyMessages.length?historyStart+1:0)+'–'+(historyStart+historyMessages.length)+' / '+page.total;
+}
+$('loadOlder').addEventListener('click',async()=>{
+  if(!current||loadingOlder||!historyMeta||historyStart<=0)return;
+  loadingOlder=true;$('loadOlder').disabled=true;const expected=epoch;const oldHeight=messagesView.scrollHeight;const oldTop=messagesView.scrollTop;
+  const viewportTop=messagesView.getBoundingClientRect?.().top;
+  const anchor=[...renderedNodes.values()].find(item=>item.block.getBoundingClientRect?.().bottom>viewportTop)?.block;
+  const anchorTop=anchor?.getBoundingClientRect?.().top;
+  try {
+    const data=await api('/api/sessions/'+encodeURIComponent(current.id)+'/state?limit=80&before='+historyStart+'&revision='+encodeURIComponent(historyMeta.revision));
+    if(expected!==epoch)return;
+    const combined=[...data.messages,...historyMessages];
+    const dropped=Math.max(0,combined.length-320);
+    historyMessages=combined.slice(0,320);historyStart=data.history.start;browsingOlder=true;
+    // Render messages chronologically, inserting older rows before the existing
+    // ones while preserving nodes and expansion state for overlapping rows.
+    lastRenderedSnapshot=null;renderMessages(historyMessages);
+    messagesView.scrollTop=anchor?.isConnected && anchorTop!==undefined ? oldTop+anchor.getBoundingClientRect().top-anchorTop : oldTop+(messagesView.scrollHeight-oldHeight);
+    $('loadOlder').hidden=historyStart<=0;
+    $('historyStatus').textContent='显示 '+(historyStart+1)+'–'+(historyStart+historyMessages.length)+' / '+historyMeta.total;
+    if(dropped)setActivity('保留最近阅读的 320 条记录；点击回到最新返回当前回复');
+  } catch(err){if(expected===epoch){setActivity(err.status===409?'历史已更新，请同步后再次载入':err.message);if(err.status===409){browsingOlder=false;lastStateEtag=null;void syncState(expected);}}}
+  finally{loadingOlder=false;$('loadOlder').disabled=false;}
+});
+function renderToolProgress(tools) {
+  const view=$('toolProgress');const active=tools.filter(t=>t.status==='运行中').slice(-6);const sig=JSON.stringify(active);if(view.dataset?.signature===sig)return;
+  if(view.dataset)view.dataset.signature=sig;view.replaceChildren();view.hidden=!active.length;
+  for(const tool of active){const item=makeMessage('toolResult','',{role:'toolResult',toolName:tool.toolName,toolCallId:tool.toolCallId,content:[{type:'text',text:tool.partialSummary||'工具正在运行…'}]});item.body.querySelector?.('summary')?.replaceChildren(document.createTextNode('运行中 · '+tool.toolName));view.append(item.body);}
 }
 async function submissionFingerprint(message,images) {return messageFingerprint(images.length?JSON.stringify([message,images]):message);}
 function renderAttachments() {
@@ -611,6 +671,7 @@ function fillSelect(node, values, selected) {
 }
 async function showControls(mode) {
   if(controlBusy) return;
+  const ticket=++controlTicket;
   controlMode=mode;controlSession=current?{...current}:null;
   const expected=epoch;
   $('controlError').textContent='';$('controlPanel').hidden=false;
@@ -619,27 +680,27 @@ async function showControls(mode) {
   $('applyControl').disabled=true;
   try {
     if(mode==='new') {
-      const data=await api('/api/workspaces');fillSelect($('workspaceSelect'),data.workspaces.map(w=>[w.id,w.name]));
+      const data=await api('/api/workspaces');if(ticket!==controlTicket||expected!==epoch)return;fillSelect($('workspaceSelect'),data.workspaces.map(w=>[w.id,w.name]));
       const pending=readOperation('create');if(pending) {
         const receipt=await api('/api/commands/'+pending.id).catch(()=>null);
         if(receipt?.status==='accepted' && receipt.result) {saveOperation('create',null);await loadSessions();await openSession(receipt.result);return;}
       }
     } else {
       if(!controlSession)throw new Error('请先选择会话');
-      controls=await api('/api/sessions/'+encodeURIComponent(controlSession.id)+'/controls');
-      if(expected!==epoch)return;
+      const data=await api('/api/sessions/'+encodeURIComponent(controlSession.id)+'/controls');
+      if(expected!==epoch||ticket!==controlTicket)return;controls=data;
       fillSelect($('commandSelect'),controls.commands.map(c=>[c.name,'/'+c.name+' · '+(c.description||c.source)]));
       $('sessionName').value=authoritativeState.sessionName||controlSession.name;
       fillSelect($('modelSelect'),controls.models.map(m=>[JSON.stringify([m.provider,m.id]),m.provider+' / '+(m.name||m.id)]),authoritativeState.model?JSON.stringify([authoritativeState.model.provider,authoritativeState.model.id]):null);
       fillSelect($('thinkingSelect'),controls.levels.map(l=>[l,l]),authoritativeState.thinkingLevel);
     }
-    if(expected===epoch)$('applyControl').disabled=false;
-  } catch(err){$('controlError').textContent=err.message;}
+    if(expected===epoch&&ticket===controlTicket)$('applyControl').disabled=false;
+  } catch(err){if(expected===epoch&&ticket===controlTicket)$('controlError').textContent=err.message;}
 }
 $('insertCommand').addEventListener('click',()=>{const name=$('commandSelect').value;if(name){promptBox.value='/'+name+' ';$('controlPanel').hidden=true;resizeComposer();promptBox.focus();}});
 $('newSession').addEventListener('click',()=>void showControls('new'));
 $('sessionSettings').addEventListener('click',()=>void showControls('settings'));
-$('closeControl').addEventListener('click',()=>{$('controlPanel').hidden=true;});
+$('closeControl').addEventListener('click',()=>{controlTicket++;$('controlPanel').hidden=true;});
 $('controlForm').addEventListener('submit',async event=>{
   event.preventDefault();if(controlBusy)return;controlBusy=true;$('applyControl').disabled=true;$('controlError').textContent='';
   const selected=controlSession;const expected=epoch;
@@ -718,7 +779,7 @@ $("composer").addEventListener("submit", async event => {
     setActivity("命令已接收，等待 Pi 输出…");
     scheduleSync(400);
   } catch (err) {
-    if ([400,409,413].includes(err.status)) {memory.pending(sessionId,null);pendingCommand=null;if(current?.id===sessionId)setActivity("命令未提交："+err.message);return;}
+    if ([400,409,413,422].includes(err.status)) {memory.pending(sessionId,null);pendingCommand=null;if(current?.id===sessionId)setActivity("命令未提交："+err.message);return;}
     if (current?.id === sessionId) {
       setActivity("发送结果未知；请确认会话状态，重试相同文本不会重复提交");
       setConnection("命令状态：" + err.message, "bad");
@@ -753,7 +814,7 @@ $("openSidebar").addEventListener("click", () => setSidebarOpen(true));
 $("closeSidebar").addEventListener("click", () => setSidebarOpen(false));
 sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
 sessionSearch.addEventListener("input", () => renderSessions());
-jumpLatest.addEventListener("click", () => scrollBottom());
+jumpLatest.addEventListener("click",()=>{if(browsingOlder && latestSnapshot){browsingOlder=false;lastRenderedSnapshot=null;ingestHistory(latestSnapshot);renderMessages(historyMessages);}scrollBottom();});
 messagesView.addEventListener("scroll", updateJumpButton, { passive: true });
 promptBox.addEventListener("input", resizeComposer);
 document.addEventListener("keydown", event => {

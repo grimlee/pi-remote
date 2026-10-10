@@ -28,3 +28,9 @@ test('large rich text keeps the complete code but bounds expensive highlighting'
   richText(node,'```js\n'+text+'```',t=>copied=t);assert.equal(node.querySelector('code').textContent,text);
   assert.equal(node.querySelector('code span'),null);node.querySelector('button').click();assert.equal(copied,text);
 });
+
+test('MathML math rendering remains inert and does not transform code literals',async()=>{
+ const node=document.createElement('div');richText(node,'Math \\(x^2 + y^2\\)\n\n`\\(literal\\)`\n\n$$\\href{javascript:alert(1)}{click}$$',()=>{});
+ for(let i=0;i<40&&!node.querySelector('math');i++)await new Promise(r=>setTimeout(r,10));
+ assert.ok(node.querySelector('math'));assert.equal(node.querySelector('a[href^="javascript:"],script,iframe'),null);assert.match(node.querySelector('code').textContent,/literal/);
+});

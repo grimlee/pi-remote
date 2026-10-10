@@ -7,6 +7,7 @@ import path from "node:path";
 import { discoverSessions, publicSession, PiRunner } from "./registry.mjs";
 import { Authentication, CommandLedger, safeOrigin, readJson, stateDir } from "./security.mjs";
 
+import { historyPage } from "./history.mjs";
 import { validateImages, MAX_IMAGE_REQUEST } from "./images.mjs";
 import { OwnedSessions, publicModel, validateControl, invalid } from "./control.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -60,7 +61,7 @@ function securityHeaders(res) {
 
 export function createPwaServer(options = {}) {
   const dir = options.stateDir || stateDir();
-  const auth = new Authentication({ dir, ...(options.token ? { token: options.token } : {}) });
+  const auth = new Authentication({ dir, ...(options.cookieName?{cookieName:options.cookieName}:{}), ...(options.token ? { token: options.token } : {}) });
   const ledger = new CommandLedger(dir);
   // Only explicitly configured PWA-owned storage is opened. Native Pi sessions
   // are never the implicit default for this branch.
@@ -92,13 +93,14 @@ export function createPwaServer(options = {}) {
     if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
     let runner = runners.get(id);
     if (runner && runner.session.generation !== session.generation) {
+      if(runner.busy || runner.uiRequests.size || runner.pending.size)throw invalid('session_generation_changed',409);
       runner.stop();
       runners.delete(id);
       runner = null;
     }
     if (!runner || runner.dead) {
       if (runners.size >= 8) {
-        const idle = [...runners.entries()].find(([, value]) => !value.busy);
+        const idle = [...runners.entries()].find(([, value]) => !value.busy && !value.uiRequests.size && !value.pending.size);
         if (!idle) throw Object.assign(new Error("Too many active sessions"), { status: 429 });
         idle[1].stop();
         runners.delete(idle[0]);
@@ -232,7 +234,13 @@ export function createPwaServer(options = {}) {
       const runner = await runnerFor(id);
       if (action === "state" && method === "GET") {
         const snapshot = await runner.snapshot();
-        json(res, 200, snapshot);
+        const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):160;
+        const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):undefined;
+        const page=historyPage(snapshot.messages,{limit,before,revision:url.searchParams.get('revision')||undefined});
+        const value={...snapshot,...page};
+        const etag='"'+createHash('sha256').update(JSON.stringify(value)).digest('hex')+'"';
+        if(req.headers['if-none-match']===etag){res.writeHead(304,{'ETag':etag,'Cache-Control':'no-store'});res.end();return;}
+        json(res, 200, value, {ETag:etag});
         return;
       }
       if (action === "events" && method === "GET") {
@@ -305,9 +313,10 @@ export function createPwaServer(options = {}) {
             if(body.type==='set_model'){runner.session.model=values.provider+'/'+values.modelId;await owned.save(runner.session);}
             if(body.type==='set_thinking_level'){runner.session.thinkingLevel=values.level;await owned.save(runner.session);}
             json(res,202,{status:'accepted',commandId:body.commandId});
-          }catch{json(res,503,{status:'unknown',commandId:body.commandId});}return;
+          }catch(e){if(e.rpcRejected){receipt.status='rejected';ledger.save(receipt);error(res,422,'rpc_rejected');}else json(res,503,{status:'unknown',commandId:body.commandId});}return;
         }
         if (body.type === "abort") {
+          await runner.request("get_state");
           await runner.request("abort", {});
           json(res, 200, { status: "accepted" });
           return;
@@ -326,7 +335,8 @@ export function createPwaServer(options = {}) {
           json(res, 200, { status: prior.status, deduplicated: true, commandId: body.commandId });
           return;
         }
-        if(images.length){const state=await runner.request('get_state');if(!state.model?.input?.includes('image'))throw invalid('model_does_not_support_images');}
+        const promptState=await runner.request('get_state');
+        if(images.length && !promptState.model?.input?.includes('image'))throw invalid('model_does_not_support_images');
         if(body.message.trimStart().startsWith('/')) {
           const name=body.message.trimStart().split(/\s/)[0].slice(1);
           const commands=await runner.request('get_commands');if(!commands?.commands?.some(c=>c.name===name))throw invalid('unsupported_slash_command');
@@ -340,7 +350,8 @@ export function createPwaServer(options = {}) {
           receipt.status = "accepted";
           ledger.save(receipt);
           json(res, 202, { status: "accepted", commandId: body.commandId });
-        } catch {
+        } catch (e) {
+          if(e.rpcRejected){receipt.status="rejected";ledger.save(receipt);error(res,422,"rpc_rejected");return;}
           // Unknown is intentionally not re-dispatched automatically: at-most-once over double execution.
           json(res, 503, { status: "unknown", commandId: body.commandId });
         }

@@ -39,3 +39,11 @@ test('rename/model/thinking expose only public metadata and reject stale or unsu
  assert.equal((await request(url+'/commands',{type:'prompt',message:'/settings',commandId:'slash-command-unsupported-0001'})).body.error,'unsupported_slash_command');
  assert.equal((await request(url+'/commands',{type:'prompt',message:'/test-command',commandId:'slash-command-supported-0001'})).status,202);
 });
+
+test('state ETags avoid retransmitting unchanged pages and remain authenticated',async t=>{
+ const f=await fixture(t);const base='http://127.0.0.1:'+f.app.server.address().port;const cookie=f.app.auth.cookie({headers:{host:'localhost'}}).split(';')[0];const url=base+'/api/sessions/'+f.session.id+'/state';
+ const first=await fetch(url,{headers:{Cookie:cookie}});const etag=first.headers.get('etag');assert.ok(etag);const data=await first.json();assert.ok(data.history);
+ const second=await fetch(url,{headers:{Cookie:cookie,'If-None-Match':etag}});assert.equal(second.status,304);assert.equal(await second.text(),'');
+ assert.equal((await fetch(url,{headers:{'If-None-Match':etag}})).status,401);
+ assert.equal((await fetch(url+'?limit=0',{headers:{Cookie:cookie}})).status,400);
+});
