@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
 import { gzipSync } from "node:zlib";
 import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { discoverSessions, publicSession, PiRunner, DEFAULT_SESSION_DIR } from "./registry.mjs";
-import { Authentication, CommandLedger, safeOrigin, readJson, stateDir } from "./security.mjs";
+import { publicSession } from "./registry.mjs";
+import { PiService } from "./service.mjs";
+import { Authentication, safeOrigin, readJson, stateDir } from "./security.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const files = new Map([
@@ -57,51 +57,11 @@ function securityHeaders(res) {
 export function createPwaServer(options = {}) {
   const dir = options.stateDir || stateDir();
   const auth = new Authentication({ dir, ...(options.token ? { token: options.token } : {}) });
-  const ledger = new CommandLedger(dir);
-  const sessionRoot = options.sessionDir || DEFAULT_SESSION_DIR;
-  const executable = options.executable || process.env.PI_REMOTE_PWA_PI_COMMAND || "pi";
-  const runners = new Map();
-  let records = new Map();
+  const service = new PiService({...options, stateDir: dir});
+  const ledger = service.ledger;
+  const refreshSessions = () => service.refreshSessions(100);
+  const runnerFor = id => service.runnerFor(id);
   let stopped = false;
-
-  async function refreshSessions() {
-    const list = await discoverSessions(sessionRoot);
-    records = new Map(list.map(s => [s.id, s]));
-    return list;
-  }
-
-  async function runnerFor(id) {
-    let session = records.get(id);
-    if (!session) {
-      await refreshSessions();
-      session = records.get(id);
-    }
-    if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
-    let runner = runners.get(id);
-    if (runner && runner.session.generation !== session.generation) {
-      runner.stop();
-      runners.delete(id);
-      runner = null;
-    }
-    if (!runner || runner.dead) {
-      if (runners.size >= 8) {
-        const idle = [...runners.entries()].find(([, value]) => !value.busy);
-        if (!idle) throw Object.assign(new Error("Too many active sessions"), { status: 429 });
-        idle[1].stop();
-        runners.delete(idle[0]);
-      }
-      runner = new PiRunner(session, {
-        executable,
-        onClosed(closed) {
-          if (runners.get(id) === closed) runners.delete(id);
-        }
-      });
-      runners.set(id, runner);
-      runner.ready = runner.start();
-    }
-    await runner.ready;
-    return runner;
-  }
 
   const server = createServer(async (req, res) => {
     securityHeaders(res);
@@ -228,46 +188,24 @@ export function createPwaServer(options = {}) {
           json(res, 200, { status: "accepted" });
           return;
         }
-        if (typeof body.message !== "string" || !body.message.trim() || body.message.length > 50000
-          || typeof body.commandId !== "string" || !/^[\w-]{10,100}$/.test(body.commandId)) {
-          error(res, 400, "invalid_prompt"); return;
-        }
-        const hash = createHash("sha256").update(id + "\n" + body.message).digest("hex");
-        const prior = ledger.get(body.commandId);
-        if (prior) {
-          if (prior.hash !== hash || prior.sessionId !== id) {
-            error(res, 409, "command_id_conflict"); return;
-          }
-          json(res, 200, { status: prior.status, deduplicated: true, commandId: body.commandId });
-          return;
-        }
-        const receipt = { id: body.commandId, sessionId: id, hash, status: "unknown", at: Date.now() };
-        ledger.save(receipt);
-        try {
-          await runner.request("prompt", { message: body.message }, 30000);
-          receipt.status = "accepted";
-          ledger.save(receipt);
-          json(res, 202, { status: "accepted", commandId: body.commandId });
-        } catch {
-          // Unknown is intentionally not re-dispatched automatically: at-most-once over double execution.
-          json(res, 503, { status: "unknown", commandId: body.commandId });
-        }
+        const result = await service.command(id, body);
+        json(res, result.deduplicated ? 200 : result.status === "accepted" ? 202 : 503, result);
         return;
       }
       error(res, 405, "method_not_allowed");
     } catch (e) {
-      error(res, e.status || 503, e.status === 404 ? "session_not_found" : "backend_unavailable");
+      error(res, e.status || 503, e.code || (e.status === 404 ? "session_not_found" : "backend_unavailable"));
     }
   });
 
   async function close() {
     if (stopped) return;
     stopped = true;
-    for (const runner of runners.values()) runner.stop();
+    service.close();
     server.closeIdleConnections();
     await new Promise(resolve => server.close(resolve));
   }
-  return { server, auth, ledger, close };
+  return { server, auth, ledger, service, close };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

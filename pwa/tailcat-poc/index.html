@@ -6,21 +6,14 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https://tailcat.dev https://*.ipn.dev wss://*.ipn.dev; img-src 'self'; base-uri 'none'; form-action 'self'">
 <title>Pi Remote · Tailcat Browser PoC</title>
-<style>
-:root{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color-scheme:dark;background:#111923;color:#e3edf8}
-*{box-sizing:border-box}body{margin:0;padding:24px 18px}main{max-width:500px;margin:35px auto}h1{font-size:24px}p{line-height:1.6;color:#a5b9cb}label{display:block;font-size:13px;color:#c5d3e0;margin:22px 0 7px}
-input,button{font:inherit;width:100%;padding:14px 12px;border-radius:12px}
-input{border:1px solid #3f5264;color:#eaf3fb;background:#1d2c3b}button{margin-top:17px;border:0;font-weight:650;color:#102033;background:#8bcbfa}button:disabled{opacity:.55}
-output{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;background:#1b2a38;border-radius:12px;min-height:120px;margin:16px 0;font-size:13px;line-height:1.6}
-small{color:#8da6bc;line-height:1.6;display:block}
-</style>
+<link rel="stylesheet" href="./style.css">
 <script src="./wasm_exec.js" defer></script>
 <script type="module" src="./client.js"></script>
 </head>
 <body>
 <main>
 <h1>Pi Remote · Tailcat WASM</h1>
-<p>这是**独立的连通性测试**，不是完整 Agent 客户端。通过 Tailcat 浏览器 WASM → DERP → Omarchy 上的隔离 Echo 服务验证无 VPN 访问。</p>
+<p>这是独立的连通性测试，不是完整 Agent 客户端。通过 Tailcat 浏览器 WASM → DERP → Omarchy 上的隔离 Echo 服务验证无 VPN 访问。</p>
 <label for="addr">Tailcat 临时地址（请从 Host 私下复制，不放进 URL）</label>
 <input id="addr" type="password" placeholder="tc…" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false">
 <label for="port">测试端口</label>

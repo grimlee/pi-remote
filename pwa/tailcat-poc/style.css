@@ -1,0 +1,6 @@
+:root{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color-scheme:dark;background:#111923;color:#e3edf8}
+*{box-sizing:border-box}body{margin:0;padding:24px 18px}main{max-width:500px;margin:35px auto}h1{font-size:24px}p{line-height:1.6;color:#a5b9cb}label{display:block;font-size:13px;color:#c5d3e0;margin:22px 0 7px}
+input,button{font:inherit;width:100%;padding:14px 12px;border-radius:12px}
+input{border:1px solid #3f5264;color:#eaf3fb;background:#1d2c3b}button{margin-top:17px;border:0;font-weight:650;color:#102033;background:#8bcbfa}button:disabled{opacity:.55}
+output{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;background:#1b2a38;border-radius:12px;min-height:120px;margin:16px 0;font-size:13px;line-height:1.6}
+small{color:#8da6bc;line-height:1.6;display:block}

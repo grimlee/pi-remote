@@ -4,7 +4,13 @@ on:
     branches: ["experiment/pwa-tailcat-wasm"]
     paths:
       - "pwa/tailcat-poc/**"
+      - "pwa/tailcat/**"
+      - "pwa/service.mjs"
+      - "pwa/public/**"
+      - "pwa/test/**"
       - ".github/workflows/tailcat-browser-poc.yml"
+  pull_request:
+    paths: ["pwa/**", ".github/workflows/tailcat-browser-poc.yml"]
   workflow_dispatch:
 jobs:
   wasm-poc:
@@ -22,6 +28,7 @@ jobs:
           node --check pwa/tailcat-poc/client.js
           node --check pwa/tailcat-poc/probe-server.mjs
           node --test pwa/tailcat-poc/probe.test.mjs
+          npm run test:pwa
       - uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
@@ -35,13 +42,33 @@ jobs:
           mkdir -p tailcat-browser-dist
           cp pwa/tailcat-poc/index.html tailcat-browser-dist/
           cp pwa/tailcat-poc/client.js tailcat-browser-dist/
+          cp pwa/tailcat-poc/style.css tailcat-browser-dist/
           cp wasm-build/wasm_exec.js wasm-build/main.wasm.gz tailcat-browser-dist/
           cp upstream-tailcat/LICENSE tailcat-browser-dist/TAILCAT-LICENSE
           gzip -t tailcat-browser-dist/main.wasm.gz
           ls -lh tailcat-browser-dist
+          cp upstream-tailcat/LICENSE wasm-build/TAILCAT-LICENSE
+          node pwa/tailcat/build.mjs wasm-build tailcat-secure-dist
+      - name: Browser transport acceptance with mock Pi only
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL https://github.com/tailscale/tailcat/releases/download/v0.6.0/tailcat_0.6.0_linux_amd64.tar.gz -o tailcat.tar.gz
+          echo 'f3597a9ad02f5cca538f8f5a6f89123910bce3e9611d1e5a8e96d5f2d3cc90fd  tailcat.tar.gz' | sha256sum -c -
+          mkdir tailcat-cli
+          tar -xzf tailcat.tar.gz -C tailcat-cli
+          npm install --no-save --package-lock=false playwright
+          npx playwright install --with-deps chromium
+          node pwa/tailcat/browser-smoke.mjs wasm-build "$GITHUB_WORKSPACE/tailcat-cli/tailcat" chromium 2
       - uses: actions/upload-artifact@v4
         with:
           name: pi-remote-tailcat-browser-poc
           path: tailcat-browser-dist/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-remote-tailcat-secure-static
+          path: tailcat-secure-dist/
           if-no-files-found: error
           retention-days: 14

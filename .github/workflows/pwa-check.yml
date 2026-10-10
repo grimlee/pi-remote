@@ -19,6 +19,8 @@ jobs:
           node --check pwa/registry.mjs
           node --check pwa/security.mjs
           node --check pwa/server.mjs
+          node --check pwa/service.mjs
+          for file in pwa/tailcat/*.mjs; do node --check "$file"; done
           node --check pwa/public/app.js
           node --check pwa/public/sw.js
       - name: Node integration tests

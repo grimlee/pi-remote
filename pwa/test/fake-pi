@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { readFileSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+const argument = name => process.argv[process.argv.indexOf(name) + 1];
+const sessionFile = process.argv.includes('--session') ? argument('--session') : path.join(argument('--session-dir'), 'new-' + randomUUID() + '.jsonl');
+const sessionId = process.argv.includes('--session') ? JSON.parse(readFileSync(sessionFile, 'utf8').split('\n')[0]).id : 'session_' + randomUUID();
+let sessionName = '', model = {id: 'test-model', provider: 'mock', name: 'Mock model'};
 const messages = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
 const output = event => process.stdout.write(JSON.stringify(event) + "\n");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -8,7 +15,7 @@ for await (const line of lines) {
   try { command = JSON.parse(line); } catch { continue; }
   const { id, type } = command;
   if (type === "get_state") {
-    output({ type: "response", id, command: type, success: true, data: { sessionId: "session_test_12345", isStreaming: false } });
+    output({ type: "response", id, command: type, success: true, data: { sessionId, sessionFile, sessionName, model, isStreaming: false } });
   } else if (type === "get_messages") {
     output({ type: "response", id, command: type, success: true, data: { messages } });
   } else if (type === "prompt") {
@@ -16,14 +23,26 @@ for await (const line of lines) {
     output({ type: "response", id, command: type, success: true });
     output({ type: "agent_start" });
     setTimeout(() => {
-      output({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "mock reply" } });
-      messages.push({ role: "assistant", content: [{ type: "text", text: "mock reply" }] });
+      const reply = command.message === 'long_test' ? 'word '.repeat(10000) + '长🙂'.repeat(20000) : 'mock reply';
+      output({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: reply } });
+      messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
       output({ type: "message_end" });
       output({ type: "turn_end" });
       output({ type: "agent_end" });
     }, 40);
   } else if (type === "abort") {
     output({ type: "response", id, command: type, success: true });
+  } else if (type === 'set_session_name') {
+    sessionName = command.name;
+    mkdirSync(path.dirname(sessionFile), {recursive: true});
+    try { readFileSync(sessionFile); } catch { writeFileSync(sessionFile, JSON.stringify({type:'session', id:sessionId, timestamp:new Date().toISOString(), cwd:process.cwd()})+'\n'); }
+    appendFileSync(sessionFile, JSON.stringify({type:'session_info', name:sessionName})+'\n');
+    output({type:'response', id, command:type, success:true});
+  } else if (type === 'get_available_models') {
+    output({type:'response', id, command:type, success:true, data:{models:[model]}});
+  } else if (type === 'set_model') {
+    model = {id:command.modelId,provider:command.provider};
+    output({type:'response', id, command:type, success:true, data:model});
   } else {
     output({ type: "response", id, command: type, success: false, error: "unsupported test command" });
   }
